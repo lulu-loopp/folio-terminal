@@ -41,7 +41,9 @@ fn a_hovered_page_is_drawn_once_per_version_of_its_file() {
     let PeekPageOutcome::Drawn { mtime, raster } = raster_peek_page(&path, 0, fit, None) else {
         panic!("a window holding no pixels is answered with pixels");
     };
-    let first = raster.expect("and a real PDF draws");
+    let first = raster
+        .expect("a scratch file nobody holds")
+        .expect("and a real PDF draws");
     let mtime = mtime.expect("carrying the time the file said it was written");
     assert!(first.width <= fit.0 && first.height <= fit.1);
 
@@ -73,8 +75,8 @@ fn a_hovered_page_is_drawn_once_per_version_of_its_file() {
     };
     assert_eq!(seen, Some(later), "and the new stamp comes home with it");
     assert_eq!(
-        raster.map(|raster| (raster.width, raster.height)),
-        Some((first.width, first.height))
+        raster.map(|raster| raster.map(|raster| (raster.width, raster.height))),
+        Ok(Some((first.width, first.height)))
     );
 
     // A file that is not there at all is `Drawn` with nothing in it rather
@@ -86,7 +88,7 @@ fn a_hovered_page_is_drawn_once_per_version_of_its_file() {
         panic!("a file that has gone is not 'unchanged'");
     };
     assert_eq!(mtime, None);
-    assert_eq!(raster, None);
+    assert_eq!(raster, Ok(None));
     std::fs::remove_dir_all(&dir).ok();
 }
 

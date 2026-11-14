@@ -44,7 +44,9 @@
 
 use std::path::{Path, PathBuf};
 
-use bt_platform::video::{VideoFrame, decode_first_frame_measured, first_frame};
+use bt_platform::video::{
+    VideoFrame, decode_first_frame, decode_first_frame_measured, first_frame,
+};
 
 /// The hover card's own box, which is the size the product asks for.
 const CARD: (u32, u32) = (280, 160);
@@ -208,6 +210,14 @@ fn both_shipped_recordings_give_up_a_frame_of_the_colour_they_were_made_in() {
 /// asserted is the pair of things that are true either way — nothing comes back
 /// larger than the file, and whatever size comes back has the file's own shape.
 ///
+/// **It asks [`decode_first_frame`], the half with no clock over it**
+/// (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK), for the reason the case above and the
+/// in-crate fixture case do: through `first_frame` this was a decode racing the
+/// three-second `video::FIRST_FRAME_BUDGET`, and a loaded machine that lost the
+/// race read "no frame" for a file it had decoded. The fit is the subject, and
+/// the fit is the same on both halves; the budget is pinned in each arm's own
+/// module, on work that has no decoder in it.
+///
 /// MUTATION: fit by `cover` rather than by `contain` in either arm and the
 /// frame comes back 80×80 with the aspect assertion naming it; drop the clamp
 /// that refuses to enlarge and the case above comes back 280×210.
@@ -215,7 +225,7 @@ fn both_shipped_recordings_give_up_a_frame_of_the_colour_they_were_made_in() {
 fn a_frame_asked_for_smaller_keeps_its_proportions() {
     let file = fixture("folio-video-test.mp4");
     let box_ = (80_u32, 80_u32);
-    let frame = first_frame(&file, box_.0, box_.1);
+    let frame = decode_first_frame(&file, box_.0, box_.1);
     if !HAS_DECODER {
         assert_eq!(frame, None, "a machine with no decoder draws nothing");
         return;
@@ -258,9 +268,11 @@ fn a_frame_asked_for_smaller_keeps_its_proportions() {
 ///
 /// The refusal path through whichever real platform this is: a file that is not
 /// there, a file that is empty, and a file whose bytes are text with a video's
-/// name on it. All three must be the module's one silence, on the caller's
-/// thread, with whatever the platform was given back — and the last of the three
-/// is the one that actually reaches the decoder and is turned away by it.
+/// name on it. None of them is drawn, on the caller's thread, with whatever the
+/// platform was given back — and the last of the three is the one that actually
+/// reaches the decoder and is turned away by it. Whether each is a refusal or a
+/// run-out is the budget's question on a loaded machine, and is stated on
+/// planted work beside each arm's `within_budget`, not here.
 ///
 /// MUTATION: `unwrap` any of the `?`s in either arm's decode and the third case
 /// takes the decoration worker down, which on the machine is a hover over a
@@ -271,22 +283,22 @@ fn nothing_that_is_not_a_video_is_drawn() {
     std::fs::create_dir_all(&dir).expect("a scratch directory");
 
     let missing = dir.join("no-such-file.mp4");
-    assert_eq!(first_frame(&missing, CARD.0, CARD.1), None);
+    assert_eq!(first_frame(&missing, CARD.0, CARD.1).ok(), None);
 
     let empty = dir.join("empty.mp4");
     std::fs::write(&empty, b"").expect("an empty file");
-    assert_eq!(first_frame(&empty, CARD.0, CARD.1), None);
+    assert_eq!(first_frame(&empty, CARD.0, CARD.1).ok(), None);
 
     let text = dir.join("renamed.mp4");
     std::fs::write(&text, b"this is not a video at all, whatever it is called")
         .expect("a text file");
-    assert_eq!(first_frame(&text, CARD.0, CARD.1), None);
+    assert_eq!(first_frame(&text, CARD.0, CARD.1).ok(), None);
 
     // A directory carrying a video's name, which is the one shape a file column
     // can hand this that is not a file at all.
     let folder = dir.join("folder.mp4");
     std::fs::create_dir_all(&folder).expect("a directory with a video's name");
-    assert_eq!(first_frame(&folder, CARD.0, CARD.1), None);
+    assert_eq!(first_frame(&folder, CARD.0, CARD.1).ok(), None);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

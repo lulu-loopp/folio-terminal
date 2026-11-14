@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::input::Keystroke;
+use crate::runtime::clipboard::PasteFrom;
 use crate::runtime::floats::float_dock_label;
 use crate::runtime::handoff::reveal_ask;
 use crate::runtime::math::answers_for;
@@ -15,7 +16,7 @@ use crate::{
     TabClick, TabRename, files, float, git_panel, hang_watch, home_shortened_path, i18n, marks,
     palette_index, path_opens_as_a_page, preview, profiles, seats, settings, toast, webnav,
 };
-use crate::{FilesRoot, TabState, pane_folder};
+use crate::{FilesRoot, TabState, TerminalPane, pane_folder};
 use anyhow::Result;
 use bt_layout::{SeatId, SeatLayout};
 use std::collections::{BTreeMap, BTreeSet};
@@ -796,7 +797,9 @@ impl<B: Backend> Runtime<'_, B> {
         files_root_of(
             self.sessions
                 .get(&self.focused_leaf)
-                .map(|leaf| leaf.folder(&crate::pane_folder::SystemProcessFolders)),
+                .map(|TerminalPane { session: leaf, .. }| {
+                    leaf.folder(&crate::pane_folder::SystemProcessFolders)
+                }),
             &bt_pty::SystemShellEnvironment,
         )
     }
@@ -1076,7 +1079,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// **The cut lives here** because the strip's width and the font are both
     /// here, and it is `settings::ellipsized_left` — the same cut the float's
-    /// foot takes, from the *front*, so `…ers\Alice\Developer\folio-terminal`
+    /// foot takes, from the *front*, so `…ers\Alice\Developer\lunar-workshop`
     /// keeps the segment that answers "where am I" (B23). The mock-up reaches it
     /// with `direction: rtl` and a `<bdi>` around the path; we draw our own text,
     /// so we simply cut the string and lay it out left to right, and the bidi
@@ -2814,7 +2817,7 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         };
         let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font);
-        let fitted = editor.fit(box_width, caret_width, true, &mut shape);
+        let (fitted, drawn) = editor.fit(name_box[0], box_width, caret_width, true, &mut shape);
         edit.text = fitted.text;
         edit.caret_px = fitted.caret_px;
         edit.selection = fitted.selection;
@@ -2822,6 +2825,7 @@ impl<B: Backend> Runtime<'_, B> {
         edit.refused = refused;
         let x = (name_box[0] + edit.caret_px).min(name_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, name_box[1], x + caret_width, name_box[3]]);
+        self.window.drawn_fields.name = Some(drawn);
     }
 
     /// C35, applied only where a landed directory has proved a selection gone.
@@ -3047,7 +3051,7 @@ impl<B: Backend> Runtime<'_, B> {
         let target = batch.target.filter(|_| !self.a_modal_holds_the_window());
         let pasted = match target {
             Some(target) => self
-                .paste_paths_into(target, batch.paths, "write dropped paths to PTY")
+                .paste_paths_into(target, batch.paths, PasteFrom::Drop)
                 .and_then(|written| {
                     // **The keyboard follows the path, and the window comes to
                     // the front with it** (owner's ruling 2026-09-17) — once for
@@ -3625,7 +3629,7 @@ pub(crate) fn dropped_files_seat_at(
 }
 
 /// **The folder a files card or a files column taken from a pane is rooted at** (issue #28,
-/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`crate::LeafSession::folder`] — its
+/// T-CWD-FROM-PROCESS): the folder the pane is standing in ([`crate::ShellSession::folder`] — its
 /// shell's last report, else its shell process's folder, else the folder it was opened in), and the
 /// account's home only when none of those can be said — which the root carries, so the card and
 /// the column say "Folder unknown" rather than showing a home folder as the pane's.

@@ -11,15 +11,16 @@ use crate::{
     HandoverInto, INITIAL_HEIGHT, INITIAL_WIDTH, LaunchPlan, LeafSeed, NewWindowParts,
     NewWindowPlan, PreviewRestore, PtyWakeSignal, RAIL_TRANSITION, RenameExit, RenameSubject,
     RevealTween, Runtime, TabSeed, TabState, TearGrip, WindowPosture, WindowRuntime, active_item,
-    attention_trace, close_wait_over, create_tab_state, dpi_snapshot,
+    agent_resume, attention_trace, close_wait_over, create_tab_state, dpi_snapshot,
     ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner, first_term_leaf,
     float, git, hang_watch, i18n, ime_outbound, ime_report, install_page_ground_color,
     install_theme_class_background, marks, mouse_trace, new_window_runtime, notify,
     opening_window_attributes, plan_launch, presentation_physical_size, preview, profiles, quit,
     rail_state_for, render_sidebar_mode, render_tab_layout, restore, restore_row_seed,
-    restore_window_placement, revive_plan, scrollback_quota, seats, seed, session_sidebar_mode,
-    session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
-    tabs_a_close_loses, toast, webnav, where_a_save_stands, window_surface_target,
+    restore_window_placement, revive_plan_with, scrollback_quota, seats, seed,
+    session_sidebar_mode, session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at,
+    startup_window_rect, tabs_a_close_loses, toast, webnav, where_a_save_stands,
+    window_surface_target,
 };
 use crate::{LeafView, TextScale, owner_door, revived_profile};
 use anyhow::Context;
@@ -277,6 +278,9 @@ impl Runtime<'_, Native> {
         stand_the_window_at(native, stood_at, "state the new window's outer rectangle");
         let physical = window.inner_size();
         let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
+        // The program's icon at the scale this window's renderer is born at — the first window's
+        // sentence, said by every window this process opens (0.4.10 plan row 71).
+        window.wear_the_app_icon(scale_factor);
         // The visual tree first, because the swapchain hangs off it — §2.3's
         // shape, once per window, because a `Compositor` is parameterised by the
         // HWND it composes above. An owner-thread door (`doors::CompositorBirth`): a refusal is
@@ -366,7 +370,15 @@ impl Runtime<'_, Native> {
         let roots: Vec<_> = plan_launched
             .as_ref()
             .filter(|plan| !plan.open.is_empty())
-            .map(|plan| plan.open.iter().map(revive_plan).collect())
+            .map(|plan| {
+                // **A launch's pinned tabs bring their agents back** (row 195), as the switch on
+                // the Agents page says.
+                let resuming = agent_resume::Restore::of_this_run(app.settings_store.loaded());
+                plan.open
+                    .iter()
+                    .map(|tab| revive_plan_with(tab, resuming))
+                    .collect()
+            })
             .unwrap_or_else(|| {
                 vec![(
                     // **A window opened to *receive* a tab opens no shell** (user
@@ -611,7 +623,7 @@ impl<B: Backend> Runtime<'_, B> {
         // its first present would flash opaque; the picture is decoded here for
         // the same reason. A missing or unreadable file costs a card and an
         // ordinary window, never a failed launch.
-        self.reload_background_picture()?;
+        self.reload_background_picture(crate::BackgroundAsk::FIRST)?;
         self.apply_window_ground()?;
         // The two postures, re-applied because they are postures: a window that
         // was told to stay in front last week is a window that stays in front
@@ -1140,7 +1152,11 @@ impl<B: Backend> Runtime<'_, B> {
         let placeholder = self.window.placeholder_tab.take();
         let first_revived = self.window.tabs.len();
         for tab in &pending {
-            let (seats, seed, leaves, files, preview) = revive_plan(tab);
+            // **And so do the tabs the reader asked back** (row 195): the card is their "yes".
+            let (seats, seed, leaves, files, preview) = revive_plan_with(
+                tab,
+                agent_resume::Restore::of_this_run(self.app.settings_store.loaded()),
+            );
             let wake = &self.window.pty_wake;
             let id = self.app.tab_ids.mint();
             let born = LeafView::at(&mut self.app.gpu, &self.window.renderer, TextScale::ACTUAL)?;
@@ -1462,6 +1478,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// repaint. Every caller here (a row, a chooser, startup) goes through this,
     /// which is what keeps "what is stored" and "what is drawn" one reading
     /// rather than four that have to agree.
+    ///
+    /// **Under a Windows contrast theme, an opaque ground with no picture** (owner ruling
+    /// 2026-10-28, row 90 ⑦; [`ground_under_contrast`]). The file keeps what it says, and the
+    /// ground it describes is back the moment the theme goes off.
     pub(crate) fn apply_window_ground(&mut self) -> Result<bool> {
         let stored = self.app.settings_store.loaded();
         let ground = bt_render::WindowGround {
@@ -1482,6 +1502,7 @@ impl<B: Backend> Runtime<'_, B> {
                 1.0
             },
         };
+        let ground = ground_under_contrast(ground, bt_render::high_contrast_in_force().is_some());
         if bt_render::set_window_ground(ground) == bt_render::ThemeChange::Unchanged {
             return Ok(false);
         }
@@ -2705,6 +2726,7 @@ pub(crate) fn seeded_tab(seed: &seed::Seed) -> TabV1 {
                 manual_name: manual_name.clone(),
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             })),
             None,
         ),
@@ -2846,7 +2868,7 @@ pub(crate) fn dirty_gate_names(
         restore::GateRequest::ClearScrollback(seat) => active_item(tabs, active_tab)
             .sessions
             .get(seat)
-            .map(|leaf| leaf.session.scrollback_line_count())
+            .map(|crate::TerminalPane { session: leaf, .. }| leaf.session.scrollback_line_count())
             .filter(|lines| *lines > 0)
             .map(|lines| vec![lines_phrase(lines)])
             .unwrap_or_default(),
@@ -3065,6 +3087,29 @@ pub(crate) fn preview_source_of_recent(
     }
 }
 
+/// **The ground a window wears under a Windows contrast theme** (T-HIGH-CONTRAST, owner ruling
+/// 2026-10-28, row 90 ⑦): opaque and with no picture, whatever the file says.
+///
+/// A picture under text and a desktop showing through it are the two things a contrast theme
+/// cannot promise legible: the theme names the colour behind every word, and either one puts
+/// something else there. The fit and the picture's own opacity are kept, so the value that
+/// comes back when the theme goes off is the one the file describes. The system's blur needs
+/// nothing of its own: it is seen only through a translucent ground.
+pub(crate) fn ground_under_contrast(
+    ground: bt_render::WindowGround,
+    contrast_on: bool,
+) -> bt_render::WindowGround {
+    if contrast_on {
+        bt_render::WindowGround {
+            image: None,
+            alpha: 1.0,
+            ..ground
+        }
+    } else {
+        ground
+    }
+}
+
 /// The `DWMWA_USE_IMMERSIVE_DARK_MODE` a painted background asks for, or `None`
 /// when the window has already said it (§7.1.6c-4f amendment).
 ///
@@ -3162,6 +3207,7 @@ pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
         card_skip: 0,
         prefill: None,
         carried_environment: None,
+        agent: crate::agent_resume::SeedAgent::None,
     }
 }
 

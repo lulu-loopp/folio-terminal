@@ -4,6 +4,7 @@
 use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::input::Keystroke;
 use crate::runtime::mouse::recoverable_wheel_scroll_amount;
+use crate::runtime::panes::apply_owed_shell_resize;
 use crate::runtime::panes::end_leaves_of;
 use crate::runtime::panes::tear_pane_into_tab;
 use crate::runtime::windows::dirty_gate_names;
@@ -12,18 +13,22 @@ use crate::{
     BlankPage, BlankPageReturn, Drag, DragCarry, DragHandover, DragSource, DropLanding, Fading,
     FolderPick, FormulaSwitches, HandoverInto, LeafId, LeafSeed, MathHoverExit, MenuPaint,
     NewWindowPlan, PaneArrival, PaneMotion, Popup, PreviewRestore, PreviewSurface, RenameExit,
-    RenameSubject, RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId,
-    TabMenuState, TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
-    absorb_tab_sessions, attention_trace, banner_line, create_tab_state, diagnostics,
-    exit_diagnostics, float, notify, pane_into_new_tab, pane_into_tab, partition_clamped,
+    RenameSubject, RowPayload, RowPayloadKind, Runtime, ShellLanding, TabCarry, TabClick,
+    TabCloseAction, TabId, TabMenuState, TabPress, TabRename, TabSeed, TabState, TabSurface,
+    TablePaint, TearOut, TerminalPane, attention_trace, banner_line, create_tab_state, diagnostics,
+    exit_diagnostics, finish_leaf_birth, float, notify, partition_clamped,
     presentation_physical_size, preview, profiles, pty_door, restore, scrollback_quota, seats,
     seed, settle_pin_partition, settling, solve_seats, strip_insert_slot, webnav,
 };
-use crate::{LeafView, TextScale, webhost};
+use crate::{
+    LeafView, PaneMove, PreviewPanes, PreviewViewStore, TextScale, assemble_tab_state,
+    mark_leaf_seen, webhost,
+};
 use anyhow::Context;
 use anyhow::Result;
-use bt_layout::{SeatId, SeatLayout};
+use bt_layout::{LayoutNode, SeatId, SeatLayout};
 use bt_math::{MathRaster, MathRenderError};
+use bt_pty::PtySession;
 use bt_render::{FrameSource, FrameTrigger, Travel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -74,6 +79,8 @@ fn settle_exit_dispositions(
             exit.disposition,
             exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(_)
                 | exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept
+                | exit_diagnostics::ShellExitDisposition::SystemEndedPaneKept
+                | exit_diagnostics::ShellExitDisposition::HandedBack
         ) {
             continue;
         }
@@ -87,9 +94,11 @@ fn settle_exit_dispositions(
     }
 }
 
-/// Leave a birth death's transcript in place and append the one-line face that explains it.
+/// Leave a birth death's transcript in place and append the one-line face that explains it:
+/// `{program} exited at birth (code {code}, {ms} ms).` — for a death in the first seconds, the code
+/// and the age are the point.
 pub(super) fn keep_birth_death_face(
-    leaf: &mut crate::LeafSession,
+    leaf: &mut crate::ShellSession,
     exit: &exit_diagnostics::ShellExit,
     had_output: bool,
 ) -> Result<()> {
@@ -105,11 +114,39 @@ pub(super) fn keep_birth_death_face(
     let code = exit
         .code
         .map_or_else(|| "none".to_owned(), |code| code.to_string());
-    let face = banner_line(&format!(
+    let face = format!(
         "{program} {} (code {code}, {} ms).",
         crate::i18n::Text::ShellBirthDeath.text(),
         exit.elapsed.as_millis()
-    ));
+    );
+    keep_face(leaf, &face, had_output)
+}
+
+/// **Whether a shell's exit was the system ending the session** (plan row 191): its code is the
+/// one a console process is ended with when its session ends
+/// ([`bt_platform::session_end::SYSTEM_ENDED_EXIT_CODE`]). Such a shell did not end itself, and
+/// its pane is not the reader's to have closed.
+fn ended_by_the_system(code: Option<u32>) -> bool {
+    code == Some(bt_platform::session_end::SYSTEM_ENDED_EXIT_CODE)
+}
+
+/// **Leave the transcript of a shell the system ended in place and append the one-line note that
+/// says so** (plan row 191): `Ended by the system at shutdown`, and nothing else — the code and
+/// the age are on the exit's `diagnostics.log` line (the owner's ruling, 2026-11-03: a shell that
+/// ran for hours is not explained by its milliseconds). The pane is kept, without a shell, until
+/// it is restarted or closed, and its tab is not retired.
+fn keep_system_ended_face(leaf: &mut crate::ShellSession, had_output: bool) -> Result<()> {
+    keep_face(
+        leaf,
+        crate::i18n::Text::ShellEndedBySystem.text(),
+        had_output,
+    )
+}
+
+/// The one-line face both kept deaths append, after the shell's own output when it wrote any,
+/// and the pane's life moved to Kept.
+fn keep_face(leaf: &mut crate::ShellSession, said: &str, had_output: bool) -> Result<()> {
+    let face = banner_line(said);
     let face = if had_output {
         format!("\r\n{face}")
     } else {
@@ -117,7 +154,7 @@ pub(super) fn keep_birth_death_face(
     };
     leaf.session
         .feed(face.as_bytes())
-        .context("append the birth-death face to its pane")?;
+        .context("append the kept death's face to its pane")?;
     leaf.wake = None;
     leaf.life.keep_birth_death();
     Ok(())
@@ -139,25 +176,31 @@ pub(super) enum BirthDeathLanding {
 /// and here; the shell itself is seated by the birth road (`land_birth_death_fallback_shell`),
 /// whose landing leaves the exit behind.
 pub(super) fn land_birth_death_fallback(
-    leaf: &mut crate::LeafSession,
+    leaf: &mut crate::TerminalPane,
 ) -> Result<BirthDeathLanding> {
-    let Some(mut pending) = leaf.life.take_fallback() else {
+    let Some(mut pending) = leaf.session.life.take_fallback() else {
         return Ok(BirthDeathLanding::Waiting);
     };
     let Some(answer) = pending.landing.shell.take() else {
-        leaf.life.fall_back(pending);
+        leaf.session.life.fall_back(pending);
         return Ok(BirthDeathLanding::Waiting);
     };
     match answer.session {
-        Ok(pty) => {
+        Some(Ok(pty)) => {
             let crate::BirthDeathFallback { landing, exit } = pending;
-            crate::land_birth_death_fallback_shell(leaf, pty, landing)?;
+            land_birth_death_fallback_shell(leaf, pty, landing)?;
             Ok(BirthDeathLanding::FellBack(exit))
         }
-        Err(error) => {
+        refused => {
+            // A last resort carries no folder to find gone, so its birth always asks `bt-pty`;
+            // an answer that started nothing is kept as a refused one is.
+            let why = match refused {
+                Some(Err(error)) => error.to_string(),
+                _ => "nothing was started".to_owned(),
+            };
             pending.exit.disposition = exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept;
-            keep_birth_death_face(leaf, &pending.exit, false)?;
-            Ok(BirthDeathLanding::Kept(pending.exit, error.to_string()))
+            keep_birth_death_face(&mut leaf.session, &pending.exit, false)?;
+            Ok(BirthDeathLanding::Kept(pending.exit, why))
         }
     }
 }
@@ -578,6 +621,7 @@ impl<B: Backend> Runtime<'_, B> {
             // And an editor with no box has no caret to publish: the IME is told
             // so rather than left holding the last rectangle this tab had.
             self.window.rename_caret_line = None;
+            self.window.drawn_fields.name = None;
             return;
         };
         let box_width = title_box[2] - title_box[0];
@@ -592,7 +636,7 @@ impl<B: Backend> Runtime<'_, B> {
             return;
         };
         let mut shape = |text: &str| renderer.chrome_text_advances(gpu, text, font_px);
-        let fitted = editor.fit(box_width, caret_width, true, &mut shape);
+        let (fitted, drawn) = editor.fit(title_box[0], box_width, caret_width, true, &mut shape);
         let caret_px = fitted.caret_px;
         content.edit = Some(seats::TabEdit {
             placeholder: content
@@ -611,6 +655,7 @@ impl<B: Backend> Runtime<'_, B> {
         // it — one derivation still, taken at the moment it is true.
         let x = (title_box[0] + caret_px).min(title_box[2] - caret_width);
         self.window.rename_caret_line = Some([x, title_box[1], x + caret_width, title_box[3]]);
+        self.window.drawn_fields.name = Some(drawn);
     }
 
     /// **K124/N157 — the pane's stand-in in the strip**, and the slot it takes.
@@ -730,9 +775,11 @@ impl<B: Backend> Runtime<'_, B> {
                 // two different shells for one drag.
                 mark_kind: seats::pane_mark(
                     kind,
-                    self.sessions
-                        .get(&seat)
-                        .map(|leaf| profiles::identity_mark(&leaf.launch.profile)),
+                    self.sessions.get(&seat).map(
+                        |crate::TerminalPane { session: leaf, .. }| {
+                            profiles::identity_mark(&leaf.launch.profile)
+                        },
+                    ),
                     bt_render::chrome_palette(),
                 )
                 .0,
@@ -1416,7 +1463,9 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(leaf) = state.focused() else {
             return Ok(());
         };
-        let profile = leaf.launch.profile.clone();
+        // The pane's own profile: the shell it was, for a pane whose agent was resumed in it (row
+        // 195).
+        let profile = leaf.own_profile().to_owned();
         // Where the pane stands, the one `Restart shell` reads: its report, else its shell
         // process's folder (T-CWD-FROM-PROCESS), else the folder it was put down in.
         let cwd = leaf.seed_place_for_a_new_shell();
@@ -1609,7 +1658,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// a popup nothing can dismiss.
     ///
     /// Where the chooser opens is the same courtesy every other door shows: the
-    /// folder the pane you are looking at is standing in (`LeafSession::folder`:
+    /// folder the pane you are looking at is standing in (`ShellSession::folder`:
     /// its last OSC 7 report, else its shell process's folder, else the folder it
     /// was opened in), and failing
     /// that the place a tab of the default profile would have started in anyway.
@@ -3285,6 +3334,11 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(editor) = self.window.rename.take() else {
             return Ok(());
         };
+        // **The draft's drawn run and a drag across it go with the editor**
+        // (0.4.9 plan row 179): the run is a picture of this draft, and a
+        // selection being drawn is drawn in this box — every exit is this one.
+        self.window.drawn_fields.name = None;
+        self.let_go_of_the_name_selection();
         let commit = exit.commits();
         // **The file the preview head names** (user ruling 2026-08-19). It
         // leaves through the same two paths a tab's name does — Enter, Escape
@@ -3574,6 +3628,9 @@ impl<B: Backend> Runtime<'_, B> {
         let mut exits = Vec::new();
         let mut active_exited_panes = Vec::new();
         let mut exited = Vec::new();
+        // **Panes whose agent's end hands their shell back** (row 195), and whether a record ended.
+        let mut hand_backs = Vec::new();
+        let mut records_ended = false;
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             // A tab has ended when every shell it holds has ended. A tab in
             // probe mode holds no PTY at all and never ends this way.
@@ -3581,6 +3638,27 @@ impl<B: Backend> Runtime<'_, B> {
             let mut any_pty = false;
             let tab_id = tab.id;
             for (seat, leaf) in tab.leaves_mut() {
+                // **A typed agent's record ends with its command** (row 195): the shell marked the
+                // next prompt.
+                records_ended |= leaf.agent.settle_command(leaf.session.command_marks());
+                // **And its turns with it** (0.4.10 plan row 75): the pane is the shell's again.
+                leaf.turn_account
+                    .settle_turn_command(leaf.session.command_marks());
+                // **A resume whose folder was gone started nothing** (row 195, review F3): the
+                // pane's shell is owed in its place now, with the could-not-resume line.
+                match leaf.agent.take_not_started() {
+                    Some(crate::agent_resume::Ended::HandBack {
+                        profile,
+                        cwd,
+                        failed,
+                    }) => {
+                        hand_backs.push((index, *seat, profile, cwd, failed));
+                        any_live = true;
+                        continue;
+                    }
+                    Some(crate::agent_resume::Ended::Cleared) => records_ended = true,
+                    Some(crate::agent_resume::Ended::Unchanged) | None => {}
+                }
                 // A shell still being born is a shell this tab is about to have: the tab has not
                 // ended while one of its panes is in birth.
                 if leaf.life.holds_its_tab() {
@@ -3593,11 +3671,74 @@ impl<B: Backend> Runtime<'_, B> {
                 any_pty = true;
                 match pty.try_wait()? {
                     None => any_live = true,
+                    // **A shell is on its way into this pane's place** (row 195): it holds its tab.
+                    Some(_) if leaf.agent.handing_back() => any_live = true,
                     Some(status) => {
                         let elapsed = seen.unwrap_or_else(|| pty.age_at(now));
                         let code = status.signal().is_none().then(|| status.exit_code());
                         let program = leaf.launch.program.clone();
                         let had_output = pty.output_bytes_received() != 0;
+                        // **A shell the system ended is not an edit** (B-ENDSESSION ruling 2,
+                        // from the first such exit rather than from the question; plan row 191):
+                        // the system ends the panes' shells before it asks the window, so this
+                        // exit, at any age, keeps its pane with its face and retires nothing —
+                        // no pane closes, no tab goes into Recent, nothing is recorded, and the
+                        // layout the question then writes is the one the reader left.
+                        if ended_by_the_system(code) {
+                            if !pty.output_is_drained() {
+                                leaf.life.exit_draining(elapsed);
+                                any_live = true;
+                                continue;
+                            }
+                            let exit = exit_diagnostics::ShellExit::observed(
+                                seat.0,
+                                code,
+                                elapsed,
+                                program,
+                                tab_id.0,
+                                exit_diagnostics::ShellExitDisposition::SystemEndedPaneKept,
+                            );
+                            if let Some(old) = leaf.life.release_dead_shell() {
+                                bt_pty::retire_session(old);
+                            }
+                            keep_system_ended_face(leaf, had_output)?;
+                            exits.push((index, exit));
+                            any_live = true;
+                            continue;
+                        }
+                        // **The pane's own child ended by itself** (row 195) — read after the
+                        // system's end above, which keeps the record with the pane (row 191's kept
+                        // pane: the agent comes back at the next start), and before any birth-death
+                        // reading, because a resume that is refused prints its reason and exits at
+                        // once, which is that resume's failure and no shell's death. Its record
+                        // ends, and a resumed agent's end hands back the shell the pane was.
+                        match leaf.agent.child_ended() {
+                            crate::agent_resume::Ended::Unchanged => {}
+                            crate::agent_resume::Ended::Cleared => records_ended = true,
+                            crate::agent_resume::Ended::HandBack {
+                                profile,
+                                cwd,
+                                failed,
+                            } => {
+                                // Said like every other exit (review F6): what the reaper saw end,
+                                // that the pane's shell is handed back in its place, and the
+                                // session-end probe every exit carries (row 199).
+                                exits.push((
+                                    index,
+                                    exit_diagnostics::ShellExit::observed(
+                                        seat.0,
+                                        code,
+                                        elapsed,
+                                        program,
+                                        tab_id.0,
+                                        exit_diagnostics::ShellExitDisposition::HandedBack,
+                                    ),
+                                ));
+                                hand_backs.push((index, *seat, profile, cwd, failed));
+                                any_live = true;
+                                continue;
+                            }
+                        }
                         if let Some(birth_death) =
                             birth_death_disposition(elapsed, had_output, pty.has_birth_fallback())
                         {
@@ -3612,15 +3753,14 @@ impl<B: Backend> Runtime<'_, B> {
                             let fallback = (birth_death == BirthDeathDisposition::FallBack)
                                 .then(|| pty.take_birth_fallback())
                                 .flatten();
-                            let mut exit = exit_diagnostics::ShellExit {
-                                seat: seat.0,
+                            let mut exit = exit_diagnostics::ShellExit::observed(
+                                seat.0,
                                 code,
                                 elapsed,
                                 program,
-                                tab: tab_id.0,
-                                disposition:
-                                    exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
-                            };
+                                tab_id.0,
+                                exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
+                            );
                             if let Some(old) = leaf.life.release_dead_shell() {
                                 bt_pty::retire_session(old);
                             }
@@ -3636,7 +3776,9 @@ impl<B: Backend> Runtime<'_, B> {
                                 let rows = leaf.conpty_grid.rows;
                                 let worker_wake = wake.clone();
                                 match pty_door::request(
-                                    move |_| fallback.spawn(columns, rows, worker_wake, why),
+                                    move |_| {
+                                        fallback.spawn_last_resort(columns, rows, worker_wake, why)
+                                    },
                                     wake,
                                 ) {
                                     Ok(shell) => {
@@ -3671,14 +3813,14 @@ impl<B: Backend> Runtime<'_, B> {
                         if leaf.life.exited(elapsed) {
                             exits.push((
                                 index,
-                                exit_diagnostics::ShellExit {
-                                    seat: seat.0,
-                                    code: status.signal().is_none().then(|| status.exit_code()),
+                                exit_diagnostics::ShellExit::observed(
+                                    seat.0,
+                                    code,
                                     elapsed,
-                                    program: leaf.launch.program.clone(),
-                                    tab: tab_id.0,
-                                    disposition: exit_diagnostics::ShellExitDisposition::TabKept,
-                                },
+                                    program,
+                                    tab_id.0,
+                                    exit_diagnostics::ShellExitDisposition::TabKept,
+                                ),
                             ));
                         }
                     }
@@ -3701,6 +3843,12 @@ impl<B: Backend> Runtime<'_, B> {
         // Only the ones whose close is nothing to ask: a tab that still holds an
         // unsaved preview waits for the reader, and the question is never put
         // from here (ticket 58).
+        if records_ended {
+            self.mark_session_dirty(now);
+        }
+        for (index, seat, profile, cwd, failed) in hand_backs {
+            self.hand_back_shell(index, seat, profile, cwd, failed)?;
+        }
         let ended = exited.clone();
         let exited = exited_tabs_the_loop_may_close(
             &self.window.dirty_gate,
@@ -3995,6 +4143,784 @@ impl<B: Backend> Runtime<'_, B> {
         let to = partition_clamped(&pinned, index, carry.origin.min(pinned.len() - 1));
         self.move_tab_with_flip(index, to, now, None);
     }
+
+    /// Pin or unpin, and put the strip back in order.
+    ///
+    /// The enforcement itself is [`settle_pin_partition`]'s, which is what makes
+    /// "one enforcer instead of one per caller" true rather than merely claimed:
+    /// this used to normalize inline, and an inline copy is only the enforcer for
+    /// the one path it sits on. It was not the only path — N160① flips a pin too
+    /// (see [`absorb_tab_sessions`]) — and the invariant broke on the path that
+    /// had no copy.
+    pub(crate) fn toggle_pin(&mut self, index: usize) -> Result<()> {
+        if index >= self.window.tabs.len() {
+            return Ok(());
+        }
+        self.window.tabs[index].pinned = !self.window.tabs[index].pinned;
+        settle_pin_partition(&mut self.window.tabs, &mut self.window.active_tab);
+        self.reveal_tab(self.window.active_tab);
+        self.refresh_chrome();
+        self.mark_session_dirty(Instant::now());
+        self.present_chrome_change()
+    }
+}
+
+pub(crate) fn closing_this_pane_closes_the_tab(panes: usize) -> bool {
+    panes <= 1
+}
+
+/// **Stand a pane up as a tab of its own, carrying its shell across.**
+///
+/// The half N157's tear-out and N161's ejection have in common, and they have all
+/// of it in common except *why* the pane left and what the new tab's pin says. So
+/// it is written once and both callers hand it a [`Seat`] that is already out of
+/// `from`'s tree, or about to be.
+///
+/// **The session travels; it is never killed and never respawned.** The
+/// [`crate::ShellSession`] is *moved* out of `from.sessions` and into the new tab's — the
+/// ConPTY, the [`bt_term::DualPlaneSession`], the scrollback, the ledger and the pending
+/// resize are the same objects on both sides of the gesture. Spawning a fresh
+/// shell in the new tab and shutting the old one down would be a gesture that
+/// looks identical and throws the user's work away, and there is no way to tell
+/// the two apart from a screenshot.
+///
+/// It is a `remove` and an `insert` on two different maps with nothing in
+/// between, which is what makes "never dropped and never duplicated" a fact about
+/// the code rather than a promise about it: the value exists in exactly one map
+/// at every point.
+///
+/// **Every kind of pane brings its own content across** (§7.1.6h). This used to
+/// take a `?` on `from.sessions.remove(&seat.id)` and hand over three empty
+/// tables beside it, with a note recording that the law for the other two kinds
+/// was written and reachable — in [`absorb_tab_sessions`] — and that what was
+/// missing was the *gesture*, not the law. The gesture landed, so the law is
+/// called from here too and the three tables are filled the same way that
+/// function fills them. There is nothing new invented here: a files column keeps
+/// its root, its read directories and what it knows about the repository under
+/// it; a preview keeps its whole view and the buffer behind it; and the reason
+/// in every case is the one the shell wins on, which is that **the pane is
+/// moving, not being rebuilt.**
+///
+/// The pane is re-keyed on the way in, because [`seats::Seats::lone_seat`] mints
+/// its ids from 1 and the content has to be filed under the seat it now draws
+/// into. `solve` is the caller's, so this verb never touches a `Renderer`: the
+/// new tab's rectangles come from the same [`bt_layout::solve`] every other
+/// layout comes from (red line L10), handed in by whoever knows the window.
+pub(crate) fn pane_into_new_tab(
+    from: &mut TabState,
+    seat: &bt_layout::Seat,
+    id: TabId,
+    pinned: bool,
+    solve: impl FnOnce(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
+) -> Option<TabState> {
+    let (seats, key) = seats::Seats::lone_seat(seat);
+    let sessions = from
+        .sessions
+        .remove(&seat.id)
+        .map(|session| BTreeMap::from([(key, session)]))
+        .unwrap_or_default();
+    let files = from
+        .files
+        .remove(&seat.id)
+        .map(|state| BTreeMap::from([(key, state)]))
+        .unwrap_or_default();
+    // The two caches behind a column travel with it, re-keyed the same way, and
+    // for `absorb_tab_sessions`' reason: dropping them would be correct and
+    // visibly worse — a column that merely changed tabs would blink back to
+    // "Loading …" and re-run a `git status` to rediscover the repository it is
+    // already standing in.
+    let file_trees = from
+        .file_trees
+        .remove(&seat.id)
+        .map(|cache| BTreeMap::from([(key, cache)]))
+        .unwrap_or_default();
+    let git_trees = from
+        .git_trees
+        .remove(&seat.id)
+        .map(|cache| BTreeMap::from([(key, cache)]))
+        .unwrap_or_default();
+    // And where that Git page was scrolled to, which is a fact about the page
+    // rather than about the repository and so has its own table (see
+    // [`TabState::git_scroll`]).
+    let git_scroll = from
+        .git_scroll
+        .remove(&seat.id)
+        .map(|scroll| BTreeMap::from([(key, scroll)]))
+        .unwrap_or_default();
+    let mut preview_panes = PreviewPanes::default();
+    let mut preview_pool = preview::PreviewPool::default();
+    let mut preview_views = PreviewViewStore::default();
+    // **The pane's two names, before and after.** The seat number is re-minted
+    // from 1 in the tab being born (`seats::Seats::lone_seat`) and the tab is a
+    // different tab, so both halves of the address change — which since §7.12 ⓑ
+    // is one re-key rather than two tables agreeing to use the same number.
+    let was = PreviewSurface::Seat(from.leaf_here(seat.id));
+    let now = PreviewSurface::Seat(LeafId { tab: id, seat: key });
+    if let Some(pane) = from.preview_panes.remove(was) {
+        // **§7.1.3 「pane 拆出/被顶出时携带其当前缓冲(同一对象)」.** The buffer is
+        // *taken* out of the source pool rather than copied: a second copy left
+        // behind is exactly the fork the one-buffer-per-file law exists to
+        // forbid, and an unsaved edit that existed in two places would be an
+        // edit the user could lose by saving the wrong one.
+        //
+        // Where the reader was in it is *copied* rather than moved, and the
+        // asymmetry is the difference between content and memory: a view is
+        // three numbers about a document, [`PreviewViewStore`]'s own doc keeps
+        // entries for buffers that are long gone, and two tabs each remembering
+        // where you were in a file is the state `absorb` already describes as
+        // ordinary.
+        if let Some(source) = pane.source() {
+            preview_views.remember(source, from.preview_views.restore(source));
+            if let Some(buffer) = from.preview_pool.take(source) {
+                preview_pool.insert(buffer);
+            }
+        }
+        // "若是原 tab 最后一个预览 pane 则整池随行" — the rest of the history goes
+        // with it when nothing is left to reach it from. Asked of the tree
+        // *after* the seat has left it, which is what `seats` being built at the
+        // top of this function buys: a pool stranded on a tab with no preview
+        // pane is a set of unsaved buffers with no door onto them.
+        if from.seats.preview_seats().is_empty() {
+            preview_pool.merge_from(std::mem::take(&mut from.preview_pool));
+            preview_views.absorb(std::mem::take(&mut from.preview_views));
+        }
+        *preview_panes.entry(now) = pane;
+    }
+    let graph_view = from
+        .git_graph_view
+        .remove(&was)
+        .map(|view| BTreeMap::from([(now, view)]))
+        .unwrap_or_default();
+    from.refocus_after_losing(seat.id);
+    let (seat_layout, seat_overflow) = solve(&seats);
+    let mut tab = assemble_tab_state(
+        id,
+        sessions,
+        files,
+        preview_pool,
+        preview_panes,
+        graph_view,
+        key,
+        TabSeed {
+            // The profile is not stated here any more, and its absence is the
+            // point: it rides on the [`ShellSession`] being moved, so the new tab
+            // is the same kind of shell as the pane because it *is* the pane. It
+            // used to be copied off `from.profile` — the tab the pane was
+            // leaving — which was right only while every pane of a tab was the
+            // same shell.
+            //
+            // The name belonged to the tab, not to the pane. A tear-out that
+            // carried "build" across would name a room after the house.
+            manual_name: None,
+            // A pane torn into a tab of its own takes the account's environment from here on.
+            carried_environment: None,
+            pinned,
+        },
+        seats,
+        seat_layout,
+        seat_overflow,
+    );
+    // The four transient tables [`assemble_tab_state`] starts empty, filled in
+    // after the fact because they are *caches* rather than the content the
+    // constructor is total over: a tab born without them is a correct tab that
+    // has to read the disk again, which is exactly the flicker they exist to
+    // prevent. Adding four more arguments to a function whose whole argument is
+    // that its literal lives once would be the worse trade.
+    tab.file_trees = file_trees;
+    tab.git_trees = git_trees;
+    tab.git_scroll = git_scroll;
+    tab.preview_views = preview_views;
+    // The pane is a different leaf now, so everything it had out with a worker
+    // is addressed to a leaf that has gone — see [`forget_work_in_flight_for_seat`].
+    forget_work_in_flight_for_seat(&mut tab, key);
+    debug_assert!(
+        from.sessions_match_terminals(),
+        "item 6: the tab a pane left still matches its own tree"
+    );
+    debug_assert!(
+        from.files_match_files_seats(),
+        "A3: and so do its files columns"
+    );
+    Some(tab)
+}
+
+/// **Everything one seat's content plane holds, moved into another tab under the
+/// id it now answers to.**
+///
+/// The body of [`absorb_tab_sessions`]' loop, lifted out when §7.1.6k gave a
+/// *single* pane the same journey a merged tab's whole fleet takes. Two callers,
+/// one sentence — "the pane is moving, not being rebuilt" — and the whole point
+/// of writing it once is that a table added to one of them cannot be forgotten
+/// by the other. The seven tables below are the seven a pane can be holding:
+/// its shell, its folder, the directories it had read, what it knew about the
+/// repository under it, where that Git page was scrolled, its commit graph, and
+/// its whole preview view.
+///
+/// **Nothing is killed and nothing is respawned.** Each table is a `remove` and
+/// an `insert` with nothing in between, which is what makes "never dropped and
+/// never duplicated" a fact about the code rather than a promise about it: the
+/// value exists in exactly one map at every point.
+///
+/// `watched` is whether the tab it is arriving in is the one on screen. A merge
+/// always is (N159 — the arriving members owe no unread claim, because you are
+/// looking at them), and a pane handed to a background tab is not: its shell may
+/// have been mid-sentence when it moved, and answering a claim nobody has seen
+/// would be the window saying "you have read this" on the user's behalf.
+fn move_seat_content(
+    source: &mut TabState,
+    target: &mut TabState,
+    was: SeatId,
+    now: SeatId,
+    watched: bool,
+) {
+    if let Some(mut leaf) = source.sessions.remove(&was) {
+        if watched {
+            mark_leaf_seen(&mut leaf.session);
+        }
+        let displaced = target.sessions.insert(now, leaf);
+        debug_assert!(
+            displaced.is_none(),
+            "{now:?} was already running a shell: the renumbering collided"
+        );
+    }
+    // A files column crossing into another tab keeps what it was looking
+    // at, for the same reason the shell beside it keeps its scrollback: the
+    // pane is *moving*, not being rebuilt. Re-keyed on the way in because
+    // the arriving tree renumbers its seats, which is the whole of why
+    // `arrived` is a list of pairs rather than a list of ids.
+    if let Some(state) = source.files.remove(&was) {
+        let displaced = target.files.insert(now, state);
+        debug_assert!(
+            displaced.is_none(),
+            "{now:?} was already showing a folder: the renumbering collided"
+        );
+    }
+    // The directories it had already read travel with it, re-keyed the same
+    // way. Dropping them would be correct but visibly worse: a column that
+    // merely changed tabs would blink back to "Loading…" and re-read every
+    // open folder, which is the same "the pane is moving, not being rebuilt"
+    // argument the scrollback beside it wins on.
+    if let Some(cache) = source.file_trees.remove(&was) {
+        target.file_trees.insert(now, cache);
+    }
+    // And what it had learned about the repository under it, for the same
+    // reason and re-keyed the same way: a column that changed tabs is looking
+    // at the same folder, so it is looking at the same repository, and making
+    // it re-run a `git status` to find that out would blank the Git page of a
+    // pane that merely moved.
+    if let Some(cache) = source.git_trees.remove(&was) {
+        target.git_trees.insert(now, cache);
+    }
+    // And where that Git page was scrolled to, which is a fact about the page
+    // rather than about the repository and so has its own table (see
+    // [`TabState::git_scroll`]). It travelled with a tear-out from the day
+    // `pane_into_new_tab` was written and did not travel with a merge, which was
+    // an omission in one of the two rather than a distinction between them:
+    // both are the same pane moving house.
+    if let Some(scroll) = source.git_scroll.remove(&was) {
+        target.git_scroll.insert(now, scroll);
+    }
+    // **Both halves of the address change, and both are in the key.** The seat
+    // is renumbered by the arriving tree and the tab is a different tab, so
+    // since §7.12 ⓑ the re-key says so rather than leaving the tab half to be
+    // inferred from which map the entry happens to be sitting in.
+    let left = PreviewSurface::Seat(source.leaf_here(was));
+    let arrived = PreviewSurface::Seat(target.leaf_here(now));
+    if let Some(view) = source.git_graph_view.remove(&left) {
+        target.git_graph_view.insert(arrived, view);
+    }
+    // **P126/§7.1.3 「pane 拆出/被顶出时携带其当前缓冲(同一对象)」 — the whole
+    // view crosses with the seat, re-keyed the same way.**
+    //
+    // This used to carry the picture and nothing else, on the argument that
+    // "a document is a buffer, and buffers live in the tab's pool which does
+    // not migrate". The second half of that sentence was the gap, not the
+    // reason: §7.1.3 rules that the pool migrates too, and the pool half of
+    // this gesture is the caller's. With it done, a preview pane changing tabs
+    // arrives holding what it held — which buffer, how far that body is
+    // scrolled, where the caret sits in it, whether markdown is being read as
+    // source or as page — for the same reason the shell beside it keeps its
+    // scrollback and the files column keeps its open folders: **the pane is
+    // moving, not being rebuilt.**
+    //
+    // **And the buffer itself travels, which is the half this used to leave
+    // behind** (user ruling 2026-08-29, defect #187). The pane names its
+    // document by [`preview::PreviewSource`] and the *document* lives in the
+    // tab's pool, so a view moved into a pool that has never heard of that
+    // source is a pane pointing at nothing — which on the glass is the empty
+    // state, "点击带虚线下划线的路径,即可在此预览", with the reader's file and
+    // any unsaved edit in it left in the tab behind. The pool half was written
+    // once, in [`pane_into_new_tab`], and reasoned about here only as the
+    // *whole-pool* rule below ("若是原 tab 最后一个预览 pane 则整池随行") —
+    // which is a rule about the buffers **nobody is looking at**. The one the
+    // traveller is showing is not one of those, and it is the only one whose
+    // absence is visible immediately.
+    //
+    // Taken rather than copied, for `pane_into_new_tab`'s reason: a second copy
+    // left behind is the fork the one-buffer-per-file law forbids, and an
+    // unsaved edit that existed in two places would be an edit a save could
+    // lose. Merged rather than inserted on the way in, because the target may
+    // already hold a buffer for the same file — that is [`preview::PreviewPool::
+    // merge_buffer`]'s law (dirty wins, a tie stays with the incumbent), and it
+    // is the same law a whole pool arriving is merged under.
+    //
+    // The **eviction** rule needs nothing said here: `insert`/`merge_buffer` do
+    // not evict, and `open`'s cap spares every source some pane is displaying,
+    // so the buffer that has just moved in cannot be the one a later browse
+    // throws out.
+    //
+    // Where the reader was in it is *copied* rather than moved — the asymmetry
+    // [`pane_into_new_tab`] states: a view is three numbers about a document and
+    // two tabs each remembering where you were in a file is ordinary. The
+    // pane's own live scroll is on the [`PreviewPane`] above and travels with
+    // it; this is the memory a *future* opening of that file in either tab
+    // reads.
+    if let Some(pane) = source.preview_panes.remove(left) {
+        if let Some(showing) = pane.source() {
+            let view = source.preview_views.restore(showing);
+            target.preview_views.remember(showing, view);
+            if let Some(buffer) = source.preview_pool.take(showing) {
+                target.preview_pool.merge_buffer(buffer);
+            }
+        }
+        *target.preview_panes.entry(arrived) = pane;
+    }
+    forget_work_in_flight_for_seat(target, now);
+}
+
+/// **A pane that has just been given a new address gives up on the answers owed
+/// to its old one** (F1b; `plan.md` v4 增补 ②, `codex-final.md` §2's "pane 升格
+/// 换号的活性仍缺一半").
+///
+/// Every question this pane put to a worker travels as a [`LeafId`] — its tab
+/// and its seat — and both change when it is promoted into a tab of its own or
+/// moved into another one. **Safety** is already had, and had by construction:
+/// the tab it left no longer has that seat, so an answer addressed to the old
+/// leaf finds nothing and is dropped. The v3 draft stopped there, on the ground
+/// that "the old address fails to match once the source tab dies" — but the
+/// source tab does not die. A pane is only promotable out of a tab that has
+/// another one, so the tab it left is still open, still drawing, and the answers
+/// it drops are silently gone.
+///
+/// **Liveness** is this. Three ledgers say "already asked" and all three travel
+/// with the pane — a `Pending` directory node, a claimed head read, and a
+/// session's own in-flight sets — so each of them would go on suppressing the
+/// question that would have been re-asked, for the rest of the session. Cleared
+/// here, at the one moment the address changes, they let the ordinary per-frame
+/// asking ask again under the leaf the pane now is.
+///
+/// **The pane's repository cache is not among them.** Its questions are owed to
+/// the cache's own identity ([`crate::git::GitCacheId`]), never to the leaf, so they
+/// reach it under the leaf it lands under and its dimmed rows and its running
+/// checkout stay held until git's receipt says otherwise.
+///
+/// **The seat given here is the one it landed under**, never the one it left:
+/// the whole point is to reach the tables *after* they have been re-keyed.
+fn forget_work_in_flight_for_seat(tab: &mut TabState, seat: SeatId) {
+    if let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get_mut(&seat) {
+        leaf.session.forget_work_in_flight();
+    }
+    if let Some(cache) = tab.file_trees.get_mut(&seat) {
+        cache.forget_pending();
+    }
+    // A preview pane's question is held by the *buffer* it is showing, which is
+    // the tab's and not the pane's (§7.1.3) — so it is reached through the pane,
+    // and only the one this seat is looking at.
+    if let Some(source) = tab
+        .preview_panes
+        .get(tab.preview_here(seat))
+        .and_then(|pane| pane.source().cloned())
+        && let Some(buffer) = tab.preview_pool.get_mut(&source)
+    {
+        buffer.forget_head_read();
+    }
+}
+
+/// **§7.1.6k (user ruling, 2026-08-20) — move one pane into another tab, at the
+/// place the gesture aimed at.**
+///
+/// A free function over two [`TabState`]s for the reason [`super::panes::tear_pane_into_tab`]
+/// and [`absorb_tab_into_layout`] are: everything this gesture *decides* is a
+/// fact about two tabs, and the only thing the window contributes is the solved
+/// rectangles and the strip surgery. Those are arguments here.
+///
+/// **One body for two doors, since §7.1.6k′ (user ruling 2026-08-23).** The tab
+/// list's door aims at the end of the target's tree; the stage's door aims at
+/// whatever zone the pointer was in when the hand opened. Those differ in the
+/// [`seats::LayoutAim`] and in **nothing else** — the same pluck, the same
+/// renumbering, the same seven tables of content, the same emptied-tab rule —
+/// so the aim is a parameter and not a second copy of this function. It arrives
+/// on [`PaneArrival`] with the two facts a plan is judged against.
+///
+/// **The end of the tree is a rim drop and not a split of some pane**, which is
+/// [`seats::Seats::add_files_pane`]'s own argument read for a different kind of
+/// leaf: however many panes the target already holds, "append" means beside all
+/// of them, and only the root has an edge that means that (G82/G83). Which side
+/// is the end is [`crate::trailing_edge`]'s, off the window's `Split direction`. That
+/// is the tab list's door; the stage's says which pane and which side outright.
+///
+/// **A centre evicts, and the eviction is this function's** (N161). An arriving
+/// *subtree* takes the target pane's slot, so the target pane leaves for the
+/// strip as a tab of its own — [`pane_into_new_tab`], the very call
+/// [`absorb_tab_into_layout`] makes for a merging tab, with the host's pin
+/// (N160②). It is done here rather than by the window because it is a fact about
+/// the two trees; what the window does with the tab that comes back is the
+/// window's.
+///
+/// **The tree the pane is leaving.** Two shapes, and the second is not a refusal:
+///
+/// * More than one pane stays behind, so the leaf leaves by `close_seat` — its
+///   sibling promoted and the run re-balanced, exactly as a close does (G79/G80).
+/// * It was the tab's **last** pane, and `close_seat` refuses to empty a tree
+///   (G84). The ruling that covers it already exists and is not "refuse": *"关最
+///   后一个座位 = 关 tab"* ([`closing_this_pane_closes_the_tab`]). So the tree is
+///   left exactly as it is and the answer says `source_emptied`, because the tab
+///   is not losing a pane — it is leaving. The window takes its strip entry out
+///   the way [`Runtime::absorb_tab`] takes an absorbed tab's out, **never**
+///   through `close_tab`: the tab did not close, it was emptied by a move, its
+///   shell is alive in another tab, and reopening it from Recent would reopen
+///   something that is still running.
+///
+/// `watched` is whether the target is the tab on screen — see
+/// [`move_seat_content`].
+///
+/// `None` when the seat is not in `from`'s tree, when the target's tree cannot
+/// take the pane at this aim (H93), or when a centre would evict a pane the
+/// strip cannot hold ([`pane_can_become_a_tab`], the third place M147 can act on
+/// that one answer). Nothing is mutated on any of those paths: the plan is built
+/// and judged before the first edit, so a refusal leaves both tabs exactly as
+/// they were and the gesture goes home (J120).
+pub(crate) fn pane_into_tab(
+    from: &mut TabState,
+    into: &mut TabState,
+    seat: SeatId,
+    arrival: &PaneArrival<'_>,
+    watching: Option<TabId>,
+    solve: impl Fn(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
+) -> Option<PaneMove> {
+    let metrics = arrival.metrics;
+    // **Which of the two tabs is the one on screen** — asked of the window's own
+    // answer rather than handed in as a bare `bool`, because since B4 there are
+    // two journeys here and not one: a pane leaves and a pane arrives, and each
+    // of them owes `move_seat_content` the honest answer about the tab it is
+    // going *to*. One boolean could only ever be right about one of them.
+    let watched = watching == Some(into.id);
+    let source_watched = watching == Some(from.id);
+    // Cloned before any edit, because after `close_seat` the tree no longer has
+    // it to be asked about and everything durable about the pane — its kind, its
+    // fixed extent — lives on the `Seat` (§5).
+    let travelling = LayoutNode::seat(from.seats.tree().find_seat(seat)?.clone());
+    // **B4 — read before the adoption installs a tree that no longer has it.**
+    // A centre seats the arriving pane where the target pane stood, so the
+    // target pane is the one leaving, and everything durable about it lives on
+    // its `Seat` (§5). Every other aim displaces nobody, which is why this is a
+    // match on the aim rather than a search of the plan.
+    //
+    // Since the 2026-08-25 ruling this pane is not *evicted* — it is traded. It
+    // goes into the slot the traveller is about to vacate, and there is
+    // therefore nothing here to ask `pane_can_become_a_tab` about: it is not
+    // becoming a tab, it is standing in a tree that already exists. The question
+    // survives one aim further up, in [`Runtime::plan_for`], where a whole *tab*
+    // dropped on a centre still evicts.
+    let displaced = match arrival.aim {
+        seats::LayoutAim::SeatCentre(target) => Some(into.seats.tree().find_seat(target)?.clone()),
+        seats::LayoutAim::SeatEdge(..) | seats::LayoutAim::Rim(_) => None,
+    };
+    let plan = into.seats.plan_drop(
+        metrics,
+        arrival.viewport,
+        arrival.aim,
+        seats::DropCargo::Layout(&travelling),
+    )?;
+    // Judged **before** anything moves. `adopt_drop` asks the same question and
+    // answers `None`, but by then the seat would already be out of the tree it
+    // came from — a refusal that took the pane with it.
+    if !plan.fits() {
+        return None;
+    }
+    // The renumbering's own record. A pane arrives as exactly one leaf, so the
+    // single pair in it is the identity it now answers to, derived from the plan
+    // rather than re-found in the new tree (N159's argument).
+    let &(_, landed) = plan.arrived.first()?;
+    // **The traveller leaves its tree, and what happens to the slot it leaves is
+    // the whole of B4.**
+    //
+    // A trade puts the displaced pane straight into that slot, which is why it
+    // is a *replace* and not a close followed by an insert: no rectangle moves,
+    // no ratio is rewritten, and the tree is never briefly empty — which for a
+    // lone pane is the difference between the ruling and G84's refusal. Every
+    // other aim displaces nobody, so the slot has nothing to hold and the seat
+    // is closed exactly as it always was.
+    let source_emptied =
+        displaced.is_none() && closing_this_pane_closes_the_tab(from.seats.pane_count());
+    let traded = match displaced.as_ref() {
+        Some(other) => Some(from.seats.stand_in_pane(metrics, seat, other)?),
+        None => {
+            if !source_emptied && !from.seats.close_seat(metrics, seat) {
+                return None;
+            }
+            None
+        }
+    };
+    into.seats.adopt_drop(plan)?;
+    // **The traveller's content first, and the trade's second.** The order is
+    // [`absorb_tab_into_layout`]'s and it matters for the same reason: the
+    // arriving pane has to be filed under `landed` before the displaced pane's
+    // is taken out from under its old id, so no table is ever holding two
+    // entries for one surface.
+    move_seat_content(from, into, seat, landed, watched);
+    if let (Some(other), Some(stood_in)) = (displaced.as_ref(), traded) {
+        move_seat_content(into, from, other.id, stood_in, source_watched);
+    }
+    // **§7.1.3 「若是原 tab 最后一个预览 pane 则整池随行」, asked of both tabs
+    // and asked *after* the trade.**
+    //
+    // It used to be read off the source alone and computed before the edit,
+    // because before B4 only the source could lose its last preview seat. A
+    // trade can strand either pool or neither: swap a terminal for a preview and
+    // the history has to follow the preview pane into the tab it now lives in,
+    // in whichever direction that is. The condition is the same one
+    // [`pane_into_new_tab`] asks — nothing is left to reach the pool from — and
+    // the destination is the tab that still has a preview pane to reach it with,
+    // because a pool with no door onto it is a set of unsaved buffers nobody can
+    // find. Both stranded at once means neither tab has a door, and the pool
+    // stays where it is rather than being moved somewhere equally unreachable.
+    //
+    // **A tab the move emptied is stranded whatever its tree still says** (user
+    // ruling 2026-08-29, defect #187). The lone-pane path deliberately does not
+    // call `close_seat` — G84 refuses to empty a tree, so the seat is left
+    // standing in a tab the window is about to take out of the strip — and
+    // `preview_seats()` therefore answers with a seat that has already left.
+    // Read literally, this rule then said "the source still has a door onto its
+    // pool" about a tab with no door, no strip entry and, one line later in
+    // [`Runtime::move_pane_across_tabs`], no existence: every buffer in it went
+    // out with `absorb_tab_into_strip`. Worse than silent: with the target
+    // holding no preview seat of its own the *second* arm fired instead and
+    // moved the target's pool **into** the dying tab.
+    //
+    // Which is also why "both stranded, so leave it where it is" is asked of the
+    // target alone once the source is going: leaving something in a tab that is
+    // about to be removed is not the cautious answer, it is the destructive one.
+    let source_stranded = source_emptied || from.seats.preview_seats().is_empty();
+    let target_stranded = !source_emptied && into.seats.preview_seats().is_empty();
+    if source_stranded && !target_stranded {
+        into.preview_pool
+            .merge_from(std::mem::take(&mut from.preview_pool));
+        into.preview_views
+            .absorb(std::mem::take(&mut from.preview_views));
+    } else if target_stranded && !source_stranded {
+        from.preview_pool
+            .merge_from(std::mem::take(&mut into.preview_pool));
+        from.preview_views
+            .absorb(std::mem::take(&mut into.preview_views));
+    }
+    // D43 in the target: `adopt_drop` has already put layout focus on the leaf
+    // that landed. The *keyboard* only follows it if a shell came with it —
+    // `focused_leaf` may never name a leaf its tab has no session for (I106) —
+    // and only when that tab is the one being typed into.
+    if watched && into.sessions.contains_key(&landed) {
+        into.focused_leaf = landed;
+    }
+    // And the same sentence for the pane that came the other way, on the same
+    // two conditions. Layout focus is already settled — [`Seats::stand_in_pane`]
+    // moves it onto the arriving seat exactly when the traveller had it, which
+    // is the honest reading of a trade: the slot keeps the focus, whoever is
+    // standing in it. The keyboard follows only if that tab is the one being
+    // typed into and a shell came with the pane (I106).
+    if let Some(stood_in) = traded
+        && source_watched
+        && from.seats.focus() == stood_in
+        && from.sessions.contains_key(&stood_in)
+    {
+        from.focused_leaf = stood_in;
+    }
+    if source_emptied {
+        debug_assert!(
+            from.sessions.is_empty(),
+            "T226: the tab this pane emptied is leaving with a shell still filed under it"
+        );
+    } else {
+        from.refocus_after_losing(seat);
+        let (layout, overflow) = solve(&from.seats);
+        from.seat_layout = layout;
+        from.seat_overflow = overflow;
+        debug_assert!(
+            from.sessions_match_terminals(),
+            "item 6: the tab a pane left still matches its own tree"
+        );
+        debug_assert!(
+            from.files_match_files_seats(),
+            "A3: and so do its files columns"
+        );
+    }
+    // The target may be a tab nobody is looking at, so it is solved here rather
+    // than left to `activate_tab`'s way in: a `TabState` holding a layout for a
+    // tree it no longer has is a lie every off-screen reader of it believes —
+    // the focus card's thumbnail among them. What is *not* done here is the
+    // shell's grid, on N157's own terms: a pane waits for you in the tab it was
+    // put in, and a shell told a column count that never reaches the screen has
+    // been told the wrong one.
+    let (layout, overflow) = solve(&into.seats);
+    into.seat_layout = layout;
+    into.seat_overflow = overflow;
+    debug_assert!(
+        into.sessions_match_terminals(),
+        "item 6: the tab that took the pane matches its own tree"
+    );
+    Some(PaneMove {
+        landed,
+        traded,
+        source_emptied,
+    })
+}
+
+/// **N159/K124 — a tab merged into a pane's layout hands its fleet over.**
+///
+/// The tree has already been adopted by the time this runs; `commit_layout_drop`
+/// installed exactly the plan the preview drew (D4). What is left is everything a
+/// tree cannot say, and all of it is about the two *tabs*.
+///
+/// **The sessions migrate along `arrived`** — [`seats::DropPlan::arrived`], the
+/// map the renumbering wrote down. Every shell the source tab held moves into the
+/// target under the key its seat now answers to. Nothing is killed and nothing is
+/// respawned, for the reason [`pane_into_new_tab`] gives: two gestures that look
+/// the same on screen and differ in whether the user's work survives are not
+/// interchangeable. A `remove` and an `insert` with nothing in between is what
+/// makes that structural.
+///
+/// **D44, over the top of D43.** `adopt_drop` has already put focus where the
+/// accent box was drawn, which is its rule and the right one for a pane arriving
+/// at an edge. A whole tab merging in is the one landing D44 speaks about
+/// instead: the merged tab keeps *its own* focused leaf, because that is the pane
+/// you were working in and the merge did not ask you to stop. Layout focus
+/// follows it, and the keyboard follows layout focus when — and only when — that
+/// seat now holds a session, since `focused_leaf` may never name a leaf this tab
+/// has no shell for. Applied here rather than inside `adopt_drop` because it
+/// needs the arriving tab's focus carried across the renumbering and needs to
+/// know a session came with it, and `Seats` knows neither.
+///
+/// **N160① — pin follows content.** A pinned source tab makes the target pinned:
+/// the target now holds the thing you asked to have back at launch, and a pin
+/// that stayed behind on a tab that no longer exists is a promise nobody can
+/// keep. Never the other way — absorbing an unpinned tab does not unpin the tab
+/// that absorbed it, because you did not ask for that.
+///
+/// **N159 — the arrived members owe no unread claim.** They have just become
+/// part of the tab on screen, which is the event `mark_seen` answers, so each
+/// migrated leaf's ledger is brought up to date and its latches retired. Only the
+/// migrated ones: the target's own leaves have whatever claims they had a moment
+/// ago and the merge did not answer those.
+///
+/// **The preview image travels with the Preview seat that brought it.** An image
+/// is to a preview seat what a session is to a terminal, so a merge that carried
+/// a preview across and left its picture behind would seat an empty frame. It is
+/// re-keyed along `arrived` exactly as a files column's tree is, which is what
+/// the plural content plane bought: the picture belongs to a *surface*, so the
+/// question "does the target already have one" — the tab-level guard this used to
+/// need — does not arise.
+pub(crate) fn absorb_tab_sessions(
+    source: &mut TabState,
+    target: &mut TabState,
+    arrived: &[(SeatId, SeatId)],
+) {
+    for (was, now) in arrived {
+        // **N159 — every migrated leaf has just become part of the tab on
+        // screen**, which is the event `mark_seen` answers, so a merge is always
+        // a `watched` move. §7.1.6k's pane drop is the one that is not: a pane
+        // handed to a *background* tab has not been seen, and its ledger keeps
+        // whatever it was owed.
+        move_seat_content(source, target, *was, *now, true);
+    }
+    // **P121/P122/P127 — the pool travels, and the two pools become one.**
+    //
+    // A merge takes *every* seat the source had, so its last preview pane is
+    // leaving by construction and §7.1.3's "若是原 tab 最后一个预览 pane 则整池
+    // 随行" is the whole of the answer here. It is `take`n rather than cloned
+    // because that ruling's own argument is about reachability — an orphaned
+    // dirty buffer must stay findable *somewhere*, and a second copy left behind
+    // on a tab that is about to stop existing is the opposite of somewhere.
+    //
+    // The arriving buffers meet the target's own under the one-buffer-per-file
+    // law ([`preview::PreviewPool::merge_buffer`]): dirty wins, a tie stays with
+    // the tab that was already holding it. Panes on either side need no
+    // redirecting, because a surface names its buffer by path.
+    target
+        .preview_pool
+        .merge_from(std::mem::take(&mut source.preview_pool));
+    // And what those buffers looked like the last time somebody was on them. A
+    // pool that arrived without its view memory would put every switch back to a
+    // migrated file at the top of the file, which is the "only the picture" bug
+    // above in miniature.
+    target
+        .preview_views
+        .absorb(std::mem::take(&mut source.preview_views));
+    if let Some((_, now)) = arrived.iter().find(|(was, _)| *was == source.focused_leaf) {
+        target.seats.set_focus(*now);
+        if target.sessions.contains_key(now) {
+            target.focused_leaf = *now;
+        }
+    }
+    target.pinned |= seed::PinMigration::MergedInto.resulting_pin(source.pinned);
+    debug_assert!(
+        source.sessions.is_empty(),
+        "T226: a merge takes the whole fleet, so no empty tab is left holding shells"
+    );
+    debug_assert!(
+        source.files.is_empty(),
+        "T226: a merge takes the whole tree, so no empty tab is left holding folders"
+    );
+    // **Item 6 is asserted at the end of the *gesture*, not here, and the
+    // difference is N161.** A merge on its own leaves the target matching its
+    // own tree and could say so; a replace does not, and must not be made to.
+    // `ReplaceSeat` has already taken the displaced pane out of the tree while
+    // its shell is still filed under it, and that shell has nowhere to be until
+    // the ejection seats it in a tab of its own — moving the ejection in here to
+    // satisfy an assertion would fold two rulings (N159 and N161) into one verb
+    // so that a debug build could be quieter. So what this verb asserts is what
+    // this verb is responsible for: every Terminal leaf that *arrived* has a
+    // shell filed under the id it now answers to. `commit_layout_drop` asserts
+    // the whole invariant once both halves have run.
+    debug_assert!(
+        arrived.iter().all(|(_, now)| {
+            match target.seats.tree().find_seat(*now) {
+                Some(seat) => {
+                    seat.kind != bt_layout::SeatKind::Terminal || target.sessions.contains_key(now)
+                }
+                None => true,
+            }
+        }),
+        "N159: an arrived Terminal leaf has no shell filed under its new id"
+    );
+}
+
+/// **A silent birth death's last-resort shell takes its pane on the birth road**
+/// (T-SHELL-BIRTH-DEATH). The pane is finished from it exactly as a pane whose own program would
+/// not start is ([`finish_leaf_birth`] over a session carrying bt-pty's fallback record): the same
+/// banner under the profile that was asked for, the profile, program, place, paste recipient and
+/// integration of the shell that started. The decision is the dead shell's own, read back from the
+/// pane it was landed on. The record's diagnostics line is not owed here — the birth death's own
+/// exit line names the fallback — so it is spent with the landing.
+fn land_birth_death_fallback_shell(
+    leaf: &mut TerminalPane,
+    pty: PtySession,
+    landing: ShellLanding,
+) -> Result<()> {
+    let ShellLanding {
+        decision,
+        born_grid,
+        owed_physical,
+        ..
+    } = landing;
+    let seed = LeafSeed {
+        profile: leaf.session.launch.profile.clone(),
+        ..LeafSeed::default()
+    };
+    finish_leaf_birth(leaf, Some(pty), &decision, &seed, None, false)?;
+    // The stale spawn record goes before the apply can fail: a fallback that landed but could
+    // not be resized is still a landed fallback, not one still pending.
+    leaf.session.life.take_spawn_fallback();
+    apply_owed_shell_resize(&mut leaf.session, born_grid, owed_physical)?;
+    Ok(())
 }
 
 /// **Which panes may become a tab of their own, stated once and asked in two
@@ -4451,6 +5377,7 @@ pub(crate) fn new_tab_leaf_seed(
         card_skip: 0,
         prefill: None,
         carried_environment: None,
+        agent: crate::agent_resume::SeedAgent::None,
     }
 }
 
@@ -4522,9 +5449,10 @@ mod life_tests;
 #[cfg(test)]
 mod birth_death_tests {
     use super::*;
+    use crate::lane::Hold;
     use crate::test_support;
     use std::num::NonZeroU16;
-    use std::sync::{Arc, Barrier, mpsc};
+    use std::sync::{Arc, mpsc};
 
     fn grid(columns: u16, rows: u16) -> crate::GridSize {
         crate::GridSize {
@@ -4543,14 +5471,18 @@ mod birth_death_tests {
         )
     }
 
+    /// Waits for the birth's wake within the lane suite's patience: both births below are born
+    /// at once — the fallback's answer is its `CreateProcess`, the fresh birth's a shell that owes
+    /// no history refusal (`test_support::a_quiet_shell`, plan row 167) — so a birth that never
+    /// wakes is red by name here and not a hang.
     fn wait_for_answer(shell: &pty_door::ShellBirth, heard: &mpsc::Receiver<()>) {
         while !shell.answered() {
-            heard.recv().expect("a birth publishes before it wakes");
+            crate::lane::receive(heard, "the birth's wake");
         }
     }
 
     fn resize_pending_shell(
-        leaf: &mut crate::LeafSession,
+        leaf: &mut crate::ShellSession,
         next: crate::GridSize,
         physical: winit::dpi::PhysicalSize<u32>,
     ) {
@@ -4566,11 +5498,11 @@ mod birth_death_tests {
             })
             .expect("the pane reflows")
         );
-        let commit =
-            crate::release_due_leaf_resize(leaf, started + crate::WINDOW_RESIZE_QUIET, false)
-                .expect("the resize is released")
-                .0
-                .expect("the child is owed a resize");
+        let commit = leaf
+            .release_due_size(started + crate::WINDOW_RESIZE_QUIET, false)
+            .expect("the resize is released")
+            .0
+            .expect("the child is owed a resize");
         assert!(commit.told_the_child);
     }
 
@@ -4589,8 +5521,8 @@ mod birth_death_tests {
 
     /// MUTATION (observed RED): drop `owed_physical` at the fallback landing and the PTY remains at
     /// its born size; make a silent birth death answer `Keep` and the disposition assertion fails;
-    /// drop the record from `BirthFallback::spawn` and the landing writes no banner and keeps the
-    /// asked-for program; ask the reaper's liveness rule anything but `ShellLife::holds_its_tab`
+    /// drop the record from `BirthFallback::spawn_through` and the landing writes no banner and
+    /// keeps the asked-for program; ask the reaper's liveness rule anything but `ShellLife::holds_its_tab`
     /// (whose answer in each phase `every_life_transition_is_one_method_and_no_other` pins), or let
     /// the birth-death arm fall through to the retirement road, and the wiring pin fails.
     /// MUTATION (T-WINDOWS-SHELL-NAMESPACES, observed RED): drop `finish_leaf_birth`'s reset of the
@@ -4611,55 +5543,67 @@ mod birth_death_tests {
         };
         let banner = crate::fallback_banner(&record, profiles::fallback_profile_id());
         assert!(banner.contains("failed to start"), "{banner:?}");
-        let mut leaf = test_support::leaf_saying("");
-        leaf.launch.program = Some(PathBuf::from("preferred-shell"));
+        // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
+        // before the shell's folder, as the passing teardown below does (plan row 188).
+        let (kept, hygiene) = mpsc::channel();
+        let mut leaf = test_support::ReapedPane(test_support::leaf_saying(""));
+        leaf.session.launch.program = Some(PathBuf::from("preferred-shell"));
         // The program that died was a Cygwin bash; the one that lands is Windows PowerShell.
-        leaf.launch.program_kind = profiles::ShellProgram::Cygwin;
-        let born_grid = leaf.conpty_grid;
+        leaf.session.launch.program_kind = profiles::ShellProgram::Cygwin;
+        let born_grid = leaf.session.conpty_grid;
         let (wake, heard) = waking();
         let worker_wake = Arc::clone(&wake);
-        let open = Arc::new(Barrier::new(2));
+        let open = Arc::new(Hold::default());
+        open.hold();
         let worker_open = Arc::clone(&open);
+        // The retained last-resort command is the claim, so it is the real one that starts — but
+        // through the test-shell door (plan row 174): the product's `spawn_last_resort` refuses a
+        // fallback a test made, and the door starts it without the account's startup files.
         let shell = pty_door::request(
             move |_| {
-                worker_open.wait();
-                fallback.spawn(
+                worker_open.pass();
+                bt_pty::test_shell::TestShell::spawn_birth_fallback(
+                    fallback,
                     born_grid.columns,
                     born_grid.rows,
                     worker_wake,
                     "exited".to_owned(),
                 )
+                .map(|(session, shell_hygiene)| {
+                    let _ = kept.send(shell_hygiene);
+                    session
+                })
             },
             wake,
         )
         .expect("the fallback birth worker starts");
-        let exit = exit_diagnostics::ShellExit {
-            seat: 4,
-            code: Some(23),
-            elapsed: Duration::from_millis(400),
-            program: leaf.launch.program.clone(),
-            tab: 8,
-            disposition: exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(
-                bt_pty::LAST_RESORT_SHELL,
-            ),
-        };
-        let pending = crate::BirthDeathFallback::waiting(&leaf, shell, exit);
-        leaf.life.fall_back(pending);
+        let exit = exit_diagnostics::ShellExit::unprobed(
+            4,
+            Some(23),
+            Duration::from_millis(400),
+            leaf.session.launch.program.clone(),
+            8,
+            exit_diagnostics::ShellExitDisposition::BirthDeathFellBack(bt_pty::LAST_RESORT_SHELL),
+        );
+        let pending = crate::BirthDeathFallback::waiting(&leaf.session, shell, exit);
+        leaf.session.life.fall_back(pending);
 
         let resized_grid = grid(52, 7);
         let resized_physical = winit::dpi::PhysicalSize::new(777, 333);
-        resize_pending_shell(&mut leaf, resized_grid, resized_physical);
+        resize_pending_shell(&mut leaf.session, resized_grid, resized_physical);
         assert_eq!(
-            leaf.life
+            leaf.session
+                .life
                 .falling_back()
                 .and_then(|pending| pending.landing.owed_physical),
             Some(resized_physical),
             "the pending fallback owns the released size"
         );
 
-        open.wait();
+        open.release();
         wait_for_answer(
             &leaf
+                .session
                 .life
                 .falling_back()
                 .expect("the fallback is pending")
@@ -4671,8 +5615,9 @@ mod birth_death_tests {
             land_birth_death_fallback(&mut leaf).expect("the fallback lands"),
             BirthDeathLanding::FellBack(_)
         ));
-        assert!(leaf.life.pty().is_some() && leaf.life.spawn_fallback.is_none());
+        assert!(leaf.session.life.pty().is_some() && leaf.session.life.spawn_fallback.is_none());
         let landed_size = leaf
+            .session
             .life
             .pty()
             .expect("the fallback is seated")
@@ -4683,26 +5628,35 @@ mod birth_death_tests {
             crate::pty_size(resized_grid, resized_physical),
             "the fallback PTY receives the size released while it was pending"
         );
-        assert_eq!(leaf.launch.profile, profiles::fallback_profile_id());
+        assert_eq!(leaf.session.launch.profile, profiles::fallback_profile_id());
         assert_eq!(
-            leaf.launch.program.as_deref(),
+            leaf.session.launch.program.as_deref(),
             Some(Path::new(bt_pty::LAST_RESORT_SHELL))
         );
         // And the spelling it reads is the one the shell that landed prints.
-        assert_eq!(leaf.launch.program_kind, profiles::ShellProgram::Native);
+        assert_eq!(
+            leaf.session.launch.program_kind,
+            profiles::ShellProgram::Native
+        );
         let landed_spelling = profiles::printed_path_namespace(
             profiles::index_of_id(profiles::fallback_profile_id()),
             &profiles::ShellProgram::Native,
             &bt_pty::SystemShellEnvironment,
         );
-        assert_eq!(leaf.session.printed_path_namespace(), landed_spelling);
-        assert_eq!(leaf.launch.paste_recipient.namespace, landed_spelling);
+        assert_eq!(
+            leaf.session.session.printed_path_namespace(),
+            landed_spelling
+        );
+        assert_eq!(
+            leaf.session.launch.paste_recipient.namespace,
+            landed_spelling
+        );
         let squeeze = |text: &str| -> String {
             text.chars()
                 .filter(|character| !character.is_whitespace())
                 .collect()
         };
-        let visible = leaf.session.terminal().visible_text().join("\n");
+        let visible = leaf.session.session.terminal().visible_text().join("\n");
         // The banner's text, without the dim attribute that wraps it on the wire.
         let shown = banner.replace("\u{1b}[2m", "").replace("\u{1b}[0m", "");
         assert!(squeeze(&visible).contains(&squeeze(&shown)), "{visible:?}");
@@ -4722,18 +5676,28 @@ mod birth_death_tests {
             "a pane whose fallback is being born, or which was kept, keeps its tab: {reap}"
         );
         assert!(!tab_has_ended(true, true) && tab_has_ended(true, false));
+        drop(leaf);
+        drop(crate::lane::receive(
+            &hygiene,
+            "the fallback shell's hygiene",
+        ));
     }
 
-    /// MUTATION (observed RED in T-BIRTH-OFF-WINDOW): drop an ordinary landing's owed size and the
-    /// PTY remains at its born size. This is the no-regression twin of the fallback test above.
+    /// MUTATION (observed RED in T-BIRTH-OFF-WINDOW, again in plan row 167): drop an ordinary
+    /// landing's owed size and the PTY remains at its born size. This is the no-regression twin of
+    /// the fallback test above. Its shell is a quiet one: the claim needs a live pseudoconsole
+    /// and not the default shell, whose history refusal took ~18 s to read back (plan row 167).
     #[test]
     fn a_fresh_birth_still_lands_at_the_size_released_while_it_was_pending() {
         test_support::on_the_window_thread();
-        let mut leaf = test_support::leaf_saying("");
-        let born_grid = leaf.conpty_grid;
+        // Declared before the pane, so an unwinding assertion drops the pane (and its shell)
+        // before the shell's folder, as the passing teardown below does (plan row 188).
+        let (kept, hygiene) = mpsc::channel();
+        let mut leaf = test_support::ReapedPane(test_support::leaf_saying(""));
+        let born_grid = leaf.session.conpty_grid;
         let decision = crate::BirthDecision {
             started: crate::Started::AsAsked,
-            spawn_profile: leaf.launch.profile.clone(),
+            spawn_profile: leaf.session.launch.profile.clone(),
             spawn_place: None,
             at_shell_home: false,
             named: false,
@@ -4742,22 +5706,21 @@ mod birth_death_tests {
             unless_gone: None,
         };
         let seed = crate::LeafSeed {
-            profile: leaf.launch.profile.clone(),
+            profile: leaf.session.launch.profile.clone(),
             ..crate::LeafSeed::default()
         };
         let (wake, heard) = waking();
-        let open = Arc::new(Barrier::new(2));
+        let open = Arc::new(Hold::default());
+        open.hold();
         let worker_open = Arc::clone(&open);
-        let (kept, hygiene) = mpsc::channel();
         let shell = pty_door::request(
             move |_| {
-                worker_open.wait();
-                bt_pty::test_shell::TestShell::spawn_default(bt_pty::PtySize::cells(
+                worker_open.pass();
+                test_support::a_quiet_shell(bt_pty::PtySize::cells(
                     born_grid.columns,
                     born_grid.rows,
                 ))
-                .map(|shell| {
-                    let (session, shell_hygiene) = shell.into_session();
+                .map(|(session, shell_hygiene)| {
                     let _ = kept.send(shell_hygiene);
                     session
                 })
@@ -4765,23 +5728,24 @@ mod birth_death_tests {
             wake,
         )
         .expect("the fresh birth worker starts");
-        crate::await_shell(&mut leaf, shell, decision, &seed);
+        crate::await_shell(&mut leaf.session, shell, decision, &seed);
 
         let resized_grid = grid(57, 9);
         let resized_physical = winit::dpi::PhysicalSize::new(901, 407);
-        resize_pending_shell(&mut leaf, resized_grid, resized_physical);
-        open.wait();
-        let landing = match leaf.life.birth().map(|birth| &birth.waiting) {
+        resize_pending_shell(&mut leaf.session, resized_grid, resized_physical);
+        open.release();
+        let landing = match leaf.session.life.birth().map(|birth| &birth.waiting) {
             Some(crate::BirthWait::Shell(landing)) => landing,
             _ => panic!("the fresh shell is pending"),
         };
         wait_for_answer(&landing.shell, &heard);
         assert!(
-            crate::land_shell_birth(&mut leaf, |_| {})
+            crate::runtime::panes::land_shell_birth(&mut leaf, |_| {})
                 .expect("the fresh birth lands")
                 .is_none()
         );
         let landed_size = leaf
+            .session
             .life
             .pty()
             .expect("the fresh shell is seated")
@@ -4793,7 +5757,7 @@ mod birth_death_tests {
             "the fresh PTY still receives the size released while it was pending"
         );
         drop(leaf);
-        drop(hygiene.recv().expect("the fresh shell's hygiene"));
+        drop(crate::lane::receive(&hygiene, "the fresh shell's hygiene"));
     }
 
     /// MUTATION (observed RED): ignore the byte count and choose the fallback; the disposition
@@ -4809,16 +5773,16 @@ mod birth_death_tests {
         );
         assert_eq!(disposition(&mut pty), Some(BirthDeathDisposition::Keep));
         let mut leaf = test_support::leaf_saying("先说出的错误");
-        let exit = exit_diagnostics::ShellExit {
-            seat: 4,
-            code: Some(23),
-            elapsed: Duration::from_millis(900),
-            program: Some(PathBuf::from("tools").join("broken-shell")),
-            tab: 8,
-            disposition: exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
-        };
-        keep_birth_death_face(&mut leaf, &exit, true).expect("the face is appended");
-        let visible = leaf.session.terminal().visible_text().join("\n");
+        let exit = exit_diagnostics::ShellExit::unprobed(
+            4,
+            Some(23),
+            Duration::from_millis(900),
+            Some(PathBuf::from("tools").join("broken-shell")),
+            8,
+            exit_diagnostics::ShellExitDisposition::BirthDeathPaneKept,
+        );
+        keep_birth_death_face(&mut leaf.session, &exit, true).expect("the face is appended");
+        let visible = leaf.session.session.terminal().visible_text().join("\n");
         let compact: String = visible
             .chars()
             .filter(|character| !character.is_whitespace())
@@ -4829,23 +5793,23 @@ mod birth_death_tests {
             "{visible:?}"
         );
         assert!(
-            matches!(leaf.life.phase, crate::Phase::Kept)
-                && leaf.wake.is_none()
-                && leaf.life.pty().is_none()
+            matches!(leaf.session.life.phase, crate::Phase::Kept)
+                && leaf.session.wake.is_none()
+                && leaf.session.life.pty().is_none()
         );
         assert!(!tab_has_ended(true, true));
 
         // The reaper settles every collected exit once the turn's retirements are known; a kept
         // birth death beside an ordinary exit in the same active tab, whose pane that turn
         // retires, still says what happened to it.
-        let ordinary = exit_diagnostics::ShellExit {
-            seat: 5,
-            code: Some(0),
-            elapsed: Duration::from_secs(60),
-            program: Some(PathBuf::from("sh")),
-            tab: 8,
-            disposition: exit_diagnostics::ShellExitDisposition::TabKept,
-        };
+        let ordinary = exit_diagnostics::ShellExit::unprobed(
+            5,
+            Some(0),
+            Duration::from_secs(60),
+            Some(PathBuf::from("sh")),
+            8,
+            exit_diagnostics::ShellExitDisposition::TabKept,
+        );
         let mut exits = vec![(0, exit), (0, ordinary)];
         settle_exit_dispositions(&mut exits, &BTreeSet::new(), 0, true);
         let mut lines = Vec::new();
@@ -4860,6 +5824,39 @@ mod birth_death_tests {
                 "settle_exit_dispositions(&mutexits,&retired_tabs,active,active_retires_panes);"
             ),
             "the reaper names its exits through the settling rule: {reap}"
+        );
+    }
+
+    /// RED (row 195, review F6) — **a resumed agent's own end is said as handed back**: the reaper
+    /// writes its `shell exited` line with the disposition `handed back`, and the turn's settling
+    /// leaves it so even where the same turn retires the active tab's panes.
+    ///
+    /// MUTATION: drop `HandedBack` from the dispositions `settle_exit_dispositions` leaves as
+    /// written, and the line says `retired pane`.
+    #[test]
+    fn a_resumed_agents_own_end_is_said_as_handed_back() {
+        let handed_back = exit_diagnostics::ShellExit::unprobed(
+            6,
+            Some(1),
+            Duration::from_secs(90),
+            Some(PathBuf::from("claude.exe")),
+            9,
+            exit_diagnostics::ShellExitDisposition::HandedBack,
+        );
+        let mut exits = vec![(0, handed_back)];
+        settle_exit_dispositions(&mut exits, &BTreeSet::new(), 0, true);
+        let mut lines = Vec::new();
+        exit_diagnostics::say_shell_exits(exits.iter().map(|(_, exit)| exit), |line| {
+            lines.push(line.to_owned());
+        });
+        assert_eq!(
+            lines,
+            ["Folio: pane 6 shell exited code=1 after 90000 ms (claude.exe, tab 9, handed back)"]
+        );
+        let reap = test_support::squeezed_body("Runtime", "reap_exited_tabs");
+        assert!(
+            reap.contains("exit_diagnostics::ShellExitDisposition::HandedBack,),"),
+            "the reaper says the hand-back, through the probe every exit carries: {reap}"
         );
     }
 

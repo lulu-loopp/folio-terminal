@@ -443,7 +443,7 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
     `bare-relative-feel` 197→0、`osc7-relative-feel` 171→0、`pwsh-default-verify` 166→0、
     `image-accept` 51→0。
 - **顺带定案(不是我们的)**:同一份录像里最后一条提示符渲染成 `(base) PS ` 加命令,而更早的
-  提示符是完整的 `(base) PS D:\Developer\BetterTerminal>`。**回放逐字节重现**(`BT_PROBE_DOCDUMP`
+  提示符是完整的 `(base) PS D:\src\project-checkout-dir>`。**回放逐字节重现**(`BT_PROBE_DOCDUMP`
   的 `DOC[6]`),因为它就在字节流里:录像从 37→29→53 列改过尺寸,我们对 `CSI 6 n` 的回答是
   `CUP 10;40`(39 列提示符之后的真值,子进程随即照抄),然后子进程**自己**用 `CUP 10;11` 去重画
   缓冲——那是它从 29 列窄窗记住的输入锚。与 `RECORDED_STALE_ANCHOR_REPAINT` /

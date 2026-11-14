@@ -24,7 +24,7 @@ use bt_persist::{
     read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
 };
 
-use crate::document_request::{DocumentState, QuitDocument, ReadNews};
+use crate::document_request::{DocumentState, QuitDocument, ReadNews, StoreAnswer};
 use crate::startup::{Settled, SettledOnce};
 
 /// The name the session document wears on disk, which is also what a notice
@@ -592,6 +592,9 @@ type StorageLedger = crate::lane::Ledger<StorageId, StorageOwed>;
 /// One admitted storage request, held by its asker beside the road its answer comes on.
 pub(crate) type StorageRequest = crate::lane::Request<StorageId, StorageOwed>;
 
+/// A storage drain's mark ([`StorageLane::drain_mark`]).
+pub(crate) type StorageMark = crate::lane::Mark<StorageId>;
+
 /// **Why a door did not admit a request**, before the asker says it in its own words.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NotAdmitted {
@@ -633,12 +636,53 @@ impl NotAdmitted {
 /// after its terminal is published, so a road read closed after a `Done` is a worker that ended
 /// in between, and a road the door answered itself (no identity: refused there) is read as it
 /// is. The asker's going drops it, and its terminal goes to the lane's sink.
+///
+/// **It is heard only below a drain's mark** (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION,
+/// [`Self::hear_below`]): the lane declares its answers delivered in admission order
+/// (`lane::STORAGE`), so no asker takes its own answer on its own turn; the application takes
+/// every asker's once per drain, below one mark, and answers them in the order they were
+/// admitted (`App::storage_answers`).
 pub(crate) struct OnTheWorker<A> {
     road: mpsc::Receiver<A>,
     request: Option<StorageRequest>,
+    /// Where its answer stands in the order the lane admitted its requests.
+    order: InAdmissionOrder,
 }
 
-/// What an asker hears of one request on the storage worker ([`OnTheWorker::hear`]).
+/// **Where one storage answer stands in the order the lane admitted its requests**
+/// (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION): an admitted request by the identity the ledger
+/// minted; a refusal the door answered itself (no identity, R4) after the last identity minted
+/// before it, in the order the refusals were made. The order one drain answers in
+/// (`lane::in_admission_order`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct InAdmissionOrder {
+    /// The identity, or the last one minted before the refusal (`0`: none).
+    minted: u64,
+    /// `0` for an admitted request; the refusal's place among the lane's refusals otherwise.
+    refused: u64,
+}
+
+impl InAdmissionOrder {
+    /// **Whether a drain marked `owed` may take it**: an admitted request below the mark —
+    /// which has ended — or a refusal every request admitted before which is below the mark.
+    pub(crate) fn below(self, owed: Option<StorageId>) -> bool {
+        owed.is_none_or(|owed| self.minted < owed.0)
+    }
+}
+
+/// **What one request on the storage worker came to**, as a drain takes it
+/// ([`OnTheWorker::hear_below`]).
+#[derive(Debug)]
+pub(crate) enum Ended<A> {
+    Answered(A),
+    /// Its task failed, in these words ([`storage_task_failed`]).
+    Failed(String),
+    /// The worker ended with it unanswered.
+    Gone,
+}
+
+/// What an asker hears of one request on the storage worker, looked at alone
+/// ([`OnTheWorker::within_patience`]).
 #[derive(Debug)]
 pub(crate) enum Reply<A> {
     /// Nothing yet.
@@ -653,24 +697,64 @@ pub(crate) enum Reply<A> {
 impl<A> OnTheWorker<A> {
     /// A request the lane admitted as `request`, answered on `road`.
     pub(crate) fn admitted(road: mpsc::Receiver<A>, request: StorageRequest) -> Self {
+        let order = InAdmissionOrder {
+            minted: request.id().0,
+            refused: 0,
+        };
         Self {
             road,
             request: Some(request),
+            order,
         }
     }
 
-    /// A request refused at the door, whose refusal the door put on `road` itself.
-    pub(crate) fn answered_at_the_door(road: mpsc::Receiver<A>) -> Self {
+    /// A request `lane` refused at the door, whose refusal the door put on `road` itself.
+    pub(crate) fn answered_at_the_door(road: mpsc::Receiver<A>, lane: &StorageLane) -> Self {
         Self {
             road,
             request: None,
+            order: lane.refused_here(),
         }
     }
 
-    /// **What has become of it**, never waiting.
+    /// **What has become of it, if it stands below the drain's `mark`**
+    /// ([`StorageLane::drain_mark`], read once for every asker of the drain): its place in
+    /// admission order and what it came to, or `None` — at or past the mark, or nothing yet.
+    /// Never waits.
+    pub(crate) fn hear_below(
+        &mut self,
+        mark: &StorageMark,
+    ) -> Option<(InAdmissionOrder, Ended<A>)> {
+        if !self.order.below(mark.owed()) {
+            return None;
+        }
+        let ended = match self.reply(mark) {
+            Reply::Waiting => return None,
+            Reply::Answered(answer) => Ended::Answered(answer),
+            Reply::Failed(words) => Ended::Failed(words),
+            Reply::Gone => Ended::Gone,
+        };
+        Some((self.order, ended))
+    }
+
+    /// **What has become of it**, with no mark — a test's way to hear one request alone.
+    #[cfg(test)]
     pub(crate) fn hear(&mut self) -> Reply<A> {
+        self.reply(&crate::lane::Mark::unmarked_for_a_test())
+    }
+
+    /// [`Self::hear_below`] with no mark, as a drain would hand it on — a test's way to hear
+    /// one request alone.
+    #[cfg(test)]
+    pub(crate) fn heard_alone(&mut self) -> Option<Ended<A>> {
+        self.hear_below(&crate::lane::Mark::unmarked_for_a_test())
+            .map(|(_, ended)| ended)
+    }
+
+    /// What has become of it under the drain's `mark`, never waiting.
+    fn reply(&mut self, mark: &StorageMark) -> Reply<A> {
         if let Some(request) = &mut self.request {
-            match request.take() {
+            match request.take(mark) {
                 None => return Reply::Waiting,
                 Some(crate::lane::Terminal::Done(())) => self.request = None,
                 Some(crate::lane::Terminal::Failed(failure)) => {
@@ -697,7 +781,7 @@ impl<A> OnTheWorker<A> {
     pub(crate) fn within_patience(&mut self, what: &str) -> Reply<A> {
         let mut heard = Reply::Waiting;
         crate::lane::wait_until(what, || {
-            heard = self.hear();
+            heard = self.reply(&crate::lane::Mark::unmarked_for_a_test());
             !matches!(heard, Reply::Waiting)
         });
         heard
@@ -1101,6 +1185,12 @@ struct LaneShared {
     sink: StorageSink,
     /// Whether the worker the executor started has ended and told the ledger.
     ended: Arc<std::sync::atomic::AtomicBool>,
+    /// How many requests the doors refused and answered themselves ([`StorageLane::refused_here`]).
+    refusals: std::sync::atomic::AtomicU64,
+    /// The identity of the last request the lane admitted, `0` before the first — set under the
+    /// queue's lock at each admission ([`StorageLane::admit_between`]), so a door's refusal finds
+    /// its place without the ledger's lock.
+    admitted: std::sync::atomic::AtomicU64,
     /// The suite's door, served in place of [`serve_storage_job`].
     #[cfg(test)]
     door: Option<TestDoor>,
@@ -1173,6 +1263,8 @@ impl LaneShared {
             ledger,
             sink,
             ended: Arc::default(),
+            refusals: std::sync::atomic::AtomicU64::new(0),
+            admitted: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             door: None,
             #[cfg(test)]
@@ -1185,6 +1277,14 @@ impl LaneShared {
 fn let_go(_id: StorageId, _terminal: StorageTerminal) {}
 
 impl StorageLane {
+    /// **Whether `other` is this lane** — a clone of the same queue, worker and ledger, as the
+    /// product's six storage askers hold one (`SessionStore::lane`): what a test asks of a
+    /// harness that has to put them where the product does.
+    #[cfg(test)]
+    pub(crate) fn is(&self, other: &StorageLane) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
     /// A lane and the session receipts its worker sends, with no thread yet.
     fn fresh() -> (Self, mpsc::Receiver<SessionWriteReceipt>) {
         Self::fresh_with(
@@ -1350,6 +1450,9 @@ impl StorageLane {
             .admit(StorageOwed(Arc::clone(&self.shared.sink)))
             .map_err(NotAdmitted::of)?;
         let id = request.id();
+        self.shared
+            .admitted
+            .store(id.0, std::sync::atomic::Ordering::Release);
         // A worker serves the queue (`up`, under this lock), so its receiving end stands until
         // its end has taken this lock: the send reaches it, and its end drops the job.
         if ahead {
@@ -1438,6 +1541,46 @@ impl StorageLane {
     /// worker's, or a refusal the request door completed itself.
     pub(crate) fn wake(&self) {
         (self.shared.wake)();
+    }
+
+    /// **The drain's mark** (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION): the earliest request the
+    /// lane's ledger still owes a terminal ([`crate::lane::Ledger::drain_mark`]), read once for
+    /// every asker of one drain (`App::storage_answers`). Every request below it has ended, so
+    /// the askers take a prefix of the order the ledger minted, whatever the worker does while
+    /// they are read.
+    pub(crate) fn drain_mark(&self) -> StorageMark {
+        self.shared.ledger.drain_mark()
+    }
+
+    /// **The mark of the preview's saves at a stop**, after the worker has ended or been let go
+    /// ([`crate::lane::Ledger::mark_after_the_worker_ended`]): the lane delivers nothing after
+    /// it, so no save is held back by it. A named door with one caller
+    /// (`preview::PreviewSaves::answered_at_the_stop`; T-LANE-DRAIN-MARK-GUARD).
+    pub(crate) fn mark_after_the_worker_ended(&self) -> StorageMark {
+        self.shared.ledger.mark_after_the_worker_ended()
+    }
+
+    /// The earliest request still owed — a test's look at whether the lane has ended them all.
+    #[cfg(test)]
+    pub(crate) fn earliest_owed(&self) -> Option<StorageId> {
+        self.shared.ledger.earliest_owed()
+    }
+
+    /// **Where a refusal the door answered itself stands** (R4): after every request admitted
+    /// before it, and before any admitted after it — the last identity the lane admitted, and
+    /// this refusal's place among the refusals since. Takes no lock: a request door answers it.
+    fn refused_here(&self) -> InAdmissionOrder {
+        InAdmissionOrder {
+            minted: self
+                .shared
+                .admitted
+                .load(std::sync::atomic::Ordering::Acquire),
+            refused: self
+                .shared
+                .refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1,
+        }
     }
 }
 
@@ -2047,13 +2190,16 @@ impl SessionStore {
         if !degradation.is_clean() {
             crate::diagnostics::stderr_line(format!(
                 "BT_PERSIST session.json degraded: {} clamped ratios, {} unknown leaves, \
-                 {} windows, {} tabs and {} panes past the ceiling, {} impossible commands",
+                 {} windows, {} tabs and {} panes past the ceiling, {} impossible commands, \
+                 {} impossible agent records, {} impossible agent launches",
                 degradation.clamped_ratios,
                 degradation.unknown_leaves,
                 degradation.dropped_windows,
                 degradation.dropped_tabs,
                 degradation.dropped_panes,
-                degradation.dropped_commands
+                degradation.dropped_commands,
+                degradation.dropped_agents,
+                degradation.unread_launches
             ));
         }
         // **Only the ceiling is said out loud** (review row R4-9). A clamped
@@ -2283,6 +2429,15 @@ impl SessionStore {
     /// mean; this type owns only when they reach the disk.
     pub fn loaded(&self) -> &SessionV1 {
         &self.session
+    }
+
+    /// The folder this store's two files are in — where a harness puts the other documents'
+    /// stores, as the product keeps all of them in one data folder.
+    #[cfg(test)]
+    pub(crate) fn folder(&self) -> &Path {
+        self.session_path
+            .parent()
+            .expect("a session file is in a folder")
     }
 
     /// Replace the in-memory document and start the debounce window. Called on
@@ -2936,6 +3091,37 @@ impl SessionStore {
             self.armed = false;
         }
     }
+
+    /// **What this run's session save came to, as [`Self::close`] decided it** (0.4.10 plan row
+    /// 17), for the line AppKit's quit is answered `NSTerminateNow` with.
+    ///
+    /// Read after the close: a writer that ran out of its budget — the quit's write, or the
+    /// close's own wait for the writer — is stalled, and the close left `session.lock` standing
+    /// over it; any other writer's document landed and the lock is gone. A refused write never
+    /// gets this far on that road: the quit is abandoned and AppKit is answered
+    /// `NSTerminateCancel`.
+    pub(crate) fn what_the_close_left(&self) -> ClosedSave {
+        if !self.writes_to_disk() {
+            ClosedSave::NoSession
+        } else if self.writer.stalled {
+            ClosedSave::NotLanded
+        } else {
+            ClosedSave::Landed
+        }
+    }
+}
+
+/// **What a run's session save came to at its close** ([`SessionStore::what_the_close_left`],
+/// 0.4.10 plan row 17).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClosedSave {
+    /// The document is on the disk and `session.lock` is gone.
+    Landed,
+    /// The save did not finish inside its budget, and `session.lock` stands.
+    NotLanded,
+    /// This run writes no session: it is not the document's writer of record, or an update's
+    /// trial defers its writes.
+    NoSession,
 }
 
 /// **The queue of a lane the test serves** ([`StorageLane::held`]): the test is
@@ -3023,8 +3209,8 @@ pub(crate) enum ScriptedJob {
     Backup,
     /// An update trial's receipt.
     Receipt,
-    /// Anything else the worker takes.
-    Other,
+    /// An update's hand-over, with the road the test answers it on.
+    Handoff(mpsc::Sender<crate::update_handoff::HandedOff>),
 }
 
 #[cfg(test)]
@@ -3040,7 +3226,7 @@ impl ScriptedJobs {
             StorageJob::Session(_) => ScriptedJob::Session,
             StorageJob::Receipt { .. } => ScriptedJob::Receipt,
             StorageJob::SessionBackup(_) => ScriptedJob::Backup,
-            StorageJob::Handoff { .. } => ScriptedJob::Other,
+            StorageJob::Handoff { answer, .. } => ScriptedJob::Handoff(answer),
         })
     }
 }
@@ -3210,6 +3396,12 @@ impl SettingsStore {
         self.document.projection()
     }
 
+    /// The storage lane this store's requests go to — a test's look at where a harness put it.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &StorageLane {
+        self.document.lane()
+    }
+
     /// What `settings.json` is known to hold.
     #[cfg(test)]
     pub(crate) fn revision(&self) -> &Revision<SettingsV1> {
@@ -3235,6 +3427,15 @@ impl SettingsStore {
     /// raised after the card's own state has already been written down.
     pub fn was_missing(&self) -> bool {
         self.missing
+    }
+
+    /// **Says whether the launch this store stands for found its file**, the fact
+    /// [`Self::was_missing`] answers, for a harness, whose store is opened without a read
+    /// (0.4.10 plan row 73's macOS gate): a headless window is a later launch, and a test of the
+    /// first-run card asks for a first one.
+    #[cfg(test)]
+    pub(crate) fn launch_found_the_file(&mut self, found: bool) {
+        self.missing = !found;
     }
 
     /// Record a change and hand it to the storage worker now. Returns whether
@@ -3375,8 +3576,33 @@ impl SettingsStore {
         self.document.send_owed();
     }
 
-    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`):
-    /// whether a re-read found a file that would not parse.
+    /// **Its answers below the drain's `mark`** (`App::storage_answers`;
+    /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in admission order.
+    pub(crate) fn answered(
+        &mut self,
+        mark: &StorageMark,
+    ) -> Vec<(InAdmissionOrder, StoreAnswer<SettingsV1>)> {
+        self.document.answered(mark)
+    }
+
+    /// Hear one answer [`Self::answered`] took, in the drain's order.
+    pub(crate) fn hear(&mut self, answer: StoreAnswer<SettingsV1>) {
+        self.document.hear(answer);
+    }
+
+    /// The drain has heard every answer it took: what is owed after them is sent.
+    pub(crate) fn answers_heard(&mut self) {
+        self.document.answers_heard();
+    }
+
+    /// **What the re-reads heard came to** (`AppEvent::DocumentsAnswered`): whether a
+    /// re-read found a file that would not parse.
+    pub(crate) fn take_news(&mut self) -> ReadNews {
+        self.document.take_news()
+    }
+
+    /// This store alone, drained and heard — a test's way to hear it without the application.
+    #[cfg(test)]
     pub(crate) fn take_answers(&mut self) -> ReadNews {
         self.document.take_answers()
     }
@@ -3401,8 +3627,13 @@ impl QuitDocument for SettingsStore {
         self.document.quit_begin();
     }
 
+    #[cfg(test)]
+    fn hear_alone(&mut self) {
+        self.document.hear_alone();
+    }
+
     fn quit_turn(&mut self) -> Option<String> {
-        let _ = self.document.take_answers();
+        let _ = self.document.take_news();
         let merged = self.merge_at_quit(bt_platform::host_platform());
         if self.document.standing() == crate::quit::Standing::Unsent {
             self.document.send_owed();
@@ -3484,8 +3715,13 @@ impl QuitDocument for KeybindingsStore {
 
     /// A `Moved` or `Displaced` answer at quit is merged as the running window
     /// merges it, without the door ([`SettingsStore`]'s turn).
+    #[cfg(test)]
+    fn hear_alone(&mut self) {
+        self.document.hear_alone();
+    }
+
     fn quit_turn(&mut self) -> Option<String> {
-        let _ = self.document.take_answers();
+        let _ = self.document.take_news();
         let merged = self.merge_at_quit(bt_platform::host_platform());
         if self.document.standing() == crate::quit::Standing::Unsent {
             self.document.send_owed();
@@ -3572,6 +3808,12 @@ impl KeybindingsStore {
     #[cfg(test)]
     pub(crate) fn loaded(&self) -> &[BindingOverrideV1] {
         &self.document.projection().bindings
+    }
+
+    /// The storage lane this store's requests go to — a test's look at where a harness put it.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &StorageLane {
+        self.document.lane()
     }
 
     /// **The document the file says**, its dialect with it — what the reader
@@ -3727,8 +3969,33 @@ impl KeybindingsStore {
         self.document.send_owed();
     }
 
-    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`):
-    /// whether a re-read found a file that would not parse.
+    /// **Its answers below the drain's `mark`** (`App::storage_answers`;
+    /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in admission order.
+    pub(crate) fn answered(
+        &mut self,
+        mark: &StorageMark,
+    ) -> Vec<(InAdmissionOrder, StoreAnswer<KeybindingsV1>)> {
+        self.document.answered(mark)
+    }
+
+    /// Hear one answer [`Self::answered`] took, in the drain's order.
+    pub(crate) fn hear(&mut self, answer: StoreAnswer<KeybindingsV1>) {
+        self.document.hear(answer);
+    }
+
+    /// The drain has heard every answer it took: what is owed after them is sent.
+    pub(crate) fn answers_heard(&mut self) {
+        self.document.answers_heard();
+    }
+
+    /// **What the re-reads heard came to** (`AppEvent::DocumentsAnswered`): whether a
+    /// re-read found a file that would not parse.
+    pub(crate) fn take_news(&mut self) -> ReadNews {
+        self.document.take_news()
+    }
+
+    /// This store alone, drained and heard — a test's way to hear it without the application.
+    #[cfg(test)]
     pub(crate) fn take_answers(&mut self) -> ReadNews {
         self.document.take_answers()
     }
@@ -3813,8 +4080,13 @@ impl QuitDocument for ProfilesStore {
     /// A turn that folds a changed file in before it sends: a `Moved` or
     /// `Displaced` answer at quit is merged as the running window merges it,
     /// without the door.
+    #[cfg(test)]
+    fn hear_alone(&mut self) {
+        self.document.hear_alone();
+    }
+
     fn quit_turn(&mut self) -> Option<String> {
-        let _ = self.document.take_answers();
+        let _ = self.document.take_news();
         let merged = self.merge_at_quit();
         if self.document.standing() == crate::quit::Standing::Unsent {
             self.document.send_owed();
@@ -3894,6 +4166,12 @@ impl ProfilesStore {
         self.document.projection()
     }
 
+    /// The storage lane this store's requests go to — a test's look at where a harness put it.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &StorageLane {
+        self.document.lane()
+    }
+
     /// What `profiles.json` is known to hold.
     #[cfg(test)]
     pub(crate) fn revision(&self) -> &Revision<ProfilesV1> {
@@ -3921,7 +4199,7 @@ impl ProfilesStore {
 
     /// **Ask for the file to be read again, because the storage watch heard it**
     /// (§7.1.6c-6d). The read runs on the storage worker; its answer is taken by
-    /// [`Self::take_answers`].
+    /// the application's drain (`App::storage_answers`) and its news by [`Self::take_news`].
     ///
     /// Three answers, and each of them is a rule this slice had to choose:
     ///
@@ -4027,8 +4305,33 @@ impl ProfilesStore {
         self.document.send_owed();
     }
 
-    /// **Take what the storage worker has answered** (`AppEvent::DocumentsAnswered`):
-    /// the re-reads' news for the reader.
+    /// **Its answers below the drain's `mark`** (`App::storage_answers`;
+    /// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in admission order.
+    pub(crate) fn answered(
+        &mut self,
+        mark: &StorageMark,
+    ) -> Vec<(InAdmissionOrder, StoreAnswer<ProfilesV1>)> {
+        self.document.answered(mark)
+    }
+
+    /// Hear one answer [`Self::answered`] took, in the drain's order.
+    pub(crate) fn hear(&mut self, answer: StoreAnswer<ProfilesV1>) {
+        self.document.hear(answer);
+    }
+
+    /// The drain has heard every answer it took: what is owed after them is sent.
+    pub(crate) fn answers_heard(&mut self) {
+        self.document.answers_heard();
+    }
+
+    /// **What the re-reads heard came to** (`AppEvent::DocumentsAnswered`): the re-reads'
+    /// news for the reader.
+    pub(crate) fn take_news(&mut self) -> ReadNews {
+        self.document.take_news()
+    }
+
+    /// This store alone, drained and heard — a test's way to hear it without the application.
+    #[cfg(test)]
     pub(crate) fn take_answers(&mut self) -> ReadNews {
         self.document.take_answers()
     }
@@ -4088,20 +4391,21 @@ pub(crate) struct DocumentsHeard {
     pub(crate) faults: Vec<String>,
 }
 
-/// **Every store takes every answer, then each says what it owes** (design note
-/// 2026-10-11 (b)4, (b)7): the answers in the order the worker served them, and
-/// then each store's fault — the card a write that will not land is owed after
-/// start, which nothing raised before this ticket.
-pub(crate) fn hear_documents(
+/// **What every store's answers came to, then what each owes** (design note 2026-10-11 (b)4,
+/// (b)7): each store's re-reads' news — its answers already heard by the application's drain,
+/// every asker's in the order the lane admitted them (`App::storage_answers`;
+/// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION) — and then each store's fault, the card a write that
+/// will not land is owed after start.
+pub(crate) fn documents_news(
     settings: &mut SettingsStore,
     keybindings: &mut KeybindingsStore,
     profiles: &mut ProfilesStore,
     pins: &mut crate::pins::PinsStore,
 ) -> DocumentsHeard {
-    let settings_news = settings.take_answers();
-    let keybindings_news = keybindings.take_answers();
-    let profiles_news = profiles.take_answers();
-    let pins_news = pins.take_answers();
+    let settings_news = settings.take_news();
+    let keybindings_news = keybindings.take_news();
+    let profiles_news = profiles.take_news();
+    let pins_news = pins.take_news();
     let faults = [
         settings.take_fault(),
         keybindings.take_fault(),
@@ -4118,6 +4422,27 @@ pub(crate) fn hear_documents(
         pins: pins_news,
         faults,
     }
+}
+
+/// [`documents_news`], each store first drained alone ([`SettingsStore::take_answers`] and its
+/// siblings) — a test's way to hear the four stores without the application.
+#[cfg(test)]
+pub(crate) fn hear_documents(
+    settings: &mut SettingsStore,
+    keybindings: &mut KeybindingsStore,
+    profiles: &mut ProfilesStore,
+    pins: &mut crate::pins::PinsStore,
+) -> DocumentsHeard {
+    let settings_news = settings.take_answers();
+    let keybindings_news = keybindings.take_answers();
+    let profiles_news = profiles.take_answers();
+    let pins_news = pins.take_answers();
+    let mut heard = documents_news(settings, keybindings, profiles, pins);
+    heard.settings = settings_news;
+    heard.keybindings = keybindings_news;
+    heard.profiles = profiles_news;
+    heard.pins = pins_news;
+    heard
 }
 
 /// **Whether any of the four stores has a re-read still to be answered** — the
@@ -4466,6 +4791,68 @@ pub(crate) mod tests {
     use super::*;
     use crate::document_request::Heard;
     use bt_source::{Index, ItemQuery, Needle, Pattern, Scope, Search, View};
+
+    /// RED (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION, plan row 104, T1) — **an asker takes only its
+    /// answers below the drain's mark**, so an answer that ends while one drain reads its askers
+    /// waits for the next drain, and the drains deliver in the order the lane admitted the
+    /// requests whatever the worker does meanwhile.
+    ///
+    /// `settings.json`'s re-read is asked first and `keybindings.json`'s second, on one lane whose
+    /// queue the test serves. The drain reads its mark (the first is owed) and the settings store
+    /// (its read not ended); then — as a fast worker would, between two askers' reads — both
+    /// reads are answered; then the keybindings store is read with the same mark. That drain takes
+    /// nothing; the next takes settings, then keybindings. No timing decides it: the test is the
+    /// worker, and serves between the two reads.
+    ///
+    /// MUTATION: `OnTheWorker::hear_below` reads no mark (`InAdmissionOrder::below` always true,
+    /// and `lane::Request::take_if`'s refusal at or past the mark, the second layer since T-LANE-DRAIN-MARK-GUARD; both dropped, observed
+    /// red 2026-10-31) — the first drain takes keybindings' answer, ahead of the settings answer
+    /// asked before it.
+    #[test]
+    fn an_answer_that_ends_between_two_askers_reads_waits_for_the_next_drain() {
+        let root = bt_testpath::temp_path("bt-app-storage-mark-两次读");
+        let (lane, jobs) = StorageLane::held();
+        let mut settings = SettingsStore::at_on(root.join(SETTINGS_FILE_NAME), lane.clone());
+        let mut keybindings =
+            KeybindingsStore::at_on(root.join(KEYBINDINGS_FILE_NAME), lane.clone());
+        settings.ask_reread();
+        keybindings.ask_reread();
+
+        let mark = lane.drain_mark();
+        assert!(mark.owed().is_some(), "the settings re-read is owed");
+        let settings_first = settings.answered(&mark);
+        for _ in 0..2 {
+            let StorageJob::Read(read) = jobs.receive("a re-read") else {
+                panic!("a re-read is on the lane");
+            };
+            (read.answer)(read.generation, bt_persist::StableRead::Absent);
+        }
+        let keybindings_first = keybindings.answered(&mark);
+        assert!(
+            settings_first.is_empty() && keybindings_first.is_empty(),
+            "the first drain takes nothing that ended after its mark: settings {}, keybindings {}",
+            settings_first.len(),
+            keybindings_first.len()
+        );
+
+        let mark = lane.drain_mark();
+        assert_eq!(mark.owed(), None, "both re-reads have ended");
+        let merged = crate::lane::in_admission_order([
+            ("settings", tagged(settings.answered(&mark))),
+            ("keybindings", tagged(keybindings.answered(&mark))),
+        ]);
+        let heard: Vec<&str> = merged.iter().map(|(asker, _, ())| *asker).collect();
+        assert_eq!(
+            heard,
+            ["settings", "keybindings"],
+            "the next drain takes both, in the order asked"
+        );
+    }
+
+    /// The places of one asker's answers, the answers let go.
+    fn tagged<T>(answers: Vec<(InAdmissionOrder, T)>) -> Vec<(InAdmissionOrder, ())> {
+        answers.into_iter().map(|(order, _)| (order, ())).collect()
+    }
 
     /// RED (T-HARDCODE-047 round 2, SET-3) — **the ordinary keybindings
     /// writer records the dialect whose chord spelling it writes.**
@@ -4965,6 +5352,7 @@ pub(crate) mod tests {
         let mut stalled = SessionStore::at(root.join("stalled.json"), root.join("stalled.lock"));
         retire(&mut stalled.writer);
         let (never, release) = a_writer_that_never_answers();
+        let mut release = Some(release);
         stalled.writer = never;
         stalled.set_save_budget(Duration::ZERO);
         let mut document = SessionV1::default();
@@ -4973,7 +5361,9 @@ pub(crate) mod tests {
             .push(bt_persist::SessionWindowV1::default());
         stalled.record(document, Instant::now());
         assert_eq!(
-            stalled.flush_judged(),
+            judged_apart(&mut stalled, &mut release, "the judged flush", |store| {
+                store.flush_judged()
+            }),
             Err(SaveRefusal::TimedOut(save_did_not_finish(Duration::ZERO))),
             "the wait ends on the store's budget"
         );
@@ -5020,6 +5410,7 @@ pub(crate) mod tests {
         // place.
         retire(&mut store.writer);
         let (stalled, release) = a_writer_that_never_answers();
+        let mut release = Some(release);
         store.writer = stalled;
 
         let mut document = SessionV1::default();
@@ -5028,9 +5419,16 @@ pub(crate) mod tests {
             .push(bt_persist::SessionWindowV1::default());
         store.record(document, Instant::now());
 
-        let started = Instant::now();
-        let verdict = store.flush_judged();
-        let waited = started.elapsed();
+        let (verdict, waited) = judged_apart(
+            &mut store,
+            &mut release,
+            "the quit's judged flush",
+            |store| {
+                let started = Instant::now();
+                let verdict = store.flush_judged();
+                (verdict, started.elapsed())
+            },
+        );
         assert_eq!(
             verdict,
             Err(SaveRefusal::TimedOut(save_did_not_finish(
@@ -5049,10 +5447,13 @@ pub(crate) mod tests {
 
         // And the exit that follows does not spend the same budget again, because this writer
         // has already said it is not answering.
-        let started = Instant::now();
-        store.close();
+        let closed_within = judged_apart(&mut store, &mut release, "the exit's close", |store| {
+            let started = Instant::now();
+            store.close();
+            started.elapsed()
+        });
         assert!(
-            started.elapsed() < SESSION_SAVE_BUDGET,
+            closed_within < SESSION_SAVE_BUDGET,
             "a writer already known to be stalled is not waited on a second time"
         );
         assert!(
@@ -5102,6 +5503,7 @@ pub(crate) mod tests {
         store.record(owed, Instant::now());
         retire(&mut store.writer);
         let (stalled, release) = a_writer_that_never_answers();
+        let mut release = Some(release);
         store.writer = stalled;
 
         let answered = bt_platform::session_end::answer(
@@ -5115,10 +5517,12 @@ pub(crate) mod tests {
             Some(1),
             "the system is answered yes before anything is written"
         );
-        let settled: Vec<_> = crate::session_end::take()
-            .into_iter()
-            .map(|end| crate::session_end::settle(end, &mut store, false, Instant::now()))
-            .collect();
+        let ends = crate::session_end::take();
+        let settled: Vec<_> = judged_apart(&mut store, &mut release, "the system's end", |store| {
+            ends.into_iter()
+                .map(|end| crate::session_end::settle(end, store, false, Instant::now()))
+                .collect()
+        });
         assert_eq!(
             settled,
             vec![crate::session_end::Settled::Saved(Err(
@@ -5285,6 +5689,37 @@ pub(crate) mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **`judge` over `store` on a thread of its own**, entered as the window thread on its way
+    /// out (the session's waits are owner-thread doors, admitted only there), and awaited within
+    /// the lane suite's patience. The writer that never answers is the holder: a judgement that has
+    /// not come back by then has `release` dropped — the writer ends, its channels disconnect, and
+    /// a wait on them returns — before the verdict, so a wait that ignores its budget is red, never
+    /// a hang.
+    fn judged_apart<R: Send>(
+        store: &mut SessionStore,
+        release: &mut Option<mpsc::Sender<()>>,
+        what: &str,
+        judge: impl FnOnce(&mut SessionStore) -> R + Send,
+    ) -> R {
+        std::thread::scope(|threads| {
+            let judging = threads.spawn(move || {
+                assert!(bt_platform::admission::enter_window_thread());
+                assert!(bt_platform::admission::exiting());
+                judge(store)
+            });
+            let came_back = crate::lane::within_patience(|| judging.is_finished());
+            if !came_back {
+                drop(release.take());
+            }
+            let answer = judging.join();
+            assert!(
+                came_back,
+                "{what} waited on a writer that never answers past the lane suite's patience"
+            );
+            answer.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        })
     }
 
     /// A writer thread that takes documents, stays connected, and answers nothing — the shape of
@@ -6636,6 +7071,62 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED (0.4.10 plan row 17) — **what the close left is what AppKit's quit is answered
+    /// with**: a document that landed drops `session.lock` and says so; a save whose budget ran
+    /// out leaves the lock standing and says that; a run that writes no session says it had none.
+    ///
+    /// MUTATION: answer `Landed` in `SessionStore::what_the_close_left` whatever the writer
+    /// came to — the spent budget's store says its save landed over a lock that stands.
+    #[test]
+    fn what_the_close_left_is_whether_the_save_landed_and_the_lock_went() {
+        crate::test_support::on_the_window_thread_exiting();
+        // Landed: a real writer, within the suite's patience.
+        let root = appdata("close-left-landed");
+        let sentinel = root.join("session.lock");
+        let mut store = SessionStore::armed_at(root.join(SESSION_FILE_NAME), sentinel.clone());
+        store.set_save_budget(crate::lane::PATIENCE);
+        assert!(sentinel.is_file(), "the run's sentinel stands");
+        store.record(a_layout(1), Instant::now());
+        assert_eq!(store.flush_judged(), Ok(()), "the layout lands");
+        store.close();
+        assert!(!sentinel.is_file(), "the close drops the sentinel");
+        assert_eq!(store.what_the_close_left(), ClosedSave::Landed);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Not landed: the quit's budget is spent with a change owed.
+        let (store, _jobs, _answer, spent_root) = a_store_the_test_answers("close-left-spent");
+        let mut store = store.armed();
+        let spent_sentinel = spent_root.join("session.lock");
+        assert!(spent_sentinel.is_file(), "the run's sentinel stands");
+        let start = Instant::now();
+        store.record(a_layout(1), start);
+        let spent = start + SESSION_DEBOUNCE;
+        assert!(
+            store
+                .flush_for_quit(spent, spent)
+                .is_err_and(|refusal| refusal.quit_may_proceed()),
+            "the quit's budget is spent and the quit goes on"
+        );
+        store.close();
+        assert!(
+            spent_sentinel.is_file(),
+            "the lock stands over a save nobody heard land"
+        );
+        assert_eq!(store.what_the_close_left(), ClosedSave::NotLanded);
+        let _ = std::fs::remove_dir_all(&spent_root);
+
+        // No session: a run that is not the document's writer of record.
+        let none_root = appdata("close-left-none");
+        let mut store = SessionStore::at(
+            none_root.join(SESSION_FILE_NAME),
+            none_root.join("session.lock"),
+        );
+        store.writer_of_record = false;
+        store.close();
+        assert_eq!(store.what_the_close_left(), ClosedSave::NoSession);
+        let _ = std::fs::remove_dir_all(&none_root);
+    }
+
     /// RED (T-SESSION-WRITER-NO-TIMER-RETRY round 4) — **an update quit's refusal that is the
     /// fifth in a row is one card too**: the receipt for the quit's photograph is heard on the
     /// turn its wake brings, `landing_of` hands the quit its refusal, and the quit's card says
@@ -7730,10 +8221,11 @@ mod receipt_wake_tests {
     #[test]
     fn a_hand_over_its_worker_dropped_is_over_on_the_wake() {
         let txn = TxnId::new([0x7a; 16]);
+        let (lane, _jobs) = StorageLane::held();
         let (answer, answered) = mpsc::channel::<HandedOff>();
         drop(answer);
         match look(
-            Some(&mut super::OnTheWorker::answered_at_the_door(answered)),
+            super::OnTheWorker::answered_at_the_door(answered, &lane).heard_alone(),
             txn,
             false,
         ) {
@@ -7746,7 +8238,7 @@ mod receipt_wake_tests {
         let (_open, waiting) = mpsc::channel::<HandedOff>();
         assert_eq!(
             look(
-                Some(&mut super::OnTheWorker::answered_at_the_door(waiting)),
+                super::OnTheWorker::answered_at_the_door(waiting, &lane).heard_alone(),
                 txn,
                 false
             ),
@@ -7786,7 +8278,7 @@ mod receipt_wake_tests {
         let (answer, answered) = mpsc::channel::<HandedOff>();
         drop(answer);
         match look(
-            Some(&mut super::OnTheWorker::admitted(answered, failed)),
+            super::OnTheWorker::admitted(answered, failed).heard_alone(),
             txn,
             false,
         ) {
@@ -7808,7 +8300,7 @@ mod receipt_wake_tests {
         let (answer, answered) = mpsc::channel::<HandedOff>();
         drop(answer);
         match look(
-            Some(&mut super::OnTheWorker::admitted(answered, gone)),
+            super::OnTheWorker::admitted(answered, gone).heard_alone(),
             txn,
             false,
         ) {
@@ -10353,7 +10845,7 @@ pub(crate) mod contract_adapter {
     use std::sync::{Arc, Mutex, PoisonError, mpsc};
 
     use super::{
-        NO_STORAGE_WORKER, OnTheWorker, Reply, Served, SessionWriter, StorageId, StorageJob,
+        Ended, NO_STORAGE_WORKER, OnTheWorker, Served, SessionWriter, StorageId, StorageJob,
         StorageLane, StorageTerminal, storage_task_failed,
     };
     use crate::document_request::{DocumentAnswer, DocumentJob, LinkPolicy, Mode, NoExchange};
@@ -10394,10 +10886,17 @@ pub(crate) mod contract_adapter {
         sunk: Arc<Mutex<Vec<(StorageId, StorageTerminal)>>>,
         /// The lines the ledger said, counted through its `say`.
         said: Arc<AtomicUsize>,
+        /// **A test's step between two targets' takes** in the next drain (T3), run once.
+        between_targets: Option<Box<dyn FnOnce()>>,
     }
 
     /// A fresh storage lane, its `session-writer` worker started by the suite's executor.
     pub(crate) fn make() -> Box<dyn LaneUnderTest> {
+        Box::new(adapter())
+    }
+
+    /// [`make`]'s adapter, as itself.
+    fn adapter() -> Adapter {
         let gate = Arc::new(Gate::default());
         let probe = Arc::new(WakeProbe::default());
         let sunk = Arc::new(Mutex::new(Vec::new()));
@@ -10445,7 +10944,7 @@ pub(crate) mod contract_adapter {
             SessionWriter::start(&lane),
             "the suite's executor starts the storage worker"
         );
-        Box::new(Adapter {
+        Adapter {
             lane,
             gate,
             probe,
@@ -10453,7 +10952,8 @@ pub(crate) mod contract_adapter {
             questions: HashMap::new(),
             sunk,
             said,
-        })
+            between_targets: None,
+        }
     }
 
     impl LaneUnderTest for Adapter {
@@ -10514,39 +11014,44 @@ pub(crate) mod contract_adapter {
             self.targets.remove(&target);
         }
 
-        /// `DocumentState::take_answers` / `PreviewSaves::take_answers`, across every target in
-        /// the order the ledger minted: each request heard once it has ended, and the drain
-        /// stops at the first that has not, so a later one is never taken before it.
+        /// **The product's drain** (`App::storage_answers`; T-STORAGE-LANE-ORDER-BY-CONSTRUCTION):
+        /// the lane's earliest request still owed, read once ([`StorageLane::drain_mark`]);
+        /// each target's requests taken below it as every asker takes them
+        /// ([`OnTheWorker::hear_below`]); merged by the order the lane admitted them
+        /// (`lane::in_admission_order`). A request that ends while the targets are read waits for
+        /// the next drain.
         fn drain(&mut self) -> Vec<Delivered> {
-            let mut held: Vec<(StorageId, u32)> = self
-                .targets
-                .iter()
-                .flat_map(|(target, asked)| asked.keys().map(move |id| (*id, *target)))
-                .collect();
-            held.sort_unstable();
-            let mut found = Vec::new();
-            for (id, target) in held {
-                let Some(asked) = self.targets.get_mut(&target) else {
-                    continue;
-                };
-                let Some(request) = asked.get_mut(&id) else {
-                    continue;
-                };
-                let outcome = match request.hear() {
-                    Reply::Waiting => break,
-                    Reply::Answered(_) => Outcome::Answered,
-                    Reply::Failed(words) => Outcome::Failed(words),
-                    Reply::Gone => Outcome::WorkerGone,
-                };
-                asked.remove(&id);
-                found.push(Delivered {
+            let owed = self.lane.drain_mark();
+            let mut held = Vec::new();
+            for (index, (target, asked)) in self.targets.iter_mut().enumerate() {
+                if index > 0
+                    && let Some(step) = self.between_targets.take()
+                {
+                    step();
+                }
+                let mut taken = Vec::new();
+                asked.retain(|id, request| match request.hear_below(&owed) {
+                    Some((order, ended)) => {
+                        taken.push((order, (*id, ended)));
+                        false
+                    }
+                    None => true,
+                });
+                held.push((*target, taken));
+            }
+            crate::lane::in_admission_order(held)
+                .into_iter()
+                .map(|(target, _, (id, ended))| Delivered {
                     target: Some(target),
                     ticket: Some(id.0),
                     question: self.questions.get(&id).copied(),
-                    outcome,
-                });
-            }
-            found
+                    outcome: match ended {
+                        Ended::Answered(_) => Outcome::Answered,
+                        Ended::Failed(words) => Outcome::Failed(words),
+                        Ended::Gone => Outcome::WorkerGone,
+                    },
+                })
+                .collect()
         }
 
         fn offer_stale(&mut self, _ticket: u64) {
@@ -10569,5 +11074,47 @@ pub(crate) mod contract_adapter {
         fn said(&self) -> Option<usize> {
             Some(self.said.load(Ordering::SeqCst))
         }
+    }
+
+    /// RED (T-STORAGE-LANE-ORDER-BY-CONSTRUCTION, plan row 104, T3) — **the storage lane's drain
+    /// takes only what ended before it began**, across its askers: a request that ends while the
+    /// drain is reading them waits for the next drain, so what the drains deliver is the order the
+    /// lane admitted the requests however slow the drain is beside the worker. The adapter's drain
+    /// is the product's take and merge (`OnTheWorker::hear_below`, `lane::in_admission_order`).
+    ///
+    /// The worker holds question 0, asked by target 0; target 1 asks 1 and 2 behind it. The drain
+    /// reads its mark (0 is owed), reads target 0 (0 not ended) — and then, at the moment a slow
+    /// drain gives a fast worker, the worker is let go and every request ends before target 1 is
+    /// read. That drain takes nothing; the next takes 0, 1 and 2. No timing decides it: the step
+    /// runs inside the drain, between two targets.
+    ///
+    /// MUTATION: take every ended request whatever the mark (`OnTheWorker::hear_below` reads no
+    /// mark, and `lane::Request::take_if`'s refusal at or past the mark, the second layer since T-LANE-DRAIN-MARK-GUARD; both dropped,
+    /// observed red 2026-10-31), and the first drain takes 1 and 2, before 0.
+    #[test]
+    fn an_answer_that_ends_while_the_askers_are_read_waits_for_the_next_drain() {
+        let mut lane = adapter();
+        let gate = Arc::clone(&lane.gate);
+        gate.hold();
+        assert!(lane.submit(0, 0).ticket.is_some(), "admitted");
+        assert!(gate.wait_entered(1), "the worker holds question 0");
+        assert!(lane.submit(1, 1).ticket.is_some(), "admitted");
+        assert!(lane.submit(1, 2).ticket.is_some(), "admitted");
+        let owed = lane.lane.clone();
+        lane.between_targets = Some(Box::new(move || {
+            gate.release();
+            crate::lane::wait_until("every request ended", || owed.earliest_owed().is_none());
+        }));
+        let first = lane.drain();
+        let second = lane.drain();
+        assert!(
+            first.is_empty(),
+            "the first drain takes nothing that ended after it began: {first:?}"
+        );
+        let delivered: Vec<u64> = second
+            .iter()
+            .filter_map(|delivered| delivered.question)
+            .collect();
+        assert_eq!(delivered, [0, 1, 2], "delivered in the order admitted");
     }
 }

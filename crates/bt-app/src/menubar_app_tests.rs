@@ -32,6 +32,7 @@ fn saved_split_tab(cwd: &Path, pinned: bool) -> TabV1 {
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }))),
             ],
         }),

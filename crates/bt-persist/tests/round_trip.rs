@@ -555,6 +555,7 @@ fn a_tab_with_no_preview_writes_no_content_section() {
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 })),
                 pinned: false,
                 focused_leaf: "leaf-0".to_owned(),
@@ -774,6 +775,7 @@ fn multi_tab_trees_and_active_index_round_trip_together() {
                 manual_name: Some(format!("tab {index}")),
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             })),
             pinned: index == 0,
             focused_leaf: "leaf-0".to_owned(),
@@ -863,7 +865,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 39,
+        SETTINGS_SCHEMA_VERSION, 40,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -941,7 +943,10 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          build told a page anything and the owner ruled that a page follows the window it is in \
          — and the v38-to-v39, one key on its own day and a receipt rather than a preference: whether \
          a web page has ever committed in this profile, written `Never` into every document the step \
-         walks, because a settings file is no evidence that a page was ever opened"
+         walks, because a settings file is no evidence that a page was ever opened \
+         — and the v39-to-v40, one key on its own day: whether a pane's agent comes back through its \
+         vendor's resume command after a restart, written `true` into every document the step walks, \
+         because that is the owner's ruling for a resume no earlier build made"
     );
     // RED — **the repair ships on, because it is the screen every reader of a v35 document
     // already had.** MUTATION: ship `false` and a matrix an agent printed comes back as one row

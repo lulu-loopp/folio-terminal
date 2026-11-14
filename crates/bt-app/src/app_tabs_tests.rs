@@ -792,7 +792,7 @@ fn a_long_pasted_name_costs_one_shaping_pass() {
         };
         // A files column's name box, near enough: narrow, and the caret is at
         // the end of everything the field took.
-        let drawn = editor.fit(200.0, 1.0, true, &mut shape);
+        let drawn = editor.fit(0.0, 200.0, 1.0, true, &mut shape).0;
         assert!(
             !drawn.text.is_empty() && drawn.caret_px <= 200.0,
             "the box still shows the end of the draft with the caret in it"
@@ -814,7 +814,7 @@ fn a_long_pasted_name_costs_one_shaping_pass() {
             idle += 1;
             one_pixel_per_byte(text)
         };
-        let _ = empty.fit(200.0, 1.0, true, &mut shape);
+        let _ = empty.fit(0.0, 200.0, 1.0, true, &mut shape).0;
     }
     assert_eq!(idle, 1);
 }
@@ -895,7 +895,7 @@ fn the_window_start_is_read_from_advances_not_remeasured() {
     let mut editor = TabRename::open(A, Some(&"j".repeat(100)));
     press(&mut editor, &Key::Named(NamedKey::End), NO_MODIFIERS);
 
-    let drawn = editor.fit(20.0, 1.0, true, &mut shape);
+    let drawn = editor.fit(0.0, 20.0, 1.0, true, &mut shape).0;
     assert_eq!(
         drawn.text.len(),
         20,
@@ -907,14 +907,14 @@ fn the_window_start_is_read_from_advances_not_remeasured() {
     for _ in 0..90 {
         press(&mut editor, &Key::Named(NamedKey::Backspace), NO_MODIFIERS);
     }
-    let shrunk = editor.fit(20.0, 1.0, true, &mut shape);
+    let shrunk = editor.fit(0.0, 20.0, 1.0, true, &mut shape).0;
     assert_eq!(shrunk.text.len(), 10, "the head is back in sight");
     assert_eq!(shrunk.caret_px, 10.0);
 
     // A box that does not scroll never leaves the start, whatever is in it.
     let mut crumb = TabRename::open(A, Some(&"j".repeat(100)));
     press(&mut crumb, &Key::Named(NamedKey::End), NO_MODIFIERS);
-    let fixed = crumb.fit(20.0, 1.0, false, &mut shape);
+    let fixed = crumb.fit(0.0, 20.0, 1.0, false, &mut shape).0;
     assert_eq!(fixed.text.len(), 100, "and the whole draft is handed over");
 }
 
@@ -1077,7 +1077,7 @@ fn a_composition_is_drawn_at_the_caret_and_never_enters_the_name() {
     press(&mut editor, &Key::Named(NamedKey::End), NO_MODIFIERS);
     editor.field.set_preedit("ni");
 
-    let drawn = editor.fit(1_000.0, 1.0, true, &mut shape);
+    let drawn = editor.fit(0.0, 1_000.0, 1.0, true, &mut shape).0;
     assert_eq!(
         drawn.text, "abni",
         "what is on the glass is the draft with the composition spliced in"
@@ -1667,7 +1667,7 @@ fn the_tab_menus_subject_is_an_id_resolved_when_the_verb_runs() {
     let duplicate = body("duplicate_tab");
     assert!(
         duplicate.contains("state.focused()")
-            && duplicate.contains("leaf.launch.profile")
+            && duplicate.contains("leaf.own_profile()")
             && duplicate.contains("leaf.seed_place_for_a_new_shell()"),
         "both facts come off one leaf of the tab the menu names"
     );
@@ -2277,7 +2277,7 @@ fn a_restored_expansion_comes_back_as_questions_and_not_as_rows() {
         }));
     let terminals = seats.terminals();
     let focused = terminals[0];
-    let sessions: BTreeMap<SeatId, LeafSession> = terminals
+    let sessions: BTreeMap<SeatId, TerminalPane> = terminals
         .iter()
         .map(|s| (*s, leaf_saying("SHELL")))
         .collect();
@@ -3109,7 +3109,7 @@ fn a_tab_switch_leaves_no_menu_standing() {
 /// It asserts against [`tear_pane_into_tab`] because that is what the row
 /// runs — `run_pane_menu_row` → `move_pane_to_new_tab` →
 /// `extract_pane_into_new_tab` → here, the same chain the drag walks. The
-/// marker bytes are the identity: a fresh `LeafSession` says nothing, so a
+/// marker bytes are the identity: a fresh `ShellSession` says nothing, so a
 /// tab whose pane still says `BETA` is a tab holding the object that was
 /// there before, not a copy of it.
 ///

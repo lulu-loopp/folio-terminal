@@ -100,14 +100,26 @@
 //!
 //! # What it refuses, and the shape of every refusal
 //!
-//! `None`, always — one silence rather than a vocabulary of failures, which is
-//! the same word the PDF rasteriser on the other side of this lane answers with.
-//! It is the answer for a file that is not a video, a container Media
-//! Foundation has no source for (`.mkv` — Matroska is not among the eight
-//! containers the platform ships), a codec with no decoder installed, a file
-//! truncated mid-download, and a question that ran past [`FIRST_FRAME_BUDGET`].
-//! The card and the pane draw the same thing for all five: no picture, and the
-//! two lines that are still true.
+//! [`first_frame`] answers one of three words, and they are three because a caller
+//! must treat them differently (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
+//! [`NoFrame::Refused`] is a fact about the file: a file that is not a video, a
+//! container Media Foundation has no source for (`.mkv` — Matroska is not among
+//! the eight containers the platform ships), a codec with no decoder installed,
+//! a file truncated mid-download. Asked again, it is refused again.
+//! [`NoFrame::RanOut`] is a fact about the moment: the question ran past
+//! [`FIRST_FRAME_BUDGET`] — on a busy machine, a good recording can — and says
+//! nothing about the file. They used to be one `None`, and the one caller filed
+//! a good recording on a loaded machine as "no decoder for this container".
+//! [`NoFrame::Held`] is a fact about the moment too: the file could not be
+//! opened because another program holds it in a mode the open may not share — a
+//! recording still being written, a copy in progress
+//! (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE). It used to be filed as "no
+//! decoder for this container" like every other open that failed.
+//! The card and the pane draw the same thing for all three: no picture, and the
+//! two lines that are still true; what differs is whether the window asks again.
+//!
+//! The clock-free halves ([`decode_first_frame`], [`decode_first_frame_measured`])
+//! cannot run out, and keep `None`.
 //!
 //! # The set of files this can draw is not the set that could be played
 //!
@@ -122,6 +134,8 @@
 
 pub mod engine;
 
+pub use crate::first_frame_answer::NoFrame;
+
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -129,6 +143,7 @@ use std::time::{Duration, Instant};
 
 use crate::admission::{WaitToken, doors};
 use crate::engine_ledger;
+use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFAttributes, IMFByteStream, IMFMediaBuffer, IMFSourceReader, MF_ACCESSMODE_READ,
     MF_BYTESTREAM_ORIGIN_NAME, MF_FILEFLAGS_NONE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
@@ -152,7 +167,8 @@ use windows::core::{HSTRING, Interface};
 /// is the file that would take *minutes* — a several-gigabyte capture on a
 /// network share, a container whose index is at the far end of it, a demuxer
 /// walking a stream that never yields a key frame. Past this the answer is
-/// [`None`] and the card degrades to the two lines it can always state.
+/// [`NoFrame::RanOut`] and the card degrades to the two lines it can always
+/// state until the window asks again.
 ///
 /// It bounds the **wait** and not the work: `ReadSample` is a synchronous call
 /// into somebody else's demuxer and there is no supported way to interrupt one.
@@ -246,7 +262,8 @@ impl FirstFrameCost {
 }
 
 /// **A frame out of the video at `path`, fitted inside `fit_width` ×
-/// `fit_height`**, or `None` for every refusal in the module's own note.
+/// `fit_height`**, or the [`NoFrame`] that says why there is none: refused, or
+/// not answered inside [`FIRST_FRAME_BUDGET`] (the module's own note).
 ///
 /// The fit is a **request and a cap, not a promise**. It is passed to Media
 /// Foundation as the output type's frame size, which the video processor honours
@@ -281,8 +298,7 @@ impl FirstFrameCost {
 /// is leaked holding a closed stream, never the file. So an editor
 /// that saves over the file the moment the window has its answer is never
 /// refused by a read this window had already finished with.
-#[must_use]
-pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<VideoFrame> {
+pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Result<VideoFrame, NoFrame> {
     let url = HSTRING::from(path.as_os_str());
     let fit = (fit_width.max(1), fit_height.max(1));
     first_frame_through(&url, FIRST_FRAME_BUDGET, move |stream| {
@@ -293,21 +309,31 @@ pub fn first_frame(path: &Path, fit_width: u32, fit_height: u32) -> Option<Video
 /// [`first_frame`] with its budget and its decode named: the file opened here,
 /// lent to `decode` on a thread of its own under `budget`, and closed here once
 /// the answer is in or the budget has run out — in that order, on every path.
+///
+/// A platform that will not start, an apartment that cannot be joined and a
+/// file that will not open are refusals: each is answered at once and would be
+/// answered the same way again — except a file another program holds, which is
+/// [`NoFrame::Held`] ([`TheFile::open`]): answered at once, and asked again
+/// when the holder may have let go.
 fn first_frame_through(
     url: &HSTRING,
     budget: Duration,
     decode: impl FnOnce(Lent) -> Option<VideoFrame> + Send + 'static,
-) -> Option<VideoFrame> {
+) -> Result<VideoFrame, NoFrame> {
     let mut cost = FirstFrameCost::default();
     in_the_process_apartment(&mut cost, |_| {
-        let file = TheFile::open(url)?;
+        let file = match TheFile::open(url) {
+            Ok(file) => file,
+            Err(unopened) => return Some(Err(unopened)),
+        };
         let lent = file.lend();
         let frame = within_budget(budget, move || decode(lent));
         // **Closed before the answer leaves**: whatever the decode thread still
         // holds is a reference to a closed stream, not to the file.
         drop(file);
-        frame
+        Some(frame)
     })
+    .unwrap_or(Err(NoFrame::Refused))
 }
 
 /// **The file one question reads**, opened by this module and closed by it
@@ -332,21 +358,34 @@ struct TheFile {
 }
 
 impl TheFile {
-    /// The file at `url`, open for reading, or `None` for a file the platform will
-    /// not open (missing, refused) — the module's one silence.
-    fn open(url: &HSTRING) -> Option<Self> {
+    /// The file at `url`, open for reading — or why not: [`NoFrame::Held`] for a
+    /// file another program holds in a mode this open may not share (the error
+    /// code read by [`crate::file_reads::held_elsewhere_code`], the picture
+    /// decoder's own reading), and [`NoFrame::Refused`] for every other file the
+    /// platform will not open (missing, denied).
+    fn open(url: &HSTRING) -> Result<Self, NoFrame> {
         // SAFETY: a platform entry given a string this function holds for the
         // call, on a thread inside the process apartment (the caller's rule); the
         // stream it hands back is owned here and closed by `Drop`.
-        let stream = crate::file_reads::opaque(crate::file_reads::Lane::Peek, || unsafe {
+        let opened = crate::file_reads::opaque(crate::file_reads::Lane::Peek, || unsafe {
             MFCreateFile(
                 MF_ACCESSMODE_READ,
                 MF_OPENMODE_FAIL_IF_NOT_EXIST,
                 MF_FILEFLAGS_NONE,
                 url,
             )
-        })
-        .ok()?;
+        });
+        let stream = match opened {
+            Ok(stream) => stream,
+            Err(error) => {
+                return Err(match WIN32_ERROR::from_error(&error) {
+                    Some(code) if crate::file_reads::held_elsewhere_code(code.0 as i32) => {
+                        NoFrame::Held
+                    }
+                    _ => NoFrame::Refused,
+                });
+            }
+        };
         // The source resolver chooses a container's handler by the file's name,
         // which a URL used to carry and a byte stream carries as this attribute.
         if let Ok(attributes) = stream.cast::<IMFAttributes>() {
@@ -355,7 +394,7 @@ impl TheFile {
                 let _ = attributes.SetString(&MF_BYTESTREAM_ORIGIN_NAME, url);
             }
         }
-        Some(Self { stream })
+        Ok(Self { stream })
     }
 
     /// A reference to the stream, for the thread that decodes it.
@@ -401,9 +440,14 @@ fn decode_lent(stream: &Lent, fit: (u32, u32)) -> (Option<VideoFrame>, FirstFram
 
 /// **Run `work` on a thread of its own and stop waiting for it after `budget`.**
 ///
-/// The whole of this module's giving-up, with no decoder underneath it. `None`
-/// covers both endings a caller cannot tell apart and does not need to: the work
-/// answered `None`, or it had not answered at all when the budget ran out.
+/// The whole of this module's giving-up, with no decoder underneath it, and the
+/// one place the two endings a caller must tell apart are told apart
+/// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL):
+///
+/// * the work answered `None`, or panicked before it answered — a
+///   [`NoFrame::Refused`], because the same question would end the same way;
+/// * the work had not answered when the budget ran out, or its thread could not
+///   be started — a [`NoFrame::RanOut`], which says nothing about the file.
 ///
 /// The thread that overran is **not** cancelled, because there is no supported
 /// way to interrupt a synchronous `ReadSample` in somebody else's demuxer. It is
@@ -414,17 +458,24 @@ fn decode_lent(stream: &Lent, fit: (u32, u32)) -> (Option<VideoFrame>, FirstFram
 fn within_budget<T: Send + 'static>(
     budget: Duration,
     work: impl FnOnce() -> Option<T> + Send + 'static,
-) -> Option<T> {
+) -> Result<T, NoFrame> {
     let (answer, wait) = std::sync::mpsc::channel();
-    crate::spawn_at_priority(
+    if crate::spawn_at_priority(
         "folio-video-frame",
         crate::ThreadPriority::Normal,
         move |_ctx| {
             let _ = answer.send(work());
         },
     )
-    .ok()?;
-    wait.recv_timeout(budget).ok().flatten()
+    .is_err()
+    {
+        return Err(NoFrame::RanOut);
+    }
+    match wait.recv_timeout(budget) {
+        Ok(Some(found)) => Ok(found),
+        Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NoFrame::Refused),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NoFrame::RanOut),
+    }
 }
 
 /// **The whole Media Foundation conversation, with no clock over it** — the half
@@ -466,7 +517,7 @@ fn decode_from_url(
     let mut cost = FirstFrameCost::default();
     let frame = in_the_process_apartment(&mut cost, |cost| {
         let opening = Instant::now();
-        let file = TheFile::open(url)?;
+        let file = TheFile::open(url).ok()?;
         let opened = opening.elapsed();
         let frame = read_first_frame(&file.stream, fit_width, fit_height, cost);
         cost.open += opened;
@@ -827,26 +878,24 @@ fn read_first_frame(
         // them look otherwise would be turning a good file into a refusal for a
         // reason that has nothing to do with the file. The caller's own
         // [`FIRST_FRAME_BUDGET`] still bounds the whole question from outside.
-        let deadline = Instant::now() + FIRST_FRAME_BUDGET;
-        let sample = loop {
-            let mut flags = 0_u32;
-            let mut sample = None;
-            reader
-                .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
-                .ok()?;
-            if let Some(sample) = sample {
-                break sample;
-            }
-            // No sample and no end: a stream tick, or a format change the reader
-            // is working through. Both are answered by asking again — but a file
-            // that answers this way for ever is what the deadline above is for.
-            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                return None;
-            }
-            if Instant::now() >= deadline {
-                return None;
-            }
-        };
+        // The loop's decision is [`first_sample`]'s; what is left here is the one
+        // `ReadSample` each turn asks, read into the three answers it can give.
+        let sample = first_sample(
+            || {
+                let mut flags = 0_u32;
+                let mut sample = None;
+                reader
+                    .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
+                    .ok()?;
+                Some(match sample {
+                    Some(sample) => ReadAnswer::Sample(sample),
+                    None if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 => ReadAnswer::End,
+                    None => ReadAnswer::Tick,
+                })
+            },
+            Instant::now,
+            FIRST_FRAME_BUDGET,
+        )?;
         lap(&mut cost.read_sample);
 
         let buffer = sample.ConvertToContiguousBuffer().ok()?;
@@ -860,6 +909,48 @@ fn read_first_frame(
             native_width: native.0,
             native_height: native.1,
         })
+    }
+}
+
+/// **What one `ReadSample` answered**, as [`first_sample`] reads it.
+enum ReadAnswer<S> {
+    /// A sample: the frame the loop was waiting for.
+    Sample(S),
+    /// No sample and no end: a stream tick, or a format change the reader is
+    /// working through. Both are answered by asking again.
+    Tick,
+    /// The end of the stream, with no sample: the file has nothing to give.
+    End,
+}
+
+/// **Ask `read` until it answers a sample, the stream ends, or `budget` read on
+/// `now` has run out** (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — [`read_first_frame`]'s
+/// loop, with the platform's `ReadSample` and the clock both handed in.
+///
+/// `None` is the module's one silence for all three ways it stops without a
+/// picture: `read` itself failed (`None` from it), the stream ended, or the
+/// deadline — `now()` at the call plus `budget` — had passed when a tick came
+/// back. The deadline is read only after a tick, so it ends a reader that answers
+/// "not yet" for ever and cannot bound a `ReadSample` that never returns; that
+/// one is [`within_budget`]'s. The real caller passes `Instant::now` and
+/// [`FIRST_FRAME_BUDGET`]; a test passes a planted reader and a clock that moves
+/// by the looks it is asked for.
+fn first_sample<S>(
+    mut read: impl FnMut() -> Option<ReadAnswer<S>>,
+    now: impl Fn() -> Instant,
+    budget: Duration,
+) -> Option<S> {
+    let deadline = now() + budget;
+    loop {
+        match read()? {
+            ReadAnswer::Sample(sample) => return Some(sample),
+            ReadAnswer::End => return None,
+            ReadAnswer::Tick => {}
+        }
+        // A file that answers "not yet" for ever is what the deadline is for.
+        if now() >= deadline {
+            return None;
+        }
     }
 }
 
@@ -1152,11 +1243,23 @@ fn contain(size: (u32, u32), fit: (u32, u32)) -> (u32, u32) {
 mod tests {
     use super::*;
 
-    /// How long a test here waits for the decoder to answer something that must
-    /// be answered: a quick machine pays nothing, and a decoder that never
-    /// answers is a red. The same patience as the engine's tests
-    /// (`engine::tests::PATIENCE`), whose module is private to `engine`.
+    /// How long planted work that a test holds waits to be let go before it lets
+    /// itself go: a test that releases it pays nothing, and a wait that never
+    /// ends becomes a late answer and a red. The same patience as the engine's
+    /// tests (`engine::tests::PATIENCE`), whose module is private to `engine`.
+    ///
+    /// **Never a bound on a real decode** (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK,
+    /// R8): a loaded machine's decode ran past it, so the tests that need a real
+    /// frame ask with no wall limit, and a decode that never answers is the suite
+    /// watchdog's red.
     const DECODER_PATIENCE: Duration = Duration::from_secs(10);
+
+    /// **Planted work's hold**: wait until the test lets the work go, or until
+    /// [`DECODER_PATIENCE`] has passed — the suite's patience, so a wait that
+    /// never ends turns into a late answer and a red, never a hang.
+    fn held_until_let_go(release: &std::sync::mpsc::Receiver<()>) {
+        let _ = release.recv_timeout(DECODER_PATIENCE);
+    }
 
     /// PIN — **a frame is measured before it is copied, on both locks** (review
     /// row R2-4).
@@ -1357,9 +1460,17 @@ mod tests {
     ///
     /// The refusal path through the real platform: a file that is not there, a
     /// file that is empty, and a file whose bytes are text with a video's name
-    /// on it. All three must be the module's one silence, on the caller's thread,
-    /// with the apartment and the platform given back — and the last of the three
-    /// is the one that actually reaches Media Foundation and is turned away by it.
+    /// on it. None of the three is drawn, on the caller's thread, with the
+    /// apartment and the platform given back — and the last of the three is the
+    /// one that actually reaches Media Foundation and is turned away by it.
+    ///
+    /// **Which word each answers is stated only where no clock decides it**
+    /// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL). The file that is not there is
+    /// refused before any budget starts, so it is a [`NoFrame::Refused`] on every
+    /// machine. The other two reach the decoder under [`FIRST_FRAME_BUDGET`], and
+    /// a loaded machine may run that out first, so for them this states only that
+    /// no picture comes back; the refusal and the run-out are each pinned on
+    /// [`within_budget`] with planted work (`a_question_that_cannot_finish_is_given_up_on`).
     ///
     /// MUTATION: `unwrap` any of the `ok()?`s in `read_first_frame` and the third
     /// case takes the decoration worker down, which on the machine is a hover
@@ -1369,49 +1480,206 @@ mod tests {
         let dir = bt_testpath::temp_path("folio-video-refusals");
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let missing = dir.join("no-such-file.mp4");
-        assert_eq!(first_frame(&missing, 280, 160), None);
+        assert_eq!(first_frame(&missing, 280, 160), Err(NoFrame::Refused));
         let empty = dir.join("empty.mp4");
         std::fs::write(&empty, b"").expect("an empty file");
-        assert_eq!(first_frame(&empty, 280, 160), None);
+        assert_eq!(first_frame(&empty, 280, 160).ok(), None);
         let text = dir.join("renamed.mp4");
         std::fs::write(&text, b"this is not a video at all, whatever it is called")
             .expect("a text file");
-        assert_eq!(first_frame(&text, 280, 160), None);
+        assert_eq!(first_frame(&text, 280, 160).ok(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// PIN — **the budget is honoured, and it is honoured about the waiting and
-    /// not about the work.**
+    /// RED — **the budget is honoured, it is honoured about the waiting and not
+    /// about the work, and running out of it is not a refusal**
+    /// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL).
     ///
     /// [`within_budget`] with no decoder underneath it, which is the only way
-    /// either half of this can be stated without a real file's real duration
-    /// standing in the middle of it. The first arm hands it work that answers at
-    /// once under a budget nothing could exceed; the second hands it work that
-    /// cannot finish inside the budget it is given, and the budget is small
-    /// enough that a machine under any load at all still cannot finish it.
+    /// any of this can be stated without a real file's real duration standing
+    /// in the middle of it. The first two arms hand it work that answers at once
+    /// under a budget nothing could exceed — a picture, then nothing; the third
+    /// hands it work that cannot finish inside the budget it is given: it is
+    /// held until the test has the answer (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK), so
+    /// no budget and no machine can let it answer first.
     ///
-    /// **Neither arm can be made red or green by a busy machine**, which is the
-    /// whole reason this test exists rather than a slow file: an hour is not a
-    /// duration a thread spawn and a channel send can miss, and twenty
-    /// milliseconds is not one a two-second sleep can beat.
+    /// **No arm can be made red or green by a busy machine**, which is the whole
+    /// reason this test exists rather than a slow file: an hour is not a
+    /// duration a thread spawn and a channel send can miss, and work that is
+    /// held until the answer is in has not answered by then, whatever the
+    /// budget. Nothing here sleeps.
     ///
-    /// MUTATION: swap `recv_timeout` for `recv` and the second arm hangs for two
-    /// seconds and then answers `Some`, which is a hover that has frozen the
-    /// decoration worker for as long as the file feels like taking.
+    /// MUTATIONS: swap `recv_timeout` for `recv` and the third arm waits for the
+    /// held work, which lets itself go after [`DECODER_PATIENCE`] and answers
+    /// `Ok` — red, and a hover that has frozen the decoration worker for as long
+    /// as the file feels like taking. Map the timeout to `Refused` (plant
+    /// `plant-164-runout-mapped-to-refused.py`) and the third arm reads the
+    /// "no decoder" a good file under load used to be filed as — red by name.
     #[test]
     fn a_question_that_cannot_finish_is_given_up_on() {
         assert_eq!(
             within_budget(Duration::from_secs(3_600), || Some(7_u32)),
-            Some(7),
+            Ok(7),
             "an answer inside the budget is the answer"
         );
         assert_eq!(
-            within_budget(Duration::from_millis(20), || {
-                std::thread::sleep(Duration::from_secs(2));
-                Some(7_u32)
-            }),
-            None,
-            "work that has not answered by the end of the budget is the module's one silence"
+            within_budget(Duration::from_secs(3_600), || None::<u32>),
+            Err(NoFrame::Refused),
+            "work that answers with nothing inside the budget is a refusal"
+        );
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (finished, done) = std::sync::mpsc::channel();
+        let answer = within_budget(Duration::from_millis(20), move || {
+            held_until_let_go(&held);
+            let _ = finished.send(());
+            Some(7_u32)
+        });
+        // The work is let go only now, after the answer, and ends.
+        let _ = release.send(());
+        let _ = done.recv();
+        assert_eq!(
+            answer,
+            Err(NoFrame::RanOut),
+            "work that has not answered by the end of the budget ran out, which is not a refusal"
+        );
+    }
+
+    /// **A clock that moves only when a read is asked**: one [`STEP`] per
+    /// `ReadSample` (the planted reader takes it, as the real one spends its time
+    /// in the platform), from one wall reading taken once, and never when it is
+    /// only read. [`first_sample`] reads it once to set its deadline and once
+    /// after every tick, and both are counted, so "the budget ran out at the
+    /// third read" is a count, never a duration.
+    struct Looks {
+        began: Instant,
+        /// How far the reads have moved it.
+        moved: std::cell::Cell<Duration>,
+        /// How many times it was read.
+        readings: std::cell::Cell<u32>,
+    }
+
+    /// How far one planted read moves [`Looks`].
+    const STEP: Duration = Duration::from_secs(1);
+
+    impl Looks {
+        fn new() -> Self {
+            Self {
+                began: Instant::now(),
+                moved: std::cell::Cell::new(Duration::ZERO),
+                readings: std::cell::Cell::new(0),
+            }
+        }
+
+        fn now(&self) -> Instant {
+            self.readings.set(self.readings.get() + 1);
+            self.began + self.moved.get()
+        }
+
+        /// One read's worth of time.
+        fn step(&self) {
+            self.moved.set(self.moved.get() + STEP);
+        }
+    }
+
+    /// **A planted `ReadSample`**: each read takes one [`STEP`] of `clock`'s
+    /// time and answers the next of `script` (`None` is a failed read), then the
+    /// last one for ever; and how many times it was asked.
+    fn planted(
+        clock: &Looks,
+        script: Vec<Option<ReadAnswer<u32>>>,
+    ) -> (
+        impl FnMut() -> Option<ReadAnswer<u32>> + '_,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+        let count = std::rc::Rc::clone(&asked);
+        let read = move || {
+            let turn = count.get();
+            count.set(turn + 1);
+            clock.step();
+            match script.get(turn).or(script.last())? {
+                Some(ReadAnswer::Sample(sample)) => Some(ReadAnswer::Sample(*sample)),
+                Some(ReadAnswer::Tick) => Some(ReadAnswer::Tick),
+                Some(ReadAnswer::End) => Some(ReadAnswer::End),
+                None => None,
+            }
+        };
+        (read, asked)
+    }
+
+    /// RED (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — **a reader that only ever
+    /// answers "not yet" is given up on when its budget runs out, counted on
+    /// the clock it was handed.**
+    ///
+    /// [`read_first_frame`]'s loop with the platform taken out: the real
+    /// `ReadSample` is the only producer of a tick, and a real fixture answers
+    /// with a sample at the first read, so the budget's end is stated here, on a
+    /// planted reader whose every read takes a second. Three seconds of budget
+    /// is three reads: the deadline is set before the first, and the third tick
+    /// comes back at 3 s.
+    ///
+    /// MUTATIONS: never read the deadline (`if false && now() >= deadline`) —
+    /// the loop asks on past the third tick and comes back with the sample the
+    /// planted reader gives at the eleventh. Set the deadline after the first
+    /// read rather than before it — the budget is a read longer, and the loop
+    /// gives up at the fourth.
+    #[test]
+    fn a_reader_that_only_says_not_yet_is_given_up_on_when_its_budget_runs_out() {
+        let mut script: Vec<Option<ReadAnswer<u32>>> =
+            (0..10).map(|_| Some(ReadAnswer::Tick)).collect();
+        script.push(Some(ReadAnswer::Sample(7)));
+        let clock = Looks::new();
+        let (read, asked) = planted(&clock, script);
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (None, 3, 4),
+            "three ticks, the third at the deadline: the module's one silence"
+        );
+    }
+
+    /// RED (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK) — **a sample inside the budget is
+    /// the answer, and the end of the stream and a failed read are a silence at
+    /// once.**
+    ///
+    /// MUTATIONS: end the loop at the first tick (`if true || now() >= deadline`)
+    /// — the sample after two ticks is never asked for, and the first assertion
+    /// reads `None` after one read. Read a failed read as a tick — the last case
+    /// reads on until the deadline, and the clock is read four times, not once.
+    #[test]
+    fn a_sample_inside_the_budget_is_the_answer_and_an_end_is_a_silence() {
+        let clock = Looks::new();
+        let (read, asked) = planted(
+            &clock,
+            vec![
+                Some(ReadAnswer::Tick),
+                Some(ReadAnswer::Tick),
+                Some(ReadAnswer::Sample(7)),
+            ],
+        );
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (Some(7), 3, 3),
+            "two ticks inside three seconds, then the frame"
+        );
+
+        let clock = Looks::new();
+        let (read, asked) = planted(&clock, vec![Some(ReadAnswer::End)]);
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (None, 1, 1),
+            "a stream that ends has nothing to give, and the deadline is never read"
+        );
+
+        let clock = Looks::new();
+        let (read, asked) = planted(&clock, vec![None]);
+        let answer = first_sample(read, || clock.now(), Duration::from_secs(3));
+        assert_eq!(
+            (answer, asked.get(), clock.readings.get()),
+            (None, 1, 1),
+            "a read that failed is the same silence, at once"
         );
     }
 
@@ -1570,15 +1838,17 @@ mod tests {
     fn the_shipped_mov_fixture_gives_up_a_frame_it_will_never_play() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/assets/folio-video-test.mov");
-        // The decoder itself, on a thread of its own, within the suite's patience
-        // rather than `first_frame`'s outer `FIRST_FRAME_BUDGET`: whether this
-        // decoder reads a QuickTime file is the subject, and how fast a loaded
-        // machine opens and seeks one is not. Only the open and the seek leave the
+        // The decoder itself, on this thread, with no wall limit over it rather than
+        // `first_frame`'s outer `FIRST_FRAME_BUDGET` (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK,
+        // R8): whether this decoder reads a QuickTime file is the subject, and how
+        // fast a loaded machine opens and seeks one is not; a decode that never
+        // answers is the suite watchdog's red. Only the open and the seek leave the
         // product's clock here; `read_first_frame` still bounds its `ReadSample`
-        // loop by `FIRST_FRAME_BUDGET`, which is the product's answer to a reader
-        // that never ends.
+        // loop by `FIRST_FRAME_BUDGET` (`first_sample`), which is the product's
+        // answer to a reader that never ends.
         let url = HSTRING::from(fixture.as_os_str());
-        let frame = within_budget(DECODER_PATIENCE, move || decode_from_url(&url, 280, 160).0)
+        let frame = decode_from_url(&url, 280, 160)
+            .0
             .expect("a real mov gives up a frame");
         assert_eq!(
             (frame.native_width, frame.native_height),
@@ -1660,13 +1930,19 @@ mod tests {
     /// file free when the answer comes back.**
     ///
     /// The decode is handed work that holds the lent stream far past a budget it
-    /// cannot meet, as a demuxer stuck in `ReadSample` would. The answer is the
-    /// module's one silence, and at that moment nobody holds the file: the caller
-    /// closed it before it answered, whatever the walked-away thread still holds.
+    /// cannot meet, as a demuxer stuck in `ReadSample` would. The answer is a
+    /// run-out ([`NoFrame::RanOut`], not a refusal), and at that moment nobody
+    /// holds the file: the caller closed it before it answered, whatever the
+    /// walked-away thread still holds.
     ///
-    /// MUTATION: empty `TheFile`'s `Drop` (no `Close`), or hand the thread the
+    /// MUTATIONS: empty `TheFile`'s `Drop` (no `Close`), or hand the thread the
     /// `TheFile` itself rather than a [`Lent`] reference — the thread still
     /// holding the stream holds the file, and the exclusive open is refused.
+    /// Swap `within_budget`'s `recv_timeout` for `recv` — the answer waits for the
+    /// held decode to let itself go after [`DECODER_PATIENCE`], and the decode is
+    /// no longer running when it comes. Map the timeout to `Refused` (plant
+    /// `plant-164-runout-mapped-to-refused.py`) — the decode given up on reads
+    /// as a refusal of the file.
     #[test]
     fn a_frame_given_up_on_leaves_its_file_free() {
         let dir = bt_testpath::temp_path("folio-video-given-up");
@@ -1677,20 +1953,81 @@ mod tests {
         let answer = first_frame_through(&url, Duration::from_millis(20), move |stream| {
             // Held until the test has looked, holding the stream all the while: a decode
             // that cannot answer inside any budget, whatever the machine is doing.
-            let _ = held.recv();
+            held_until_let_go(&held);
             drop(stream);
             let _ = finished.send(());
             None
         });
         let free = bt_testpath::nobody_holds(&copy);
+        // Read before the release: the decode cannot have finished, because nothing has
+        // let it go — unless the budget waited for it to let itself go.
+        let still_running = done.try_recv().is_err();
         // The walked-away thread is let go, and ends; the scratch file goes after it.
         let _ = release.send(());
         let _ = done.recv();
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(answer, None, "a decode given up on is the module's silence");
+        assert_eq!(
+            answer,
+            Err(NoFrame::RanOut),
+            "a decode given up on ran out, which is not a refusal of the file"
+        );
+        assert!(
+            still_running,
+            "the budget gave up on the decode, which was still running when it answered"
+        );
         assert!(
             free,
             "and the file is let go before the silence is answered, though the decode still runs"
+        );
+    }
+
+    /// RED (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE; review F7 of row 164) — **a video
+    /// another program is writing is held, not refused**: the open shares no writer, so a
+    /// recording still being written meets a sharing violation, which is an answer about the
+    /// moment ([`NoFrame::Held`]). Once the writer lets go the same file opens; a file that is
+    /// not there stays a refusal.
+    ///
+    /// The writer is this test's own handle, open for writing and sharing reads, as a recorder's
+    /// is. No decode runs on either arm (the open is refused before it, and the let-go arm only
+    /// opens), so nothing here waits on the machine.
+    ///
+    /// MUTATION: have `TheFile::open` answer `Refused` for every error — the held open reads as
+    /// a refusal of the file again; the first assertion goes red.
+    #[test]
+    fn a_video_another_program_is_writing_is_held_and_opens_once_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        /// `FILE_SHARE_READ`: the writer lets readers in, and refuses an open that will not
+        /// share writing with it.
+        const SHARE_READ: u32 = 0x1;
+        let dir = bt_testpath::temp_path("folio-video-held");
+        let copy = a_copy_of_the_fixture(&dir, "录屏 recording.mp4");
+        let url = HSTRING::from(copy.as_os_str());
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(SHARE_READ)
+            .open(&copy)
+            .unwrap();
+        let held = first_frame_through(&url, Duration::from_secs(3600), |_| {
+            unreachable!("a file that would not open is never decoded")
+        });
+        drop(writer);
+        let mut cost = FirstFrameCost::default();
+        let opens = in_the_process_apartment(&mut cost, |_| Some(TheFile::open(&url).is_ok()));
+        let missing = HSTRING::from(dir.join("不在 missing.mp4").as_os_str());
+        let gone = first_frame_through(&missing, Duration::from_secs(3600), |_| {
+            unreachable!("a file that is not there is never decoded")
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            held,
+            Err(NoFrame::Held),
+            "a recording another program is writing is held"
+        );
+        assert_eq!(opens, Some(true), "and opens once the writer lets go");
+        assert_eq!(
+            gone,
+            Err(NoFrame::Refused),
+            "a file that is not there is refused"
         );
     }
 
@@ -1701,7 +2038,20 @@ mod tests {
     ///
     /// The real platform, the shipped fixture and a file that is no video at all
     /// (the refusal arm, whose source resolver gives up on the bytes), each asked
-    /// through [`first_frame`] and written over at once — exactly the gesture.
+    /// down [`first_frame`]'s own road and written over at once — exactly the
+    /// gesture.
+    ///
+    /// **The road is `first_frame`'s, its constant is not**
+    /// (T-FIRST-FRAME-BUDGET-FROM-A-CLOCK): each question goes through
+    /// [`first_frame_through`] with the real decode, under a budget that never
+    /// ends (`Duration::MAX`, which `recv_timeout` waits out as a plain `recv`)
+    /// instead of [`FIRST_FRAME_BUDGET`]. Through `first_frame` the fixture's arm
+    /// was a decode racing three seconds, and a loaded machine that lost the race
+    /// read "no frame" for a file it had decoded; under [`DECODER_PATIENCE`] it
+    /// raced ten (R8). Whether the file is free when the answer comes back is the
+    /// subject; how fast a loaded machine decodes is not, a decode that never
+    /// answers is the suite watchdog's red, and the budget is pinned next door, on
+    /// work that has no decoder in it.
     ///
     /// No mutation turns this red at will: the platform's late release it guards
     /// against is a race (CI run 39055489876 lost it once, in a full suite, on the
@@ -1709,6 +2059,12 @@ mod tests {
     /// takes the race away; this states the gesture itself.
     #[test]
     fn an_answered_frame_leaves_its_file_free() {
+        let patiently = |path: &Path| {
+            let url = HSTRING::from(path.as_os_str());
+            first_frame_through(&url, Duration::MAX, move |stream| {
+                decode_lent(&stream, (280, 160)).0
+            })
+        };
         let dir = bt_testpath::temp_path("folio-video-answered");
         let real = a_copy_of_the_fixture(&dir, "录屏 real.mp4");
         let junk = dir.join("录屏 junk.mp4");
@@ -1716,12 +2072,12 @@ mod tests {
         let answers = [
             (
                 "the fixture",
-                first_frame(&real, 280, 160).is_some(),
+                patiently(&real).is_ok(),
                 bt_testpath::nobody_holds(&real),
             ),
             (
                 "no video",
-                first_frame(&junk, 280, 160).is_some(),
+                patiently(&junk).is_ok(),
                 bt_testpath::nobody_holds(&junk),
             ),
         ];

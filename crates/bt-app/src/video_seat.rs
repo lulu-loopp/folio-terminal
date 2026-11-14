@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use bt_platform::video::engine::{Engine, EngineError, EngineState, Length};
+use bt_platform::video::engine::{Engine, EngineError, EngineState, Length, OPEN_BUDGET};
 use bt_render::{ChromeLabel, ChromeLabelWeight, ChromePalette, OverlayQuad, VideoStage};
 
 use crate::marks::{Band, ChromeMark, ChromeSprite, OverlayLayer};
@@ -755,6 +755,13 @@ pub struct VideoSeat {
     /// Which of [`VIDEO_RATES`] is in force. An index and not a number, because
     /// the button cycles and a float that had drifted would never match.
     rate_index: usize,
+    /// **When this seat's engine was found late and given one more
+    /// `OPEN_BUDGET`**, or `None` while it is not late (plan row 189) — the
+    /// seat's own `Unanswered { asked_again: true }`: the instant the sweep was
+    /// handed when it first read [`EngineError::Unresponsive`]. Kept and cleared
+    /// only by [`Self::answer`], through [`seat_answer`]; it travels with the
+    /// seat across a tear-off, as the engine does.
+    late_since: Option<Instant>,
 }
 
 impl std::fmt::Debug for VideoSeat {
@@ -778,9 +785,21 @@ impl VideoSeat {
     /// `serial` is a number this window never reuses; it is the whole of the
     /// texture's identity, so two panes showing one file are two pictures.
     pub fn open(path: &Path, serial: u64, now: Instant) -> Result<Self, EngineError> {
-        let engine = Engine::open(path)?;
+        Ok(Self::on(Engine::open(path)?, path, serial, now))
+    }
+
+    /// **A seat on an engine whose thread never starts**, asked for at `now` —
+    /// what a machine whose player does not come up looks like to the window
+    /// (plan row 189), on instants the test chooses.
+    #[cfg(test)]
+    pub fn never_built(path: &Path, serial: u64, now: Instant) -> Self {
+        Self::on(Engine::never_built(path, now), path, serial, now)
+    }
+
+    /// The seat on `engine`, told to play.
+    fn on(engine: Engine, path: &Path, serial: u64, now: Instant) -> Self {
         engine.play();
-        Ok(Self {
+        Self {
             engine,
             path: path.to_path_buf(),
             key: format!("video:{serial}"),
@@ -797,7 +816,8 @@ impl VideoSeat {
             gain_flash_at: None,
             bar_drawn: None,
             rate_index: 0,
-        })
+            late_since: None,
+        }
     }
 
     /// The file this seat is playing — the spelling the surface knows it by.
@@ -840,11 +860,33 @@ impl VideoSeat {
         )
     }
 
-    /// **Whether this seat has stopped being a player, and what its surface
-    /// says instead** — see [`retirement`].
+    /// **Whether this seat has stopped being a player at `now`, and what its
+    /// surface says instead** — [`seat_answer`] on the engine's reading and
+    /// this seat's [`Self::late_since`], which it keeps: set on the first late
+    /// reading, cleared once the engine is a player again (plan row 189). `now`
+    /// is the instant the window's clocked pass was handed, and the engine is
+    /// read at it too (`Engine::state_at`), so the open budget's run-out and the
+    /// one more budget are read on one clock.
+    pub fn answer(&mut self, now: Instant) -> Option<(EngineError, crate::i18n::Text)> {
+        match seat_answer(&self.engine.state_at(|| now), self.late_since, now) {
+            SeatAnswer::Player => {
+                self.late_since = None;
+                None
+            }
+            SeatAnswer::Late { since } => {
+                self.late_since = Some(since);
+                None
+            }
+            SeatAnswer::Retire(error, says) => Some((error, says)),
+        }
+    }
+
+    /// **When this seat's answer next changes on its own** — the wake the
+    /// window books for it (plan row 189): [`seat_wake`] of the engine's
+    /// `open_runs_out_at` and this seat's late record. Reads no clock.
     #[must_use]
-    pub fn retirement(&self) -> Option<(EngineError, crate::i18n::Text)> {
-        retirement(&self.engine.state())
+    pub fn answer_due(&self) -> Option<Instant> {
+        seat_wake(self.engine.open_runs_out_at(), self.late_since)
     }
 
     /// **Whether the sound this seat is making should light the tab's speaker**
@@ -1385,26 +1427,103 @@ impl VideoSeat {
     }
 }
 
-/// **Why a seat whose engine stands at `state` is retired, and the sentence its
-/// surface prints in the player's place** — `None` while it is still a player:
-/// loading, playing, ended, or loaded with no length to show.
+/// **The sentence a surface prints for an engine's `error`** — three, because
+/// they are three facts (plan row 189):
 ///
-/// An engine's error is sticky, so a seat on one is a rectangle that will never
-/// receive another picture (§7.44 ⑥). Two sentences, because they are two
-/// facts: a decoder that would not open the file — which on a machine missing a
-/// Store codec is [`EngineError::Unsupported`], the honest source of
-/// `Text::VideoFormatCannotPlay` now that no table can know it — and a source
-/// that never finished loading ([`EngineError::NotLoaded`], the platform's own
-/// refusal once its load budget has passed), which is not a claim about the
-/// format at all.
+/// * a decoder that would not open the file — which on a machine missing a
+///   Store codec is [`EngineError::Unsupported`], the honest source of
+///   `Text::VideoFormatCannotPlay` now that no table can know it;
+/// * a source that never finished loading ([`EngineError::NotLoaded`], the
+///   platform's own refusal once its load budget has passed), which is not a
+///   claim about the format at all;
+/// * a player that did not come up on this machine — an engine not built
+///   within its open budget twice over, an engine thread that could not be
+///   started, a platform, device or engine factory that refused, or a
+///   synchronous `SetSource` refusal (the engine's `NoEngine`, which learns
+///   nothing about the bytes)
+///   ([`EngineError::is_about_the_machine`]) — `Text::VideoPlayerDidNotStart`,
+///   which says nothing about the file, because nothing was learned about it.
+///   Until row 189 these said the format could not be played.
 #[must_use]
-pub fn retirement(state: &EngineState) -> Option<(EngineError, crate::i18n::Text)> {
-    let error = state.error?;
-    let says = match error {
-        EngineError::NotLoaded => crate::i18n::Text::VideoDidNotLoad,
-        _ => crate::i18n::Text::VideoFormatCannotPlay,
-    };
-    Some((error, says))
+pub fn refusal_sentence(error: EngineError) -> crate::i18n::Text {
+    if error.is_about_the_machine() {
+        crate::i18n::Text::VideoPlayerDidNotStart
+    } else if error == EngineError::NotLoaded {
+        crate::i18n::Text::VideoDidNotLoad
+    } else {
+        crate::i18n::Text::VideoFormatCannotPlay
+    }
+}
+
+/// **What a seat's engine reading comes to** ([`seat_answer`]; plan row 189).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SeatAnswer {
+    /// Still a player: loading, playing, ended, or loaded with no length. A
+    /// late engine that has come up is one again, and nothing is said.
+    Player,
+    /// **The engine has not come up within `OPEN_BUDGET`, and is being given one
+    /// more**, counted from `since` — the instant the first late reading was
+    /// made. The surface keeps the loading face and says nothing.
+    Late { since: Instant },
+    /// No longer a player: the seat is shut down and the surface says this.
+    Retire(EngineError, crate::i18n::Text),
+}
+
+/// **A seat's answer at `now`, given the engine's reading `state` and the
+/// instant the seat was first found late** (`late_since`; plan row 189,
+/// row 164's class).
+///
+/// The open budget's run-out ([`EngineError::Unresponsive`]) is a reading and
+/// not a latch: the engine thread goes on building, and a late build replaces
+/// it on the next reading. So the first late reading is not a refusal — it is
+/// filed as [`SeatAnswer::Late`] from `now`, and **the same engine is given one
+/// more `OPEN_BUDGET`**: the one automatic re-ask, the bound held in the seat's
+/// state. A reading still late at `since + OPEN_BUDGET` or after retires the
+/// seat with [`refusal_sentence`]'s "the player did not start", and from then on
+/// only a new look asks — a play pressed again, a card opened anew — with a new
+/// seat and a new engine. Every other error retires at once with its own
+/// sentence; a reading with no error is a player, whatever `late_since` says.
+///
+/// The one more budget ends *at* its instant, not a breath after: that instant
+/// is the wake [`seat_wake`] books, and the turn it wakes is the turn that
+/// answers, so the loop is never handed an instant that has already come.
+///
+/// `now` is the instant the window's clocked pass was handed; nothing here
+/// reads a clock.
+#[must_use]
+pub fn seat_answer(state: &EngineState, late_since: Option<Instant>, now: Instant) -> SeatAnswer {
+    match (state.error, late_since) {
+        (None, _) => SeatAnswer::Player,
+        (Some(EngineError::Unresponsive), None) => SeatAnswer::Late { since: now },
+        (Some(EngineError::Unresponsive), Some(since)) if now < since + OPEN_BUDGET => {
+            SeatAnswer::Late { since }
+        }
+        (Some(error), _) => SeatAnswer::Retire(error, refusal_sentence(error)),
+    }
+}
+
+/// **When a seat's answer next changes on its own** (plan row 189): the wake
+/// the window books, so that a loading face that will become a sentence does so
+/// at its instant and not when something unrelated next wakes the loop.
+///
+/// * Not yet late: `open_runs_out_at`, the engine's own first instant past its
+///   open budget (`None` once it is built or has spoken — then nothing here is
+///   owed a wake).
+/// * Late since `since`: `since + OPEN_BUDGET`, the instant [`seat_answer`]
+///   retires a seat that is still late. A late engine that came up in the
+///   meantime is answered a player at that turn, which clears the record.
+///
+/// Both are instants the turn they wake answers differently at, so neither is
+/// left in the past by the turn it comes due on. Reads no clock.
+#[must_use]
+pub fn seat_wake(
+    open_runs_out_at: Option<Instant>,
+    late_since: Option<Instant>,
+) -> Option<Instant> {
+    match late_since {
+        Some(since) => Some(since + OPEN_BUDGET),
+        None => open_runs_out_at,
+    }
 }
 
 /// [`VideoSeat::bar`] with its three readings of the seat already taken — the
@@ -1873,6 +1992,14 @@ impl VideoSeats {
         self.seats.iter().map(|(surface, seat)| (*surface, seat))
     }
 
+    /// Every seat, to be answered for ([`VideoSeat::answer`] keeps the seat's
+    /// late record).
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (crate::PreviewSurface, &mut VideoSeat)> {
+        self.seats
+            .iter_mut()
+            .map(|(surface, seat)| (*surface, seat))
+    }
+
     /// **Shut down whatever is playing on `surface`.** `true` when there was
     /// something.
     pub fn close(&mut self, surface: crate::PreviewSurface) -> bool {
@@ -1961,6 +2088,13 @@ impl VideoSeats {
             .values()
             .filter_map(|seat| seat.bar_deadline(now, motion))
             .min()
+    }
+
+    /// **The soonest any seat's answer changes on its own** — see
+    /// [`VideoSeat::answer_due`] (plan row 189).
+    #[must_use]
+    pub fn answer_deadline(&self) -> Option<Instant> {
+        self.seats.values().filter_map(VideoSeat::answer_due).min()
     }
 
     /// Whether any seat's bar is in flight — see [`VideoSeat::bar_is_moving`].
@@ -2753,51 +2887,229 @@ mod tests {
     ///
     /// The platform refuses a source that said nothing within its load budget
     /// as `EngineError::NotLoaded`. Until then a surface showing it was a player
-    /// at `0:00` that never started; the sweep (`Runtime::sweep_video_seats`)
-    /// takes every seat [`retirement`] names off its surface and prints the
-    /// sentence it names in the player's place. A refusal of the *format* and a
+    /// at `0:00` that never started; the clocked pass
+    /// (`Runtime::retire_faulted_video_seats`) takes every seat [`seat_answer`]
+    /// retires off its surface and prints the sentence it names in the
+    /// player's place. A refusal of the *format* and a
     /// load that never finished are two sentences, because they are two facts;
     /// a player still loading, and one loaded with no length, are not retired.
     ///
-    /// MUTATION: answer `None` for `EngineError::NotLoaded` in [`retirement`] —
-    /// the never-starting player kept on the surface — and the first assertion
-    /// goes red.
+    /// MUTATION: answer `Player` for `EngineError::NotLoaded` in [`seat_answer`]
+    /// — the never-starting player kept on the surface — and the first
+    /// assertion goes red.
     #[test]
     fn a_video_that_never_loaded_is_retired_with_its_own_sentence() {
+        let now = Instant::now();
         let refused = EngineState {
             error: Some(EngineError::NotLoaded),
             ..EngineState::default()
         };
         assert_eq!(
-            retirement(&refused),
-            Some((EngineError::NotLoaded, crate::i18n::Text::VideoDidNotLoad)),
+            seat_answer(&refused, None, now),
+            SeatAnswer::Retire(EngineError::NotLoaded, crate::i18n::Text::VideoDidNotLoad),
             "a load that never finished is retired, and says so"
         );
         assert_eq!(
-            retirement(&EngineState {
-                error: Some(EngineError::Unsupported),
-                ..EngineState::default()
-            }),
-            Some((
+            seat_answer(
+                &EngineState {
+                    error: Some(EngineError::Unsupported),
+                    ..EngineState::default()
+                },
+                None,
+                now
+            ),
+            SeatAnswer::Retire(
                 EngineError::Unsupported,
                 crate::i18n::Text::VideoFormatCannotPlay
-            )),
+            ),
             "a format the decoder refused keeps its own sentence"
         );
         assert_eq!(
-            retirement(&EngineState::default()),
-            None,
+            seat_answer(&EngineState::default(), None, now),
+            SeatAnswer::Player,
             "a player still loading is still a player"
         );
         assert_eq!(
-            retirement(&EngineState {
+            seat_answer(
+                &EngineState {
+                    ready: true,
+                    has_video: true,
+                    natural_size: Some((160, 120)),
+                    ..EngineState::default()
+                },
+                None,
+                now
+            ),
+            SeatAnswer::Player,
+            "a player with no length is still a player"
+        );
+    }
+
+    /// RED (plan row 189, T-LATE-BUILT-VIDEO-RETIRED-AS-UNPLAYABLE) — **an
+    /// engine that has not come up within its open budget is given one more,
+    /// says nothing meanwhile, plays if it comes up, and is retired as a player
+    /// that did not start — never as a format that cannot be played.**
+    ///
+    /// On a cold or busy machine a good recording's engine can take longer than
+    /// `OPEN_BUDGET` to be built. The engine reads `Unresponsive` from then on
+    /// and goes on building — the reading is not a latch — and until row 189 the
+    /// sweep retired the seat at that first reading with "This format cannot be
+    /// played", so a good video was called unplayable and never asked again.
+    ///
+    /// The clock is the test's: every instant is chosen, nothing sleeps, and no
+    /// engine is opened — the readings are planted states.
+    ///
+    /// MUTATION (`plant-189-late-engine-filed-as-a-format.py`): retire the
+    /// first late reading with the format's sentence — the first assertion goes
+    /// red. (`plant-189-late-engine-waits-for-ever.py`): keep a late reading
+    /// late whatever the instant — the retirement assertion goes red.
+    /// (`plant-189-second-budget-on-the-real-clock.py`): count the second
+    /// budget on the real clock rather than the handed instant — the
+    /// retirement assertion goes red at once, an hour being chosen.
+    #[test]
+    fn an_engine_not_up_within_its_budget_is_given_one_more_before_it_is_said() {
+        let late = EngineState {
+            error: Some(EngineError::Unresponsive),
+            ..EngineState::default()
+        };
+        let t0 = Instant::now();
+
+        // The first late reading: one more budget, from this instant, and no word.
+        assert_eq!(
+            seat_answer(&late, None, t0),
+            SeatAnswer::Late { since: t0 },
+            "the first run-out of the open budget is the one more ask, not a refusal"
+        );
+        // Inside that budget, to a breath before its end: still late, the same since.
+        assert_eq!(
+            seat_answer(&late, Some(t0), t0 + OPEN_BUDGET - Duration::from_nanos(1)),
+            SeatAnswer::Late { since: t0 },
+            "a reading a breath before the end of the one more budget is still in time"
+        );
+        // At its end — the instant the seat's wake is booked for: retired, saying the player
+        // did not start.
+        assert_eq!(
+            seat_answer(&late, Some(t0), t0 + OPEN_BUDGET),
+            SeatAnswer::Retire(
+                EngineError::Unresponsive,
+                crate::i18n::Text::VideoPlayerDidNotStart
+            ),
+            "a seat still late after one more budget is retired, and says the player did not start"
+        );
+        assert_eq!(
+            seat_answer(&late, Some(t0), t0 + Duration::from_secs(3600)),
+            SeatAnswer::Retire(
+                EngineError::Unresponsive,
+                crate::i18n::Text::VideoPlayerDidNotStart
+            ),
+            "and an hour later too: the asking is bounded"
+        );
+
+        // The engine comes up during the one more budget: a player, nothing said.
+        for state in [
+            EngineState::default(),
+            EngineState {
                 ready: true,
+                playing: true,
                 has_video: true,
                 natural_size: Some((160, 120)),
+                duration_secs: Some(4.0),
                 ..EngineState::default()
-            }),
+            },
+        ] {
+            assert_eq!(
+                seat_answer(&state, Some(t0), t0 + Duration::from_secs(3600)),
+                SeatAnswer::Player,
+                "an engine that came up late is a player, whenever it is read"
+            );
+        }
+    }
+
+    /// RED (plan row 189) — **a refusal is said at once with its own sentence,
+    /// late or not, and the sentence for a player that did not come up is not
+    /// the format's.**
+    ///
+    /// The one more budget is for the open's run-out alone: a decoder's refusal
+    /// and a load that never finished are answers about the file and are not
+    /// delayed by a late record. An engine thread that could not be started
+    /// (`Unresponsive` at the open, which has no engine to wait on) says the
+    /// player did not start — the open road prints [`refusal_sentence`].
+    ///
+    /// MUTATION: have `refusal_sentence` answer the format's sentence for
+    /// `Unresponsive` — the last assertion goes red.
+    #[test]
+    fn a_refusal_is_said_at_once_and_a_player_that_did_not_start_is_not_a_format() {
+        let t0 = Instant::now();
+        for (error, says) in [
+            (EngineError::NotLoaded, crate::i18n::Text::VideoDidNotLoad),
+            (
+                EngineError::Unsupported,
+                crate::i18n::Text::VideoFormatCannotPlay,
+            ),
+            (
+                EngineError::Decode,
+                crate::i18n::Text::VideoFormatCannotPlay,
+            ),
+        ] {
+            let refused = EngineState {
+                error: Some(error),
+                ..EngineState::default()
+            };
+            for late_since in [None, Some(t0)] {
+                assert_eq!(
+                    seat_answer(&refused, late_since, t0),
+                    SeatAnswer::Retire(error, says),
+                    "{error:?} is said at once, with its own sentence (late record {late_since:?})"
+                );
+            }
+        }
+        assert_eq!(
+            refusal_sentence(EngineError::Unresponsive),
+            crate::i18n::Text::VideoPlayerDidNotStart,
+            "an engine that did not come up says so, and not that the format cannot be played"
+        );
+    }
+
+    /// RED (plan row 189) — **a seat asks the window to wake at the instant its answer changes
+    /// on its own, for both run-outs, and for nothing else.**
+    ///
+    /// Not yet late, it is the engine's own first instant past its open budget; late since
+    /// `since`, it is `since + OPEN_BUDGET` — and at that instant [`seat_answer`] retires a seat
+    /// still late, so the wake is never an instant the turn it wakes leaves behind. An engine
+    /// that is built or has spoken owes no wake.
+    ///
+    /// MUTATION: answer `open_runs_out_at` while late — the second assertion goes red, and a
+    /// late seat would be woken for an instant already past and never for its retirement.
+    #[test]
+    fn a_seat_wakes_the_window_when_either_budget_runs_out_and_never_otherwise() {
+        let t0 = Instant::now();
+        let runs_out = t0 + OPEN_BUDGET + Duration::from_nanos(1);
+        assert_eq!(
+            seat_wake(Some(runs_out), None),
+            Some(runs_out),
+            "an engine not yet late wakes the window when its open budget runs out"
+        );
+        assert_eq!(
+            seat_wake(Some(runs_out), Some(runs_out)),
+            Some(runs_out + OPEN_BUDGET),
+            "a late seat wakes the window when its one more budget runs out"
+        );
+        assert_eq!(
+            seat_wake(None, None),
             None,
-            "a player with no length is still a player"
+            "an engine that is built or has spoken owes no wake"
+        );
+        let late = EngineState {
+            error: Some(EngineError::Unresponsive),
+            ..EngineState::default()
+        };
+        let woken = seat_wake(None, Some(runs_out)).expect("a late seat books its wake");
+        assert!(
+            matches!(
+                seat_answer(&late, Some(runs_out), woken),
+                SeatAnswer::Retire(..)
+            ),
+            "the turn the wake brings is the turn that retires a seat still late"
         );
     }
     /// RED (T-VIDEO-POINTER-AND-KEYS, row 42) — **`Home`, `End`, `,` and `.`

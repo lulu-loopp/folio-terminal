@@ -477,6 +477,7 @@ fn a_saved_files_root_comes_back_and_goes_out_again_unchanged() {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         },
         &|seat| files.get(&seat).cloned().unwrap_or_default(),
     );
@@ -518,6 +519,7 @@ fn a_files_column_with_no_root_writes_an_honest_empty_leaf() {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         },
         &|seat| files.get(&seat).cloned().unwrap_or_default(),
     );
@@ -572,6 +574,7 @@ fn two_saved_files_columns_come_back_to_their_own_roots() {
                             manual_name: None,
                             card_skip: 0,
                             last_command: String::new(),
+                            agent: None,
                         }))),
                         files(r"D:\right", 300),
                     ],
@@ -1592,7 +1595,7 @@ fn reopened_from_recent(
     profile_id: &str,
     folder: &Path,
     account: &HomeIs,
-) -> (LeafSession, Option<PathBuf>) {
+) -> (ShellSession, Option<PathBuf>) {
     let mut vault = seed::SeedVault::default();
     vault.record(
         seed::Seed::Term {
@@ -1642,7 +1645,7 @@ fn reopened_from_recent(
         account,
     )
     .expect("a pane with no shell behind it is born");
-    (leaf, place.working_directory)
+    (leaf.session, place.working_directory)
 }
 
 /// The reopened pane stands in the entry's folder for the files card, and its program was asked
@@ -1766,7 +1769,7 @@ fn the_files_card_opens_on_the_process_folder_or_says_the_folder_is_unknown() {
         answer: Ok(moved.clone()),
         asked: std::cell::Cell::new(0),
     };
-    let card = card_of(&silent.session, &door, &account);
+    let card = card_of(&silent.session.session, &door, &account);
     assert_eq!(card, FilesRoot::known(moved.display().to_string()));
     assert_eq!(door.asked.get(), 1, "the process is asked once");
     let state = seats::FilesLeafState {
@@ -1784,7 +1787,7 @@ fn the_files_card_opens_on_the_process_folder_or_says_the_folder_is_unknown() {
         answer: Err(bt_platform::process_folder::FolderRefusal::NoAccess),
         asked: std::cell::Cell::new(0),
     };
-    let card = card_of(&silent.session, &door, &account);
+    let card = card_of(&silent.session.session, &door, &account);
     assert_eq!(
         card,
         FilesRoot {
@@ -1819,7 +1822,7 @@ fn the_files_card_opens_on_the_process_folder_or_says_the_folder_is_unknown() {
         asked: std::cell::Cell::new(0),
     };
     assert_eq!(
-        card_of(&reported.session, &door, &account),
+        card_of(&reported.session.session, &door, &account),
         FilesRoot::known(host_path(r"D:\reported").display().to_string())
     );
     assert_eq!(door.asked.get(), 0, "a shell that reported is never read");

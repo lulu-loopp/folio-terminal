@@ -96,6 +96,10 @@ use bt_winres::release_manifest::{self, Manifest};
 
 use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
+use crate::update_apply::{
+    JOURNAL_HELD_WITHIN, Spelling, WaitClock, WaitWithin, WallClock, failure_words,
+    write_journal_on,
+};
 use crate::update_archive::{self, Deadline, EmbeddedManifest, Expected, ManifestSource, Reason};
 use crate::update_handoff::Staged;
 use crate::update_job::{
@@ -103,7 +107,8 @@ use crate::update_job::{
     Unsupported,
 };
 use crate::update_prepare::{
-    WORKER, abandon, digest_of, discard, fetching, finish, matches_its_sum,
+    WORKER, abandon_on, digest_of, discard, fetching, finish, journal_failed, journal_stop,
+    matches_its_sum, note,
 };
 use crate::update_txn::{
     Adapter, Digest, Event, Home, Inventories, Journal, Layout, Member, Place, TxnId,
@@ -151,7 +156,7 @@ pub(crate) struct System;
 
 impl Tools for System {
     fn available(&self, folder: &Path) -> Result<u64, String> {
-        install_txn::available_bytes(folder).map_err(|failure| failure.to_string())
+        install_txn::available_bytes(folder).map_err(|failure| failure_words(&failure))
     }
 
     fn copy(&self, from: &Path, to: &Path) -> Result<(), String> {
@@ -177,6 +182,10 @@ pub(crate) struct WinPrepare {
     /// The layouts this road's Prepare is called through, by the adapter
     /// the press names ([`PreparePoint`]).
     layouts: Layouts<dyn PreparePoint>,
+    /// The clock a held journal write is asked again on ([`journal_written`]):
+    /// [`WallClock`] in the product; a test's counted clock
+    /// (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE).
+    clock: Arc<dyn WaitClock>,
 }
 
 impl WinPrepare {
@@ -192,6 +201,7 @@ impl WinPrepare {
                 policy: Policy::System,
                 tools: Arc::new(System),
                 layouts: Layouts::of(Arc::new(Ours)),
+                clock: Arc::new(WallClock),
             }),
             Err(_) => Box::new(Unsupported),
         }
@@ -212,16 +222,7 @@ impl WinPrepare {
             policy,
             tools,
             layouts: Layouts::of(Arc::new(Ours)),
-        }
-    }
-
-    /// This driver with `ours` in place of the road's own layout — a test's
-    /// fake layout, which records or refuses (U-41a1).
-    #[cfg(test)]
-    pub(crate) fn laid_out(self, ours: Arc<dyn PreparePoint>) -> Self {
-        Self {
-            layouts: Layouts::of(ours),
-            ..self
+            clock: Arc::new(WallClock),
         }
     }
 }
@@ -233,12 +234,13 @@ impl Driver for WinPrepare {
         transport: &SharedTransport,
         post: &Poster,
     ) -> Result<(), Refused> {
-        let (exe, policy, tools, transport, layouts) = (
+        let (exe, policy, tools, transport, layouts, clock) = (
             self.exe.clone(),
             self.policy.clone(),
             Arc::clone(&self.tools),
             Arc::clone(transport),
             self.layouts.clone(),
+            Arc::clone(&self.clock),
         );
         let (offer, post, channel) = (offer.clone(), post.clone(), self.channel);
         bt_platform::spawn_at_priority(
@@ -254,6 +256,7 @@ impl Driver for WinPrepare {
                     channel,
                     policy: &policy,
                     layouts: &layouts,
+                    clock: clock.as_ref(),
                 };
                 finish(worker, &post, prepare_on(worker, &road));
             },
@@ -273,6 +276,8 @@ pub(crate) struct Road<'a> {
     channel: Option<Channel>,
     policy: &'a Policy,
     layouts: &'a Layouts<dyn PreparePoint>,
+    /// The clock a held journal write is asked again on.
+    clock: &'a dyn WaitClock,
 }
 
 /// **A layout's `Prepare` on the Windows road** (0.4.7 ticket U-41a1;
@@ -435,30 +440,37 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     // Step 2: the home, the lock, the journal at `Allocated`.
     let txn = road.offer.txn();
     let rescue = home.rescue_copy(txn, name).ok_or(Stop::NotWritable)?;
-    let rescue_text = rescue.to_str().ok_or(Stop::Journal)?.to_owned();
+    let Some(rescue_text) = rescue.to_str() else {
+        return Err(journal_stop("the rescue copy's path is not Unicode"));
+    };
+    let rescue_text = rescue_text.to_owned();
     match install_txn::durable_create_dir(home.root()) {
         Ok(()) => {}
         Err(failure) if failure.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return Err(Stop::Journal),
+        Err(failure) => {
+            return Err(journal_failed(
+                "the installation home was not created",
+                &failure,
+            ));
+        }
     }
     let lock = install_txn::try_hold(&home.lock(), Hold::Exclusive)
-        .map_err(|_| Stop::Journal)?
+        .map_err(|failure| journal_failed("the transaction lock was not asked for", &failure))?
         .ok_or(Stop::Busy)?;
     if std::fs::symlink_metadata(home.journal()).is_ok() {
         return Err(crate::update_prepare::journal_there(&home));
     }
     let allocated = Journal::allocate(txn, rescue_text, layout.allocated(&running)).naming(adapter);
-    install_txn::durable_write(&home.journal(), &allocated.encode()).map_err(|_| Stop::Journal)?;
+    journal_written(worker, road, &home, &allocated, "Allocated")?;
 
     // From here a refusal abandons the transaction and leaves nothing.
     let staged = layout
         .prepare(road, &home, &running, &rescue)
         .and_then(|recorded| {
-            let prepared = allocated
-                .prepare_with(recorded)
-                .map_err(|_| Stop::Journal)?;
-            install_txn::durable_write(&home.journal(), &prepared.encode())
-                .map_err(|_| Stop::Journal)?;
+            let prepared = allocated.prepare_with(recorded).map_err(|refusal| {
+                journal_stop(&format!("the journal refuses Prepared: {refusal:?}"))
+            })?;
+            journal_written(worker, road, &home, &prepared, "Prepared")?;
             Ok(prepared)
         });
     match staged {
@@ -468,7 +480,7 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
             lock,
         }),
         Err(stop) => {
-            let _ = abandon(worker, &home, &allocated, &Event::PrepareFailed);
+            let _ = abandon_on(worker, road.clock, &home, &allocated, &Event::PrepareFailed);
             drop(lock);
             Err(stop)
         }
@@ -495,6 +507,51 @@ impl Folders {
     }
 }
 
+/// **Write `journal` durably on the Prepare's road, at `phase`**, riding a
+/// hold: while another program holds `journal.json` (or the temporary renamed
+/// onto it) open — an on-access scan of the file just written, an indexer
+/// (`install_txn::Failure::refused_while_open`, Windows only) — the rename is
+/// asked again on the road's clock until [`JOURNAL_HELD_WITHIN`] has passed,
+/// and no more once the job has cancelled the transaction; each round is said
+/// in `diagnostics.log` (U-34, 0.4.8 E4: the applier's own
+/// `update_apply::write_journal`; T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE:
+/// a hold under load stopped a Prepare at `Stopped(Journal)`).
+///
+/// # Errors
+/// [`Stop::Cancelled`] once the job has cancelled; otherwise
+/// [`Stop::Journal`], its line naming the phase and the last failure.
+fn journal_written(
+    worker: &WorkerCtx,
+    road: &Road<'_>,
+    home: &Home,
+    journal: &Journal,
+    phase: &str,
+) -> Result<(), Stop> {
+    write_journal_on(
+        WaitWithin {
+            worker,
+            within: JOURNAL_HELD_WITHIN,
+            clock: road.clock,
+        },
+        Some(&road.post.cancel_flag()),
+        Spelling::WithoutPath,
+        &home.journal(),
+        &journal.encode(),
+        &mut |line| note(line),
+    )
+    .map_err(|unwritten| {
+        // A cancel wins: once the job has cancelled, any failure of the write
+        // (a hold given up on at the cancel, or another refusal met at the
+        // same moment) stops at `Stop::Cancelled`, with no journal line.
+        road.go_on().err().unwrap_or_else(|| {
+            journal_stop(&format!(
+                "the journal at {phase} was not written: {}",
+                unwritten.said
+            ))
+        })
+    })
+}
+
 /// Steps 2 (the folders) to 7: everything the transaction acquires; the
 /// inventories when all of it is in place.
 fn acquire(
@@ -503,7 +560,9 @@ fn acquire(
     running: &Running,
     rescue: &Path,
 ) -> Result<Inventories, Stop> {
-    let folders = Folders::of(home, road.offer.txn()).ok_or(Stop::Journal)?;
+    let Some(folders) = Folders::of(home, road.offer.txn()) else {
+        return Err(journal_stop("the transaction's set folder has no name"));
+    };
     for folder in [
         Some(folders.transaction.as_path()),
         Some(folders.download.as_path()),
@@ -511,7 +570,11 @@ fn acquire(
         Some(folders.set.as_path()),
         rescue.parent(),
     ] {
-        install_txn::durable_create_dir(folder.ok_or(Stop::Journal)?).map_err(|_| Stop::Journal)?;
+        let Some(folder) = folder else {
+            return Err(journal_stop("the rescue copy has no folder"));
+        };
+        install_txn::durable_create_dir(folder)
+            .map_err(|failure| journal_failed("a transaction folder was not created", &failure))?;
     }
     road.go_on()?;
 
@@ -526,7 +589,7 @@ fn acquire(
     let available = road
         .tools
         .available(&folders.transaction)
-        .map_err(|_| Stop::Journal)?;
+        .map_err(|why| journal_stop(&format!("the space left was not answered: {why}")))?;
     if available < needed {
         return Err(Stop::Space {
             short_by: needed - available,
@@ -566,7 +629,9 @@ fn acquire(
     road.go_on()?;
 
     // Step 8's inventories, measured under the lock.
-    let install = road.exe.parent().ok_or(Stop::Journal)?;
+    let Some(install) = road.exe.parent() else {
+        return Err(journal_stop("the running executable has no folder"));
+    };
     Ok(Inventories {
         old_shipped: running.shipped.clone(),
         old_present: present(install, &running.shipped, &new)?,
@@ -742,10 +807,13 @@ fn present(install: &Path, shipped: &[String], new: &[Member]) -> Result<Vec<Mem
         let path = install.join(name);
         match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_file() => {
-                let (digest, size) = digest_of(&path).map_err(|_| Stop::Journal)?;
+                let (digest, size) = digest_of(&path).map_err(|error| {
+                    journal_stop(&format!("an installed file was not read: {error}"))
+                })?;
                 present.push(Member {
                     name: name.to_owned(),
-                    digest: Digest::parse(&digest).map_err(|_| Stop::Journal)?,
+                    digest: Digest::parse(&digest)
+                        .map_err(|_| journal_stop("an installed file's digest is not one"))?,
                     size,
                 });
             }
@@ -857,7 +925,9 @@ pub(crate) fn staged_as_verified(
     resume: &Resume<'_>,
 ) -> Result<(), Stop> {
     let Layout::Members(inventories) = &journal.body.layout else {
-        return Err(Stop::Journal);
+        return Err(journal_stop(
+            "the staged journal's layout is not Folio's own",
+        ));
     };
     let (found, adapter) = eligible(resume.exe, resume.channel).map_err(|why| stop_for(&why))?;
     if &found != home || adapter != journal.body.adapter {
@@ -879,9 +949,11 @@ pub(crate) fn staged_as_verified(
     }
     let running = trust::identity_of(resume.exe, resume.policy)
         .map_err(|refusal| trust_refused("the running build", &refusal, Stop::Identity))?;
-    let set = home
-        .members_folder(journal.txn, Place::Set)
-        .ok_or(Stop::Journal)?;
+    let Some(set) = home.members_folder(journal.txn, Place::Set) else {
+        return Err(journal_stop(
+            "the staged transaction's set folder has no name",
+        ));
+    };
     let staged_version = trust::identity_of(&set.join(EXECUTABLE), resume.policy)
         .map_err(|refusal| trust_refused(EXECUTABLE, &refusal, Stop::Identity))?
         .version;
@@ -891,7 +963,9 @@ pub(crate) fn staged_as_verified(
         &running.for_offer(staged_version),
         resume.policy,
     )?;
-    let rescue = home.rescue_copy(journal.txn, name).ok_or(Stop::Journal)?;
+    let Some(rescue) = home.rescue_copy(journal.txn, name) else {
+        return Err(journal_stop("the staged rescue copy has no name"));
+    };
     if !is(&rescue, old) {
         return Err(Stop::Clone);
     }

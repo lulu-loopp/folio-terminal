@@ -8,15 +8,17 @@
 //! - [`read_back`] — a frame's pixels, which the glyph gate, the pixel tests and the video probe
 //!   take their evidence through.
 //!
-//! `bt_render::probe_surface` prepares, encodes and reads; it never submits and never presents.
-//! The submit and the present are here, in a crate no product crate depends on, so the product
-//! library holds no probe effect and A2e's lint finds none in it. This crate is a tool, and its
+//! `bt_render::probe_surface` prepares, encodes and reads; it never submits, never presents and
+//! never waits. The submit, the present and the read-back's wait on the device are here, in a
+//! crate no product crate depends on, so the product library holds no probe effect and A2e's lint
+//! finds none in it. This crate is a tool, and its
 //! root carries the excluded form of revision (j)2.
 
 #![allow(clippy::disallowed_methods)]
 
 use bt_render::probe_surface::{
-    ProbeWork, probe_frame_finish, probe_frame_work, queue, read_back_pixels, read_back_work,
+    ProbeWork, probe_frame_finish, probe_frame_work, queue, read_back_device, read_back_mapping,
+    read_back_rows, read_back_work,
 };
 use bt_render::{CellMetrics, GpuContext, RenderError, RenderProbeSample, WindowRenderer};
 use bt_viewport::ViewportFrame;
@@ -25,18 +27,28 @@ use web_time::Instant;
 /// **Read `window`'s last frame back**, as `[b, g, r, a]` rows of its width — an offscreen
 /// target only (it panics on a window with a swapchain, which a swapchain cannot be read).
 ///
-/// `bt-render` encodes the copy and maps the buffer ([`read_back_work`],
-/// [`read_back_pixels`]); this submits the copy between them, the one statement that left
-/// `WindowRenderer::read_back` when the probe's submissions became a tool's.
+/// `bt-render` encodes the copy, asks for the buffer's mapping and unpads the rows
+/// ([`read_back_work`], [`read_back_mapping`], [`read_back_rows`]); this submits the copy and
+/// waits on the device for the mapping between them: the submit left `WindowRenderer::read_back`
+/// when the probe's submissions became a tool's, and the wait (`wgpu::Device::poll`, a vocabulary
+/// entry) left it when the vocabulary named it (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10
+/// plan row 11, ruling R1).
 ///
 /// # Errors
 ///
 /// [`RenderError::DeviceLost`] when the device is gone before the buffer is minted, after it,
-/// or after the copy; a mapping that failed.
+/// or after the copy; a mapping or a wait that failed.
 pub fn read_back(window: &WindowRenderer, gpu: &GpuContext) -> Result<Vec<[u8; 4]>, RenderError> {
     let (commands, back) = read_back_work(window, gpu)?;
     queue(gpu).submit([commands]);
-    read_back_pixels(gpu, back)
+    read_back_mapping(&back);
+    read_back_device(gpu)
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+    read_back_rows(gpu, back)
 }
 
 /// Headless render-path instrumentation used by `bt-replay`.

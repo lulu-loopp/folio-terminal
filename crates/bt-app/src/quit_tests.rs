@@ -93,7 +93,7 @@ impl Disk {
                 ScriptedJob::Session => self.seen.push(Seen::Session),
                 ScriptedJob::Receipt => self.seen.push(Seen::Receipt),
                 ScriptedJob::Backup => self.seen.push(Seen::Backup),
-                ScriptedJob::Read(_) | ScriptedJob::Other => {}
+                ScriptedJob::Read(_) | ScriptedJob::Handoff(_) => {}
             }
         }
     }
@@ -164,6 +164,36 @@ fn refused(_: &DocumentJob) -> Outcome {
     }
 }
 
+/// **One turn of the documents phase, as `FolioApp::settle_quit` takes it**: the phase begun,
+/// then every document's answers heard (the application's storage drain,
+/// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), then the turn.
+fn documents_turn(
+    quit: &mut Quit,
+    documents: &mut [&mut dyn QuitDocument],
+    now: Instant,
+) -> QuitStep {
+    quit.begin_documents(documents);
+    for document in documents.iter_mut() {
+        document.hear_alone();
+    }
+    quit.documents_turn(documents, now)
+}
+
+/// **One turn of the recovery phase, as `FolioApp::settle_quit` takes it**: every document's
+/// answers heard, then the turn.
+fn recovery_turn(
+    quit: &mut Quit,
+    documents: &mut [&mut dyn QuitDocument],
+    folder: &Path,
+    at: SystemTime,
+    now: Instant,
+) -> QuitStep {
+    for document in documents.iter_mut() {
+        document.hear_alone();
+    }
+    quit.recovery_turn(documents, folder, at, now)
+}
+
 /// **Drive `quit` as `FolioApp::settle_quit` drives it**, until it waits across turns
 /// (the documents or the recovery phase with an answer owed) or is over: each phase
 /// through the turn the driver calls, the session write handed to the same lane
@@ -182,9 +212,9 @@ fn drive(
         disk.look();
         disk.seen.push(Seen::Step(step));
         let next = match step {
-            QuitStep::Documents => quit.documents_turn(documents, now),
+            QuitStep::Documents => documents_turn(quit, documents, now),
             QuitStep::Recovery => {
-                quit.recovery_turn(documents, folder, SystemTime::UNIX_EPOCH, now)
+                recovery_turn(quit, documents, folder, SystemTime::UNIX_EPOCH, now)
             }
             QuitStep::Photograph => quit.photographed(),
             QuitStep::Write => {
@@ -1213,14 +1243,14 @@ fn to_a_copy_on_the_worker(
     start: Instant,
     phase_two: Instant,
 ) {
-    assert_eq!(quit.documents_turn(documents, start), QuitStep::Documents);
+    assert_eq!(documents_turn(quit, documents, start), QuitStep::Documents);
     disk.answer_write(refused);
     assert_eq!(
-        quit.documents_turn(documents, phase_two),
+        documents_turn(quit, documents, phase_two),
         QuitStep::Recovery
     );
     assert_eq!(
-        quit.recovery_turn(documents, folder, SystemTime::UNIX_EPOCH, phase_two),
+        recovery_turn(quit, documents, folder, SystemTime::UNIX_EPOCH, phase_two),
         QuitStep::Recovery,
         "the copy is on the worker"
     );
@@ -1252,7 +1282,13 @@ fn the_session_write_spends_only_what_remains_of_the_one_budget() {
     );
     disk.answer_copy(Ok(folder.join("1970-01-01T000000Z settings.json")));
     assert_eq!(
-        quit.recovery_turn(&mut documents, &folder, SystemTime::UNIX_EPOCH, late),
+        recovery_turn(
+            &mut quit,
+            &mut documents,
+            &folder,
+            SystemTime::UNIX_EPOCH,
+            late
+        ),
         QuitStep::Photograph
     );
     assert_eq!(quit.photographed(), QuitStep::Write);
@@ -1300,7 +1336,13 @@ fn a_quit_with_no_budget_left_closes_without_a_new_flush() {
     disk.answer_copy(Ok(folder.join("1970-01-01T000000Z settings.json")));
     // The copy's receipt read on a turn that came late, with nothing of the budget left.
     assert_eq!(
-        quit.recovery_turn(&mut documents, &folder, SystemTime::UNIX_EPOCH, spent),
+        recovery_turn(
+            &mut quit,
+            &mut documents,
+            &folder,
+            SystemTime::UNIX_EPOCH,
+            spent
+        ),
         QuitStep::Photograph
     );
     assert_eq!(quit.photographed(), QuitStep::Write);
@@ -1495,7 +1537,7 @@ impl TrialRun {
         let folder = self.root.join(preview::RECOVERED_FOLDER);
         self.disk.answer_copy(kept);
         let mut documents: [&mut dyn QuitDocument; 1] = [&mut self.settings];
-        quit.recovery_turn(&mut documents, &folder, SystemTime::UNIX_EPOCH, now)
+        recovery_turn(quit, &mut documents, &folder, SystemTime::UNIX_EPOCH, now)
     }
 }
 

@@ -289,6 +289,32 @@ pub enum WheelScrollAmount {
     Page,
 }
 
+/// **A mouse button, as [`mouse_button_down`] is asked about it** (0.4.9 plan row 107,
+/// T-TOUCH-DOES-NOTHING-ON-WINDOWS): the *logical* button the application was told about, the
+/// one a window's press and release messages name. The door maps it to whatever physical
+/// button the platform reads, so a caller never learns that the two can differ.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerButton {
+    Left,
+    Right,
+    Middle,
+    /// The first extra button, `XBUTTON1` on Windows.
+    Back,
+    /// The second extra button, `XBUTTON2` on Windows.
+    Forward,
+    /// Any other button, by the platform's own number for it.
+    Other(u16),
+}
+
+/// **Which touch and pen contacts a held gesture may count as its own** (0.4.9 plan row 107,
+/// review F1): a mark of this thread's contacts, taken by [`contacts_seen`] when the gesture
+/// latches and handed back to [`mouse_button_down`]. A contact that went down after the mark is
+/// another hand's — the finger doing a pan, say — and does not hold the gesture; one that was
+/// already down is the one a touch-promoted press came from, and does. Off Windows no contact is
+/// ever written down, and the mark is the empty one.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContactMark(u64);
+
 /// Geometry consumed by the pure half of the Win32 `WM_NCHITTEST` bridge.
 /// All values are physical pixels; callers derive them from the live window DPI.
 ///
@@ -3890,12 +3916,24 @@ impl ProbeChild {
         patience: ProbePatience,
         rest: &mut dyn FnMut(),
     ) -> std::io::Result<Result<std::process::ExitStatus, ProbeOverdue>> {
-        let mut watch = ProbeWatch::new(patience, std::time::Instant::now());
+        self.wait_within_reading(patience, &std::time::Instant::now, rest)
+    }
+
+    /// [`Self::wait_within`] with each look's time read on `now` (T-PROBE-RUN-BUDGET-ON-A-CLOCK):
+    /// the monotonic clock for every caller but a run of probes, which reads its run's
+    /// [`ProbeClock`] — the real one in the product, a counted one in its tests.
+    fn wait_within_reading(
+        &mut self,
+        patience: ProbePatience,
+        now: &dyn Fn() -> std::time::Instant,
+        rest: &mut dyn FnMut(),
+    ) -> std::io::Result<Result<std::process::ExitStatus, ProbeOverdue>> {
+        let mut watch = ProbeWatch::new(patience, now());
         loop {
             if let Some(status) = self.try_wait()? {
                 return Ok(Ok(status));
             }
-            let overdue = match watch.look(std::time::Instant::now(), self.processor_time().ok()) {
+            let overdue = match watch.look(now(), self.processor_time().ok()) {
                 ProbeLook::Wait => {
                     rest();
                     continue;
@@ -5593,20 +5631,59 @@ pub enum ProbeRun {
 /// spent is ended with everything it started, and the run answers [`ProbeRun::Overran`] without
 /// starting the rest. Looked at every 20 ms on the worker through [`wait::sleep_within`], as
 /// [`probe_output_with_raw_tail`] is. Takes a [`admission::WorkerCtx`], so it cannot run on the
-/// window thread.
+/// window thread. The budget is read on the monotonic clock (T-PROBE-RUN-BUDGET-ON-A-CLOCK: the
+/// run's clock is a seam its tests count).
 pub fn probe_outputs_within(
     worker: &admission::WorkerCtx,
     commands: Vec<std::process::Command>,
     total: std::time::Duration,
 ) -> ProbeRun {
-    let began = std::time::Instant::now();
+    probe_outputs_within_on(worker, commands, total, &RealProbeClock)
+}
+
+/// **The clock a run of probes reads its budget on, and its rest between two looks at a child**
+/// (T-PROBE-RUN-BUDGET-ON-A-CLOCK). The run's start, what is left of its budget before each
+/// command, and every look at the running child ([`ProbeChild::wait_within`]'s) are read on
+/// [`ProbeClock::now`]; the wait between two looks is [`ProbeClock::rest`]. [`RealProbeClock`] in
+/// the product, through [`probe_outputs_within`]; a test hands a counted clock, so "the budget is
+/// spent" is a count of the test's and "the child ended" is the child's own event, never a race
+/// between a real child and a real budget.
+pub(crate) trait ProbeClock {
+    /// The monotonic reading the run's budget is set and read on.
+    fn now(&self) -> std::time::Instant;
+    /// The wait between two looks at the running child, on the worker `worker` lends.
+    fn rest(&self, worker: &admission::WorkerCtx);
+}
+
+/// **The product's [`ProbeClock`]**: the monotonic clock, and a 20 ms rest through
+/// [`wait::sleep_within`].
+pub(crate) struct RealProbeClock;
+
+impl ProbeClock for RealProbeClock {
+    fn now(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
+
+    fn rest(&self, worker: &admission::WorkerCtx) {
+        wait::sleep_within(worker, std::time::Duration::from_millis(20));
+    }
+}
+
+/// [`probe_outputs_within`] with the run's budget read on `clock`.
+pub(crate) fn probe_outputs_within_on(
+    worker: &admission::WorkerCtx,
+    commands: Vec<std::process::Command>,
+    total: std::time::Duration,
+    clock: &dyn ProbeClock,
+) -> ProbeRun {
+    let began = clock.now();
     let mut finished = Vec::with_capacity(commands.len());
     for mut command in commands {
-        let remaining = total.saturating_sub(began.elapsed());
+        let remaining = total.saturating_sub(clock.now().saturating_duration_since(began));
         if remaining.is_zero() {
             return ProbeRun::Overran { finished };
         }
-        match probe_output_held_to(worker, &mut command, remaining) {
+        match probe_output_held_to(worker, &mut command, remaining, clock) {
             Ok(ProbeEnding::Finished(output)) => finished.push(Ok(output)),
             Ok(ProbeEnding::Overran) => return ProbeRun::Overran { finished },
             Err(error) => finished.push(Err(error)),
@@ -5616,19 +5693,21 @@ pub fn probe_outputs_within(
 }
 
 /// One probe of [`probe_outputs_within`]'s run: its output read while it runs (a child that fills
-/// a pipe nobody reads would otherwise look like one that hangs), held to `deadline`.
+/// a pipe nobody reads would otherwise look like one that hangs), held to `deadline` on `clock`.
 fn probe_output_held_to(
     worker: &admission::WorkerCtx,
     command: &mut std::process::Command,
     deadline: std::time::Duration,
+    clock: &dyn ProbeClock,
 ) -> std::io::Result<ProbeEnding> {
     let mut child = spawn_probe(command, ProbeStdio::ANSWER)?;
     drop(child.take_stdin());
     let stdout = drain_probe_pipe("bt-probe-stdout", child.take_stdout())?;
     let stderr = drain_probe_pipe("bt-probe-stderr", child.take_stderr())?;
-    let waited = child.wait_within(ProbePatience::fixed(deadline), &mut || {
-        wait::sleep_within(worker, std::time::Duration::from_millis(20));
-    })?;
+    let waited =
+        child.wait_within_reading(ProbePatience::fixed(deadline), &|| clock.now(), &mut || {
+            clock.rest(worker)
+        })?;
     // Ended either way by now, its contained tree with it, so both readers reach their end.
     let stdout = stdout.finish("stdout");
     let stderr = stderr.finish("stderr");
@@ -5669,10 +5748,109 @@ mod probe_run_tests {
         assert!(lines[0].contains(first), "{lines:?}");
     }
 
-    /// The run's budget in the tests below, and how long each child of the shared-budget test
-    /// runs: 70 % of it, so the first child ends inside the budget with 30 % of it to spare and the
-    /// second cannot — and with a budget of its own each, both would end.
+    /// The run's budget in the tests below: a count of a [`CountedProbeClock`]'s, never real time.
     const BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// What a [`CountedProbeClock`] does with one rest between two looks at the running child.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Turn {
+        /// Rest a real moment without moving the count: the child's own end is awaited as state,
+        /// within the suite's patience ([`crate::door_skipped::PATIENCE`]).
+        Await,
+        /// Move the count by this much at once, without waiting.
+        Spend(std::time::Duration),
+    }
+
+    /// One awaited rest: the product's own rest between two looks.
+    const AWAITED_REST: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// How many awaited rests make the suite's patience.
+    const PATIENT_RESTS: u32 =
+        (crate::door_skipped::PATIENCE.as_millis() / AWAITED_REST.as_millis()) as u32;
+
+    /// What a [`CountedProbeClock`] counted.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct Counted {
+        /// How far the spent rests moved the clock.
+        moved: std::time::Duration,
+        /// How many rests were awaited.
+        awaited: u32,
+        /// The awaited child did not end within the suite's patience.
+        gave_up: bool,
+    }
+
+    /// **A test's [`ProbeClock`]** (T-PROBE-RUN-BUDGET-ON-A-CLOCK): its reading moves only by what
+    /// `turn` spends, so a run's budget ends at a count of the test's and never on real time. An
+    /// awaited rest is a real 20 ms rest of the worker with the count unmoved; past the suite's
+    /// patience of them the clock gives up — it spends a whole hour, so the run ends — and the test
+    /// fails by name ([`Counted::gave_up`]), never hangs.
+    struct CountedProbeClock {
+        began: std::time::Instant,
+        counted: std::cell::Cell<Counted>,
+        turn: std::cell::RefCell<Box<dyn FnMut() -> Turn>>,
+    }
+
+    impl CountedProbeClock {
+        fn new(turn: impl FnMut() -> Turn + 'static) -> Self {
+            Self {
+                began: std::time::Instant::now(),
+                counted: std::cell::Cell::new(Counted::default()),
+                turn: std::cell::RefCell::new(Box::new(turn)),
+            }
+        }
+    }
+
+    impl ProbeClock for CountedProbeClock {
+        fn now(&self) -> std::time::Instant {
+            self.began + self.counted.get().moved
+        }
+
+        fn rest(&self, worker: &admission::WorkerCtx) {
+            let turn = (self.turn.borrow_mut())();
+            let mut counted = self.counted.get();
+            match turn {
+                Turn::Spend(by) => counted.moved += by,
+                Turn::Await if counted.awaited < PATIENT_RESTS => {
+                    counted.awaited += 1;
+                    wait::sleep_within(worker, AWAITED_REST);
+                }
+                Turn::Await => {
+                    counted.gave_up = true;
+                    counted.moved += std::time::Duration::from_secs(3600);
+                }
+            }
+            self.counted.set(counted);
+        }
+    }
+
+    /// A child that marks `marker` the moment it runs and then runs for ten minutes saying
+    /// nothing, through the test-shell door: an answer that comes only long after any budget here.
+    #[cfg(windows)]
+    fn a_marking_late_child(hygiene: &Hygiene, marker: &std::path::Path) -> std::process::Command {
+        let system = std::env::var_os("SystemRoot").expect("Windows names its own folder");
+        let system = std::path::Path::new(&system);
+        let mut command = hygiene.command(system.join(r"System32\cmd.exe"), quiet_command);
+        // Each word its own argument: a word with a space is quoted whole, and `cmd /C` keeps a
+        // line's quotes when its first character is not one (the probe door quotes a raw
+        // argument as it quotes any other, so a hand-quoted line would reach `cmd` escaped).
+        command.args(["/D", "/C", "type", "nul", ">"]);
+        command.arg(marker);
+        command.arg("&");
+        command.arg(system.join(r"System32\PING.EXE"));
+        command.args(["-n", "600", "127.0.0.1", ">", "nul"]);
+        command
+    }
+
+    /// A child that marks `marker` the moment it runs and then runs for ten minutes saying
+    /// nothing, through the test-shell door: an answer that comes only long after any budget here.
+    #[cfg(not(windows))]
+    fn a_marking_late_child(hygiene: &Hygiene, marker: &std::path::Path) -> std::process::Command {
+        let mut command = hygiene.command("/bin/sh", quiet_command);
+        command
+            .args(["-c", ": > \"$0\"; exec sleep 600"])
+            .arg(marker);
+        command
+    }
 
     /// A child that runs for about two seconds and says nothing, through the test-shell door.
     #[cfg(windows)]
@@ -5718,30 +5896,68 @@ mod probe_run_tests {
         command
     }
 
-    /// RED — **two children share one budget** (revision (c)4): the first runs 70 % of the run's
-    /// budget and ends; the second is given only what is left, is ended when that is spent, and
-    /// the run answers `Overran` with the first child's answer alone.
+    /// RED — **two children share one budget** (revision (c)4), on a [`CountedProbeClock`]: the
+    /// first child's first rest spends 70 % of the run's budget and its own end is then awaited as
+    /// state; the second child marks a file when it runs and would answer only after ten minutes,
+    /// and from that mark every rest spends a tenth of the budget. The second child is given only
+    /// what is left, so it is ended when the count reaches the budget exactly, and the run answers
+    /// `Overran` with the first child's answer alone. Real time never ends the budget.
     ///
-    /// MUTATION: give each child the whole `total` (`ProbePatience::fixed(total)` in
-    /// `probe_outputs_within`) — the second child ends by itself at about 140 % of the budget and
-    /// the run answers `Finished` with two answers.
+    /// MUTATION: give each child the whole `total` (`probe_output_held_to(…, total, clock)` in
+    /// `probe_outputs_within_on`; `reports/plants/plant-148-per-child-budget.py`) — the second
+    /// child is ended at 170 % of the budget on the count, and the count's assertion fails.
     ///
-    /// Real clock: two 2 s children against a 3 s budget leave about 1 s of margin, so a
-    /// severely stalled runner can fail this test falsely; the body itself neither sleeps nor
-    /// measures.
+    /// Should the first child end before its first look (a stall of two seconds between its start
+    /// and that look), the 70 % is spent on the second child's first rest, the test passes and the
+    /// mutation passes with it: a stall can hide the mutation, never fail the product.
     #[test]
     fn two_children_share_one_budget() {
         let hygiene = Hygiene::new();
-        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
-            probe_outputs_within(
-                worker,
-                vec![a_two_second_child(&hygiene), a_two_second_child(&hygiene)],
-                BUDGET,
-            )
-        })
-        .expect("a worker")
-        .join()
-        .expect("the run answers");
+        let marker = hygiene.root().join("the-second-child-runs");
+        let (run, counted, marked) =
+            spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+                let seen = marker.clone();
+                let mut planted = false;
+                let clock = CountedProbeClock::new(move || {
+                    if seen.exists() {
+                        Turn::Spend(BUDGET / 10)
+                    } else if planted {
+                        Turn::Await
+                    } else {
+                        planted = true;
+                        Turn::Spend(BUDGET * 7 / 10)
+                    }
+                });
+                let run = probe_outputs_within_on(
+                    worker,
+                    vec![
+                        a_two_second_child(&hygiene),
+                        a_marking_late_child(&hygiene, &marker),
+                    ],
+                    BUDGET,
+                    &clock,
+                );
+                // Read before the scratch folder goes with `hygiene`.
+                let marked = marker.exists();
+                (run, clock.counted.get(), marked)
+            })
+            .expect("a worker")
+            .join()
+            .expect("the run answers");
+        assert!(
+            !counted.gave_up,
+            "a child did not end, or the second never marked, within the suite's patience: {run:?}"
+        );
+        assert!(
+            marked,
+            "the second child never ran (no mark), so the run says nothing of the budget: {run:?}"
+        );
+        assert_eq!(
+            counted.moved, BUDGET,
+            "the run was ended at {:?} on the count, so the second child was given more than what \
+             was left of the budget the two share: {run:?}",
+            counted.moved
+        );
         match run {
             ProbeRun::Overran { finished } => {
                 assert_eq!(
@@ -5759,28 +5975,38 @@ mod probe_run_tests {
     }
 
     /// PIN — **a run inside its budget answers every command's output, in order**, a command that
-    /// would not start among them as its own answer.
+    /// would not start among them as its own answer. On a [`CountedProbeClock`] that never spends,
+    /// so the budget cannot end while a child runs: each child's end is awaited as state, within
+    /// the suite's patience.
     #[test]
     fn a_run_inside_its_budget_answers_each_command_in_order() {
         let hygiene = Hygiene::new();
-        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
-            let missing = hygiene.command(
-                std::env::temp_dir().join("folio-no-such-program-探针"),
-                quiet_command,
-            );
-            probe_outputs_within(
-                worker,
-                vec![
-                    a_saying_child(&hygiene, "first-第一"),
-                    missing,
-                    a_saying_child(&hygiene, "third-第三"),
-                ],
-                BUDGET,
-            )
-        })
-        .expect("a worker")
-        .join()
-        .expect("the run answers");
+        let (run, counted) =
+            spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+                let missing = hygiene.command(
+                    std::env::temp_dir().join("folio-no-such-program-探针"),
+                    quiet_command,
+                );
+                let clock = CountedProbeClock::new(|| Turn::Await);
+                let run = probe_outputs_within_on(
+                    worker,
+                    vec![
+                        a_saying_child(&hygiene, "first-第一"),
+                        missing,
+                        a_saying_child(&hygiene, "third-第三"),
+                    ],
+                    BUDGET,
+                    &clock,
+                );
+                (run, clock.counted.get())
+            })
+            .expect("a worker")
+            .join()
+            .expect("the run answers");
+        assert!(
+            !counted.gave_up,
+            "a child did not end within the suite's patience: {run:?}"
+        );
         let ProbeRun::Finished(answers) = run else {
             panic!("three short commands overran the budget: {run:?}");
         };
@@ -5801,6 +6027,46 @@ mod probe_run_tests {
         assert_eq!(said(&answers[0]), "first-第一");
         assert!(answers[1].is_err(), "{:?}", answers[1]);
         assert_eq!(said(&answers[2]), "third-第三");
+    }
+
+    /// PIN — **a run whose budget is already spent starts nothing** (review F1): with no time
+    /// left, the run answers `Overran` with no answers before it tries a command — here two that
+    /// would not start, which would otherwise each be an answer of their own.
+    ///
+    /// MUTATION: drop the `remaining.is_zero()` arm in `probe_outputs_within_on` — both starts
+    /// fail, each is pushed as its answer, and the run answers `Finished` with two errors.
+    ///
+    /// Only the first command's arm is pinned: for a later one the count would have to reach the
+    /// budget in a rest after the earlier child ended, and the clock cannot see that end, so no
+    /// counted clock places it deterministically.
+    #[test]
+    fn a_run_whose_budget_is_spent_starts_nothing() {
+        let hygiene = Hygiene::new();
+        let run = spawn_at_priority("bt-probe-run-test", ThreadPriority::Normal, move |worker| {
+            let missing = |name: &str| {
+                hygiene.command(
+                    std::env::temp_dir().join(format!("folio-no-such-program-{name}")),
+                    quiet_command,
+                )
+            };
+            probe_outputs_within_on(
+                worker,
+                vec![missing("first-第一"), missing("second-第二")],
+                std::time::Duration::ZERO,
+                &CountedProbeClock::new(|| Turn::Await),
+            )
+        })
+        .expect("a worker")
+        .join()
+        .expect("the run answers");
+        match run {
+            ProbeRun::Overran { finished } => {
+                assert!(finished.is_empty(), "a command was tried: {finished:?}");
+            }
+            ProbeRun::Finished(answers) => {
+                panic!("the spent run still tried its commands: {answers:?}")
+            }
+        }
     }
 
     /// A probe's output pipe whose read panics, after saying whether the panic is contained —
@@ -6229,11 +6495,15 @@ mod probe_child_tests {
             (unsafe { WaitForSingleObject(self.0, 0) }) == WAIT_TIMEOUT
         }
 
+        /// The helper's end, within the door suites' patience: a failure ceiling, not a timing
+        /// assertion (the kernel signals the exit). A door row of the timing-bound list, so its
+        /// callers are not rows through it.
         fn wait_gone(&self) {
-            // SAFETY: the handle is live and owned by this witness. This is a
-            // failure ceiling, not a timing assertion; the kernel signals exit.
+            let patience = u32::try_from(crate::door_skipped::PATIENCE.as_millis())
+                .expect("the patience fits a wait's milliseconds");
+            // SAFETY: the handle is live and owned by this witness.
             assert_eq!(
-                unsafe { WaitForSingleObject(self.0, 10_000) },
+                unsafe { WaitForSingleObject(self.0, patience) },
                 WAIT_OBJECT_0,
                 "the owned helper process did not end"
             );
@@ -8953,6 +9223,34 @@ pub mod threads;
 /// them by. Nothing is installed off Windows; see the module's own header.
 pub mod pump;
 
+/// **The program's icon on the system's message box** (0.4.10 plan row 72,
+/// T-MESSAGE-BOX-WEARS-THE-ICON): the executable's own icon group, loaded at the box's
+/// display's scale and sent to the box as its window's icon by a `WH_CBT` hook this thread holds
+/// for exactly as long as [`message_box`] is up. Windows only: macOS's alert is drawn in the
+/// application's own name.
+#[cfg(windows)]
+mod box_icon;
+#[cfg(windows)]
+pub use box_icon::ProgramIcons;
+
+/// **The shell's two icon sides at a display's scale** (0.4.10 plan rows 71 and 72): the small
+/// icon (`SM_CXSMICON`, 16 at 96 DPI) and the big one (`SM_CXICON`, 32 at 96 DPI), each
+/// scaled and rounded as the system rounds its own metrics. The one spelling of the rule: a
+/// window's icon (`bt-app`'s `wear_app_icon`) and a message box's (`ProgramIcons`) are
+/// both loaded at these sides.
+///
+/// Both are asked for by size. Left to `LR_DEFAULTSIZE` they would both be the big size, and the
+/// small icon would be the big one shrunk by whoever draws it. `folio.ico` holds 16, 20, 24 and
+/// 32, and 32, 40, 48 and 64, which are these sides at 100, 125, 150 and 200 %, so on those
+/// displays the image each surface is handed was drawn at its size.
+#[must_use]
+pub fn program_icon_sides(scale_factor: f64) -> (u32, u32) {
+    (
+        (16.0 * scale_factor).round() as u32,
+        (32.0 * scale_factor).round() as u32,
+    )
+}
+
 /// **Which installed package a program belongs to** (T-CHECK-NEVER-OVERLAPS-A-PACKAGED-BIRTH):
 /// the identity Windows keeps one desktop app container per account by. Read from the app
 /// execution alias's own data or the installed package's own directory on Windows; `None`
@@ -9067,6 +9365,16 @@ pub(crate) mod peer;
 #[cfg(any(windows, unix))]
 mod launch_conversation;
 
+/// **The clock a wait for the other end is read on** — `LaunchClock`, the
+/// product's `RealClock` and a test's `CountedClock` — on every target, apart from the launch
+/// wire's gate (0.4.10 plan row 66): the deferred remover's readiness wait builds everywhere.
+mod launch_clock;
+
+/// **The clock a polled wait reads its deadline on, and the rest between two looks** —
+/// `PollClock` and the product's `WallPollClock` (0.4.10 plan row 76), on every target: the lock
+/// wait (`install_txn::hold_by`), the macOS identity door's child poll and bt-app's git child.
+pub mod poll_clock;
+
 /// **The second launch's door into the first** — one well-known named pipe per data directory
 /// (`docs/DESIGN.md` §7.59).
 ///
@@ -9157,6 +9465,10 @@ mod engine_ledger;
 /// A playback engine's load — its budget, the length's three readings and the
 /// deadline's decision — with one owner for both `video` arms.
 mod video_load;
+
+/// Why a first frame was not drawn — refused, not answered in time, or held by
+/// another program — with one owner for every `video` arm.
+mod first_frame_answer;
 
 /// The first frame of a video, out of Media Foundation — see the module's own
 /// note for the apartment it runs in and for why the set of files it can draw is
@@ -9297,6 +9609,11 @@ pub mod logon_hook;
 /// the two. Children through [`quiet_command`], bounded; worker only; refused
 /// by name off macOS.
 pub mod macos_identity;
+/// **The sign-in entry** — one value, `Folio`, under the same `Run` key: the quoted path of a
+/// copy's `folio.exe` and nothing after it, read, written and read back, removed, and Windows' own
+/// Startup-apps switch for it read beside it (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH). Only
+/// the one name is ever read. Windows is real; every other platform refuses by name.
+pub mod sign_in_entry;
 
 /// **The macOS entrance of an update transaction** — a LaunchAgent plist in a
 /// folder the caller names, written through `install_txn`'s durable write,
@@ -9336,6 +9653,26 @@ pub(crate) fn listener_says_within<T>(
     bound: std::time::Duration,
 ) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
     said.recv_timeout(bound)
+}
+
+/// **A Windows listener's first word, waited for on `clock`** up to `bound` — or `Timeout` when it
+/// did not come inside it: the one wait both Windows endpoints' `start` makes before it hands an
+/// endpoint back (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK for the launch endpoint,
+/// T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK for the attention endpoint, which share it here). The
+/// product's clock makes the one [`listener_says_within`] of `bound`; a test's counted clock
+/// awaits the word within its patience, or spends the bound without listening.
+#[cfg(windows)]
+pub(crate) fn first_word_on<T>(
+    clock: &dyn launch_clock::LaunchClock,
+    said: &std::sync::mpsc::Receiver<T>,
+    bound: std::time::Duration,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    let mut heard = Err(std::sync::mpsc::RecvTimeoutError::Timeout);
+    clock.wait(bound, &mut |within| {
+        heard = listener_says_within(said, within);
+        !matches!(heard, Err(std::sync::mpsc::RecvTimeoutError::Timeout))
+    });
+    heard
 }
 
 /// **How long a directory watch's retirement waits for its watcher thread to leave**
@@ -9487,12 +9824,15 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{
-                    GetCapture, GetKeyState, GetKeyboardLayout, MAPVK_VK_TO_CHAR,
+                    GetAsyncKeyState, GetCapture, GetKeyState, GetKeyboardLayout, MAPVK_VK_TO_CHAR,
                     MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, SetFocus, TME_LEAVE, TME_NONCLIENT,
                     TRACKMOUSEEVENT, TRACKMOUSEEVENT_FLAGS, TrackMouseEvent, VIRTUAL_KEY,
                     VK_CONTROL, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_SHIFT, VK_XBUTTON1,
                     VK_XBUTTON2, VkKeyScanW,
                 },
+                // Whether a contact the touch door saw go down is still on the glass — see
+                // [`mouse_button_down`].
+                Pointer::{GetPointerInfo, POINTER_FLAG_INCONTACT, POINTER_INFO},
                 // One call that undoes one winit makes, and the four that answer
                 // the system's pan gesture — see
                 // [`let_the_system_translate_touch`].
@@ -9515,35 +9855,36 @@ mod windows_impl {
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DefWindowProcW, DestroyCaret,
                 DestroyMenu, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx,
-                GA_ROOT, GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GetAncestor, GetClientRect,
-                GetCursorPos, GetSystemMetrics, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT,
-                HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON, HTRIGHT, HTTOP, HTTOPLEFT,
-                HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION,
-                MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW,
-                RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN,
-                SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-                SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
-                SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE, WM_DEVICECHANGE,
-                WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_GESTURE,
-                WM_GETMINMAXINFO, WM_INPUTLANGCHANGE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-                WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
-                WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMBUTTONDBLCLK,
-                WM_NCMBUTTONDOWN, WM_NCMBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
-                WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP, WM_NCXBUTTONDBLCLK,
-                WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
-                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WM_TOUCH,
-                WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN, WM_XBUTTONUP, WindowFromPoint,
+                GA_ROOT, GCLP_HBRBACKGROUND, GF_BEGIN, GF_END, GF_INERTIA, GetAncestor,
+                GetClientRect, GetCursorPos, GetQueueStatus, GetSystemMetrics, GetWindowRect,
+                HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTMAXBUTTON,
+                HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic,
+                IsZoomed, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MF_STRING, MINMAXINFO,
+                NCCALCSIZE_PARAMS, PostMessageW, QS_MOUSEBUTTON, RegisterWindowMessageW,
+                SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+                SM_SWAPBUTTON, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETCLIENTAREAANIMATION,
+                SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WINDOWPOS, WM_APP, WM_CLOSE,
+                WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE,
+                WM_EXITSIZEMOVE, WM_GESTURE, WM_GETMINMAXINFO, WM_INPUTLANGCHANGE, WM_LBUTTONDOWN,
+                WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_NCCALCSIZE,
+                WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP,
+                WM_NCMBUTTONDBLCLK, WM_NCMBUTTONDOWN, WM_NCMBUTTONUP, WM_NCMOUSELEAVE,
+                WM_NCMOUSEMOVE, WM_NCRBUTTONDBLCLK, WM_NCRBUTTONDOWN, WM_NCRBUTTONUP,
+                WM_NCXBUTTONDBLCLK, WM_NCXBUTTONDOWN, WM_NCXBUTTONUP, WM_POINTERDOWN, WM_POINTERUP,
+                WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE,
+                WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TOUCH, WM_WINDOWPOSCHANGING, WM_XBUTTONDOWN,
+                WM_XBUTTONUP, WindowFromPoint,
             },
         },
     };
 
     use super::{
-        CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
+        ContactMark, CustomFrameGeometry, CustomFrameHit, CustomFrameMetrics, GroundBand,
         INSERT_ABOVE_REFERENCE, NativeWindow, PageVisual, PanStep, PanTrack, PendingWindowPos,
-        PlatformChrome, TaskbarProgress, TaskbarProgressState, ThreadPriority, TitleBarBox,
-        VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
+        PlatformChrome, PointerButton, TaskbarProgress, TaskbarProgressState, ThreadPriority,
+        TitleBarBox, VisualLayer, WheelScrollAmount, WindowRect, composition_visual_offset,
         custom_frame_hit_test, hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
     use crate::admission::{WaitToken, WorkerCtx, doors};
@@ -11877,9 +12218,16 @@ mod windows_impl {
         /// A `GID_PAN` message, read. The step it makes, if it makes one, goes
         /// to [`Self::panned`]; a message that neither opens nor moves a pan
         /// says nothing.
-        fn pan_moved(&self, begins: bool, ends: bool, screen: (i32, i32), client: (i32, i32)) {
+        fn pan_moved(
+            &self,
+            begins: bool,
+            inertia: bool,
+            ends: bool,
+            screen: (i32, i32),
+            client: (i32, i32),
+        ) {
             let mut pan = self.pan.get();
-            let step = pan.step(begins, ends, screen, client);
+            let step = pan.step(begins, inertia, ends, screen, client);
             self.pan.set(pan);
             if let Some(step) = step {
                 (self.panned)(step);
@@ -12095,6 +12443,7 @@ mod windows_impl {
         // above, and this procedure runs on the thread that owns the window.
         let state = unsafe { &*(reference_data as *const TouchToTheSystem) };
         state.arrived();
+        CONTACTS.with_borrow_mut(|contacts| note_a_contact(contacts, message, wparam));
         // **`DefWindowProcW` and not `DefSubclassProc`, and that is the whole
         // ticket**: the default handling runs now and winit's window procedure
         // never sees the message, so the system translates it instead of
@@ -12144,6 +12493,7 @@ mod windows_impl {
         let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client) };
         state.pan_moved(
             info.dwFlags & GF_BEGIN != 0,
+            info.dwFlags & GF_INERTIA != 0,
             info.dwFlags & GF_END != 0,
             screen,
             (client.x, client.y),
@@ -12455,6 +12805,10 @@ mod windows_impl {
     ) -> Option<crate::SystemNews> {
         match message {
             WM_SETTINGCHANGE | WM_THEMECHANGED => Some(crate::SystemNews::Preferences),
+            // **A contrast theme's colours edited in place** (T-HIGH-CONTRAST): Windows
+            // says so to every top-level window with this message, and the colours the
+            // product follows under high contrast are exactly the ones it announces.
+            WM_SYSCOLORCHANGE => Some(crate::SystemNews::Preferences),
             WM_DISPLAYCHANGE => Some(crate::SystemNews::Display),
             WM_INPUTLANGCHANGE => Some(crate::SystemNews::InputLanguage),
             WM_DEVICECHANGE
@@ -13365,6 +13719,90 @@ mod windows_impl {
         Ok(enabled != 0)
     }
 
+    /// **The colours of the Windows contrast theme in force, or `None` while none is**
+    /// (T-HIGH-CONTRAST, `docs/DESIGN.md` §7.1.6: 「高对比度模式跟随系统调色」).
+    ///
+    /// `SystemParametersInfoW(SPI_GETHIGHCONTRAST)` says whether a contrast theme is on
+    /// (`HCF_HIGHCONTRASTON`); `GetSysColor` then answers that theme's own colours, which is
+    /// the reading Microsoft names for a Win32 program under high contrast. They are read
+    /// every time rather than known: the four themes Windows 11 ships (Aquatic, Desert, Dusk,
+    /// Night sky) are each editable by their owner, so no palette here could be right.
+    ///
+    /// Read on the window thread at start and on the preferences ear's notice, beside
+    /// [`client_area_animation_enabled`]: one `SystemParametersInfoW` and, only while a theme
+    /// is on, five `GetSysColor` reads, none of which waits on anything. A failed first call
+    /// reads as "no contrast theme" — the machine did not say one is on, and inventing one
+    /// would repaint the window in colours nobody chose.
+    #[must_use]
+    pub fn system_high_contrast() -> Option<crate::HighContrastColours> {
+        use windows::Win32::Graphics::Gdi::{
+            COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT,
+            GetSysColor,
+        };
+        use windows::Win32::UI::Accessibility::HIGHCONTRASTW;
+        use windows::Win32::UI::WindowsAndMessaging::SPI_GETHIGHCONTRAST;
+
+        let mut reading = HIGHCONTRASTW {
+            cbSize: size_of::<HIGHCONTRASTW>() as u32,
+            ..HIGHCONTRASTW::default()
+        };
+        // SAFETY: SPI_GETHIGHCONTRAST writes one HIGHCONTRASTW, whose `cbSize` is set, to the
+        // live stack value it is given; `uiParam` is that size, as the call documents.
+        let read = unsafe {
+            SystemParametersInfoW(
+                SPI_GETHIGHCONTRAST,
+                reading.cbSize,
+                Some((&mut reading as *mut HIGHCONTRASTW).cast()),
+                Default::default(),
+            )
+        };
+        let colours = [
+            COLOR_WINDOW,
+            COLOR_WINDOWTEXT,
+            COLOR_HIGHLIGHT,
+            COLOR_HIGHLIGHTTEXT,
+            COLOR_GRAYTEXT,
+        ];
+        high_contrast_of(
+            read.is_ok() && high_contrast_is_on(reading.dwFlags.0),
+            || {
+                // SAFETY: `GetSysColor` reads a process-wide table and takes no pointer.
+                colours.map(|index| unsafe { GetSysColor(index) })
+            },
+        )
+    }
+
+    /// Whether `HIGHCONTRASTW.dwFlags` says a contrast theme is on — `HCF_HIGHCONTRASTON`,
+    /// and none of the hot-key or availability bits beside it.
+    pub(super) fn high_contrast_is_on(flags: u32) -> bool {
+        flags & windows::Win32::UI::Accessibility::HCF_HIGHCONTRASTON.0 != 0
+    }
+
+    /// **The pure half of [`system_high_contrast`]**: nothing while the theme is off, and the
+    /// five `COLORREF`s (`0x00BBGGRR`) as sRGB bytes while it is on, in
+    /// [`crate::HighContrastColours`]' own field order. The colours are asked for only when
+    /// they are going to be used.
+    pub(super) fn high_contrast_of(
+        on: bool,
+        colours: impl FnOnce() -> [u32; 5],
+    ) -> Option<crate::HighContrastColours> {
+        if !on {
+            return None;
+        }
+        let rgb = |colour: u32| {
+            let [red, green, blue, _] = colour.to_le_bytes();
+            [red, green, blue]
+        };
+        let [window, window_text, highlight, highlight_text, gray_text] = colours().map(rgb);
+        Some(crate::HighContrastColours {
+            window,
+            window_text,
+            highlight,
+            highlight_text,
+            gray_text,
+        })
+    }
+
     /// **The clipboard's one declared contention wait** (side-effects contract C5 rule 3,
     /// T-CLIPBOARD-LANE): five opens, with 5, 10, 20 and 40 ms between them while another program
     /// holds the clipboard open — 75 ms at most, and only ever on the clipboard lane's worker,
@@ -13524,6 +13962,63 @@ mod windows_impl {
             },
             |delay| crate::wait::sleep_within(worker, delay),
         )
+    }
+
+    /// **The OLE clipboard's data object, asked for on a worker** (plan row 81) — through the
+    /// clipboard's one declared contention wait: while another program (or the clipboard lane)
+    /// holds the clipboard open, `OleGetClipboard` answers `CLIPBRD_E_CANT_OPEN`, and it is asked
+    /// again with 5, 10, 20 and 40 ms between, each pause through [`crate::wait::sleep_within`].
+    /// The caller has joined a single-threaded apartment.
+    pub(super) fn ole_clipboard_with_retry(
+        worker: &WorkerCtx,
+    ) -> windows::core::Result<windows::Win32::System::Com::IDataObject> {
+        let mut contention = ClipboardContention::new();
+        loop {
+            // SAFETY: the calling worker joined an apartment the OLE clipboard accepts; the data
+            // object answered is owned by the caller.
+            let answer = unsafe { windows::Win32::System::Ole::OleGetClipboard() };
+            if !contention.ask_again(worker, &answer) {
+                return answer;
+            }
+        }
+    }
+
+    /// **The clipboard's one declared contention wait, for an OLE ask** (plan row 81; review N3):
+    /// while another program (or the clipboard lane) holds the clipboard open, the clipboard's data
+    /// object answers `CLIPBRD_E_CANT_OPEN` — to `OleGetClipboard` and to each `GetData` it serves
+    /// by opening the clipboard — and the ask is made again with 5, 10, 20 and 40 ms between, each
+    /// pause through [`crate::wait::sleep_within`]: five asks at most. The caller makes its own
+    /// ask in a loop and asks this whether to make it again.
+    pub(super) struct ClipboardContention {
+        pauses: std::slice::Iter<'static, std::time::Duration>,
+    }
+
+    impl ClipboardContention {
+        pub(super) fn new() -> Self {
+            Self {
+                pauses: CLIPBOARD_OPEN_RETRY_DELAYS.iter(),
+            }
+        }
+
+        /// **Whether to ask again**: after a contended answer while a pause is left — taken here,
+        /// on the asking worker (`worker`) — yes; any other answer, or the fifth, is the answer.
+        pub(super) fn ask_again<T>(
+            &mut self,
+            worker: &WorkerCtx,
+            answer: &windows::core::Result<T>,
+        ) -> bool {
+            let contended = matches!(
+                answer,
+                Err(error) if error.code() == windows::Win32::Foundation::CLIPBRD_E_CANT_OPEN
+            );
+            match self.pauses.next() {
+                Some(delay) if contended => {
+                    crate::wait::sleep_within(worker, *delay);
+                    true
+                }
+                _ => false,
+            }
+        }
     }
 
     /// **The clipboard's text**, read on the clipboard lane's worker (`worker`).
@@ -15178,6 +15673,158 @@ mod windows_impl {
         // that may be null, which is exactly the "nobody has it" answer.
         let held = unsafe { GetCapture() };
         NativeWindow::from_hwnd(held)
+    }
+
+    /// **Whether a hand may still be holding `button`** (0.4.9 plan row 107,
+    /// T-TOUCH-DOES-NOTHING-ON-WINDOWS): `false` only when the button is up and no
+    /// release of it can still be on its way to this thread.
+    ///
+    /// The question a held gesture's per-turn check asks, because the capture
+    /// sample beside it ([`thread_mouse_capture`]) cannot see a release that was
+    /// lost: winit counts its presses and gives the capture back only when the
+    /// count returns to zero, so a lost button-up leaves its `SetCapture` standing
+    /// and the sample reads "still held" for as long as no other window takes it.
+    /// Three readings make the answer, and each closes a road the others leave
+    /// open:
+    ///
+    /// 1. **The button itself**, `GetAsyncKeyState`. It reads *"the physical mouse
+    ///    buttons, not the logical mouse buttons that the physical buttons are
+    ///    mapped to"* and names `GetSystemMetrics(SM_SWAPBUTTON)` as the way to
+    ///    map them
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate>),
+    ///    so a logical left on a swapped mouse is read on `VK_RBUTTON`.
+    /// 2. **A mouse-button message still in this thread's queue**,
+    ///    `GetQueueStatus(QS_MOUSEBUTTON)`'s high word, *"the types of messages
+    ///    currently in the queue"*
+    ///    (<https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getqueuestatus>).
+    ///    The button can come up before its release is read — a quick click
+    ///    whose two messages arrive together, or a touch-promoted tap, whose
+    ///    mouse messages follow its contact's up — and such a release is not
+    ///    lost: it will reach the gesture that is waiting for it. Pointer and
+    ///    touch messages are not asked here (review F1): a pan's own frames are
+    ///    queued for as long as its finger moves, and a contact the gesture
+    ///    counts is answered by the third reading, whose `GetPointerInfo` goes on
+    ///    reporting it in contact until its up has been read.
+    /// 3. **A finger or a pen that was already on the glass when the gesture
+    ///    latched, and still is**, for the left and the right buttons, which are
+    ///    the two a contact is promoted to. The touch door's subclass writes down
+    ///    each contact a `WM_POINTERDOWN` opens, numbered in the order they went
+    ///    down, and crosses it off at its `WM_POINTERUP`; the gesture's `latched`
+    ///    mark ([`contacts_seen`], taken at its latch) says which numbers came
+    ///    before it. Each one left is asked of `GetPointerInfo`, which answers
+    ///    from this thread's own pointer messages; a contact it no longer knows,
+    ///    or knows out of contact, is crossed off too. So a press promoted from a
+    ///    contact still down is held whatever the mouse buttons' state says
+    ///    about it, and a finger that touched down later — the one doing a pan —
+    ///    holds nothing.
+    ///
+    /// A button Windows has no virtual key for ([`PointerButton::Other`]) is
+    /// held: there is nothing to read, and a held gesture keeps the rule it had
+    /// before this door.
+    #[must_use]
+    pub fn mouse_button_down(button: PointerButton, latched: ContactMark) -> bool {
+        // SAFETY: a read-only query over a system index; it takes no pointers.
+        let swapped = unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0;
+        let Some(key) = button_key(button, swapped) else {
+            return true;
+        };
+        // SAFETY: a read-only query over a virtual-key number; the high bit of
+        // the answer is "down now".
+        let down = unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0;
+        if down {
+            return true;
+        }
+        // SAFETY: a read-only query of this thread's own queue; it takes no pointers.
+        if (unsafe { GetQueueStatus(QS_MOUSEBUTTON) } >> 16) != 0 {
+            return true;
+        }
+        matches!(button, PointerButton::Left | PointerButton::Right)
+            && a_latched_contact_is_down(latched)
+    }
+
+    /// **The virtual key a logical button is read on**, given whether the
+    /// system swaps the primary and secondary buttons; `None` for a button no
+    /// virtual key names.
+    pub(super) fn button_key(button: PointerButton, swapped: bool) -> Option<VIRTUAL_KEY> {
+        Some(match (button, swapped) {
+            (PointerButton::Left, false) | (PointerButton::Right, true) => VK_LBUTTON,
+            (PointerButton::Right, false) | (PointerButton::Left, true) => VK_RBUTTON,
+            (PointerButton::Middle, _) => VK_MBUTTON,
+            (PointerButton::Back, _) => VK_XBUTTON1,
+            (PointerButton::Forward, _) => VK_XBUTTON2,
+            (PointerButton::Other(_), _) => return None,
+        })
+    }
+
+    /// **The contacts this thread's touch door saw go down and not yet come
+    /// up** — see [`mouse_button_down`]'s third reading.
+    #[derive(Debug, Default)]
+    pub(super) struct Contacts {
+        /// Each contact still down: its pointer id, and its number in the
+        /// order the contacts went down.
+        down: Vec<(u32, u64)>,
+        /// How many contacts have gone down so far: the last number given.
+        seen: u64,
+    }
+
+    thread_local! {
+        /// The window thread's own contacts, as every window of this program is
+        /// the loop thread's.
+        static CONTACTS: RefCell<Contacts> = const {
+            RefCell::new(Contacts {
+                down: Vec::new(),
+                seen: 0,
+            })
+        };
+    }
+
+    /// **The mark a gesture takes when it latches** ([`ContactMark`]): how many
+    /// contacts this thread has seen go down so far.
+    #[must_use]
+    pub fn contacts_seen() -> ContactMark {
+        CONTACTS.with_borrow(|contacts| ContactMark(contacts.seen))
+    }
+
+    /// **One pointer message, written down**: a down opens its contact under
+    /// the next number, an up crosses it off, and every other message leaves
+    /// the list alone. A down of an id still written is a new contact under
+    /// that id (its up was never seen), so it takes the new number. The pointer
+    /// id is `wParam`'s low word (`GET_POINTERID_WPARAM`,
+    /// <https://learn.microsoft.com/en-us/windows/win32/inputmsg/wm-pointerdown>).
+    pub(super) fn note_a_contact(contacts: &mut Contacts, message: u32, wparam: WPARAM) {
+        let id = (wparam.0 & 0xFFFF) as u32;
+        match message {
+            WM_POINTERDOWN => {
+                contacts.seen += 1;
+                contacts.down.retain(|(held, _)| *held != id);
+                contacts.down.push((id, contacts.seen));
+            }
+            WM_POINTERUP => contacts.down.retain(|(held, _)| *held != id),
+            _ => {}
+        }
+    }
+
+    /// Whether a contact written down went down no later than the gesture's
+    /// `latched` mark — the only contacts that can be the gesture's own.
+    pub(super) fn holds_the_latch(contacts: &Contacts, latched: ContactMark) -> bool {
+        contacts.down.iter().any(|(_, number)| *number <= latched.0)
+    }
+
+    /// Whether a contact that was down at the gesture's latch is, by this
+    /// thread's own pointer messages, still on the glass; every contact that is
+    /// not is crossed off.
+    fn a_latched_contact_is_down(latched: ContactMark) -> bool {
+        CONTACTS.with_borrow_mut(|contacts| {
+            contacts.down.retain(|(id, _)| {
+                let mut info = POINTER_INFO::default();
+                // SAFETY: `info` is a live, exclusively borrowed `POINTER_INFO`
+                // for the call to fill; an id the system no longer knows is
+                // refused, and refused is "not down".
+                unsafe { GetPointerInfo(*id, &mut info) }.is_ok()
+                    && info.pointerFlags.contains(POINTER_FLAG_INCONTACT)
+            });
+            holds_the_latch(contacts, latched)
+        })
     }
 
     /// **The whole virtual desktop, in physical pixels** (multiwindow slice
@@ -16884,18 +17531,135 @@ mod windows_impl {
     #[cfg(test)]
     mod tests {
         use super::{
-            CLIPBOARD_OPEN_RETRY_DELAYS, FolderPickerState, ImagePickerState, MathMenuState,
-            SaveFilePickerState, ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM, TouchToTheSystem,
-            compositor_failure, let_the_system_translate_touch, newest_live_owner,
+            CLIPBOARD_OPEN_RETRY_DELAYS, Contacts, FolderPickerState, ImagePickerState,
+            MathMenuState, SaveFilePickerState, ShellPickKind, TOUCH_GOES_TO_THE_SYSTEM,
+            TouchToTheSystem, button_key, compositor_failure, holds_the_latch,
+            let_the_system_translate_touch, newest_live_owner, note_a_contact,
             pan_gesture_configuration, retry_open_clipboard, the_system_s_gesture_is_answered_here,
             touch_goes_to_the_system, wide_null,
         };
         use crate::handoff::{validate_local_image_path, validate_openable_path};
-        use crate::{NativeWindow, PanStep, PanTrack};
+        use crate::{ContactMark, NativeWindow, PanStep, PanTrack, PointerButton};
         use std::cell::Cell;
         use std::cell::RefCell;
         use std::path::{Path, PathBuf};
         use std::rc::Rc;
+        use windows::Win32::Foundation::WPARAM;
+
+        /// RED (0.4.9 plan row 107) — **a logical button is read on the physical key it is
+        /// mapped to**: `GetAsyncKeyState` reads physical buttons, so with the buttons swapped
+        /// the logical left is `VK_RBUTTON` and the logical right is `VK_LBUTTON`; the middle and
+        /// the two extra buttons do not swap, and a button no virtual key names is not read.
+        ///
+        /// MUTATION: ignore `swapped` — a left-handed mouse reads its held left as up, and a
+        /// held gesture is cancelled under the hand.
+        #[test]
+        fn a_logical_button_is_read_on_the_key_it_is_mapped_to() {
+            let keys = |swapped| {
+                [
+                    PointerButton::Left,
+                    PointerButton::Right,
+                    PointerButton::Middle,
+                    PointerButton::Back,
+                    PointerButton::Forward,
+                    PointerButton::Other(7),
+                ]
+                .map(|button| button_key(button, swapped).map(|key| key.0))
+            };
+            assert_eq!(
+                keys(false),
+                [
+                    Some(0x01),
+                    Some(0x02),
+                    Some(0x04),
+                    Some(0x05),
+                    Some(0x06),
+                    None
+                ],
+                "unswapped: VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2"
+            );
+            assert_eq!(
+                keys(true),
+                [
+                    Some(0x02),
+                    Some(0x01),
+                    Some(0x04),
+                    Some(0x05),
+                    Some(0x06),
+                    None
+                ],
+                "swapped: the primary and secondary trade keys, nothing else moves"
+            );
+        }
+
+        /// RED (0.4.9 plan row 107) — **a contact is written down at its down and crossed off at
+        /// its up, by its own id**: two fingers down and one lifted leave the other; a second
+        /// down of an id already written is one entry, under the new number; a move, or any
+        /// other message, changes nothing. The id is `wParam`'s low word, whatever the high word
+        /// carries.
+        ///
+        /// MUTATION: cross off every contact at any up — the second finger, still down, is
+        /// forgotten; read the id from the whole `wParam` — the flags in the high word make an
+        /// up that crosses nothing off.
+        #[test]
+        fn a_contact_is_written_down_at_its_down_and_crossed_off_at_its_up() {
+            let (down, update, up) = (0x0246_u32, 0x0245_u32, 0x0247_u32);
+            let with_flags = |id: usize| WPARAM((0x0006 << 16) | id);
+            let mut contacts = Contacts::default();
+            note_a_contact(&mut contacts, down, with_flags(3));
+            note_a_contact(&mut contacts, down, with_flags(9));
+            note_a_contact(&mut contacts, down, with_flags(3));
+            note_a_contact(&mut contacts, update, with_flags(3));
+            assert_eq!(
+                contacts.down,
+                [(9, 2), (3, 3)],
+                "two contacts down, each once, the re-opened one under its new number"
+            );
+            note_a_contact(&mut contacts, up, with_flags(3));
+            assert_eq!(
+                contacts.down,
+                [(9, 2)],
+                "the lifted one is crossed off, the other stays"
+            );
+            note_a_contact(&mut contacts, 0x0201, with_flags(9));
+            assert_eq!(contacts.down, [(9, 2)], "a mouse message is not a contact");
+        }
+
+        /// RED (0.4.9 plan row 107, review F1) — **a contact that went down after the gesture
+        /// latched does not hold it**: a finger on the glass at the latch holds the gesture
+        /// until it lifts; a finger that touches down later — the one doing a pan — holds
+        /// nothing, alone or after the first has lifted; and a gesture latched with no contact
+        /// down is held by none.
+        ///
+        /// MUTATION: count every contact still down — the pan's own finger holds a stale
+        /// capture for as long as it is on the glass, and the pan is discarded.
+        #[test]
+        fn a_contact_that_went_down_after_the_gesture_latched_does_not_hold_it() {
+            let (down, up) = (0x0246_u32, 0x0247_u32);
+            let id = |id: usize| WPARAM(id);
+            let mut contacts = Contacts::default();
+            let before_any = ContactMark(contacts.seen);
+            note_a_contact(&mut contacts, down, id(4));
+            let at_the_press = ContactMark(contacts.seen);
+            assert!(
+                holds_the_latch(&contacts, at_the_press),
+                "the finger a press was promoted from holds its gesture"
+            );
+            assert!(
+                !holds_the_latch(&contacts, before_any),
+                "a gesture latched with no finger down is not held by one that came later"
+            );
+            note_a_contact(&mut contacts, down, id(5));
+            assert!(
+                holds_the_latch(&contacts, at_the_press),
+                "a second finger leaves the first one holding"
+            );
+            note_a_contact(&mut contacts, up, id(4));
+            assert!(
+                !holds_the_latch(&contacts, at_the_press),
+                "the pan's finger, down after the latch, holds nothing"
+            );
+        }
 
         /// **The four messages taken away from winit, and no fifth** (the touch
         /// ruling of 2026-09-21).
@@ -17115,25 +17879,28 @@ mod windows_impl {
                     pan: Cell::new(PanTrack::default()),
                 }
             };
-            window.pan_moved(true, false, (500, 400), (20, 30));
-            window.pan_moved(false, false, (500, 420), (20, 50));
-            window.pan_moved(false, false, (500, 420), (20, 50));
-            window.pan_moved(false, false, (500, 390), (20, 20));
-            window.pan_moved(false, true, (500, 390), (20, 20));
+            window.pan_moved(true, false, false, (500, 400), (20, 30));
+            window.pan_moved(false, false, false, (500, 420), (20, 50));
+            window.pan_moved(false, false, false, (500, 420), (20, 50));
+            window.pan_moved(false, true, false, (500, 390), (20, 20));
+            window.pan_moved(false, false, true, (500, 390), (20, 20));
             assert_eq!(
                 *steps.borrow(),
                 vec![
                     PanStep {
                         began_at: Some((20, 30)),
-                        travel: (0, 0)
+                        travel: (0, 0),
+                        inertia: false
                     },
                     PanStep {
                         began_at: None,
-                        travel: (0, 20)
+                        travel: (0, 20),
+                        inertia: false
                     },
                     PanStep {
                         began_at: None,
-                        travel: (0, -30)
+                        travel: (0, -30),
+                        inertia: true
                     },
                 ],
                 "the opening point, then one step per message that moved"
@@ -19366,12 +20133,26 @@ mod windows_impl {
     /// [`a_box_would_be_seen`] (T-STOP-NOTICE-BOX-QUERY-MACOS), which here is
     /// always yes.
     ///
-    /// `HWND::default()` is the ownerless box: the process has no window to be
-    /// modal to, which is the whole situation. `MB_SETFOREGROUND` because the
-    /// caller is a shell or Explorer that has just taken the focus back — a box
-    /// nobody sees is the same as no box, and this one carries the only
-    /// explanation of a launch that is about to exit.
-    pub fn message_box(title: &str, text: &str) {
+    /// `None` is the ownerless box: the process has no window to be modal to,
+    /// which is the whole situation. `MB_SETFOREGROUND` because the caller is a
+    /// shell or Explorer that has just taken the focus back — a box nobody sees
+    /// is the same as no box, and this one carries the only explanation of a
+    /// launch that is about to exit. The crate's own `message_box` is this box
+    /// over no window, as every platform's door is.
+    ///
+    /// **Owned by `over` when a Folio window stands** (0.4.10 plan row 72), through
+    /// [`SeenBox::say`]. An owned box has no taskbar button or Alt+Tab entry of its own (its
+    /// owner's stands for it), is centred on its owner, and disables its owner while it is up — on the two roads
+    /// that pass one (a stop saying what it lost, and a frame-shape stop's alert) the window
+    /// thread is inside this call's own modal loop either way, and the windows close right
+    /// after it.
+    ///
+    /// **It wears the program's icon** (0.4.10 plan row 72): a box with no owner is the
+    /// process's only window, and its Alt+Tab entry and taskbar button are drawn from its own
+    /// icon, which the system's dialog class does not give it. Every box, owned or not, is
+    /// dressed in the executable's icon group by this thread's `WH_CBT` hook, held for exactly
+    /// the length of the call ([`crate::box_icon::DressedBox`]).
+    pub(crate) fn message_box(over: Option<crate::NativeWindow>, title: &str, text: &str) {
         const ALERT_WITHIN_MS: u32 = 15 * 60 * 1000;
         #[link(name = "user32")]
         unsafe extern "system" {
@@ -19387,13 +20168,16 @@ mod windows_impl {
         let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let kind = (MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND).0;
-        // SAFETY: both terminated strings live across the synchronous call.
+        let owner = over.map_or_else(HWND::default, crate::NativeWindow::as_hwnd);
+        let dressed = crate::box_icon::DressedBox::around();
+        // SAFETY: both terminated strings live across the synchronous call, and the owner is a
+        // window of this thread's or none.
         // `MessageBoxTimeoutW` is the system's MessageBoxW implementation with
         // an elapsed-time bound; after fifteen minutes the window is taken
         // away and the standalone process can finish.
         unsafe {
             MessageBoxTimeoutW(
-                HWND::default(),
+                owner,
                 PCWSTR(text.as_ptr()),
                 PCWSTR(title.as_ptr()),
                 kind,
@@ -19401,6 +20185,7 @@ mod windows_impl {
                 ALERT_WITHIN_MS,
             );
         }
+        drop(dressed);
     }
 
     /// **Say one thing in a box from a process that has no application** —
@@ -19408,18 +20193,20 @@ mod windows_impl {
     /// ownerless, fifteen-minute-bounded box above is that box. The macOS arm
     /// is the one that differs (`macos_dialogs::standalone_alert`).
     pub fn standalone_alert(title: &str, text: &str) {
-        message_box(title, text);
+        message_box(None, title, text);
     }
 
     /// **The box a reader would see** (T-STOP-NOTICE-BOX-QUERY-MACOS) — on this platform
-    /// always, so it carries nothing: [`message_box`] is the ownerless `MB_SETFOREGROUND` box,
-    /// shown on the interactive desktop, and it never writes `stderr`.
+    /// always, so it carries nothing: [`message_box`]'s `MB_SETFOREGROUND` box, shown on the
+    /// interactive desktop, and it never writes `stderr`.
     pub struct SeenBox(());
 
     impl SeenBox {
-        /// Raise the box: [`message_box`], which has no fallback on this platform.
-        pub fn say(self, title: &str, text: &str) {
-            message_box(title, text);
+        /// Raise the box, owned by `over` when a Folio window stands ([`message_box`]), which
+        /// has no fallback on this platform. `over` is a window of the calling thread's: the box
+        /// runs its modal loop on that thread, and an owner on another would have to answer it.
+        pub fn say(self, over: Option<crate::NativeWindow>, title: &str, text: &str) {
+            message_box(over, title, text);
         }
     }
 
@@ -19621,13 +20408,33 @@ pub const fn program_names_carry_their_kind() -> bool {
     }
 }
 
+/// **The colours of the Windows contrast theme in force** — what
+/// `system_high_contrast` reads (T-HIGH-CONTRAST), as sRGB bytes.
+///
+/// Named after the `GetSysColor` index each one is, and they are the pairs of Windows' own
+/// contrast-theme editor that the product draws with: Background and Text (`COLOR_WINDOW`,
+/// `COLOR_WINDOWTEXT`), Selected text (`COLOR_HIGHLIGHT`, `COLOR_HIGHLIGHTTEXT`) and
+/// Inactive text (`COLOR_GRAYTEXT`). Hyperlink and Button text are not read: links keep the
+/// accent (owner ruling 2026-10-28, row 90 ⑤), which is the selected-text colour here, and
+/// the product draws no system button. The renderer has its own type for the same five and
+/// the application translates, for `MinimumContrast`'s reason: this crate does not depend on
+/// the renderer. Off Windows the type exists and `system_high_contrast` never makes one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HighContrastColours {
+    pub window: [u8; 3],
+    pub window_text: [u8; 3],
+    pub highlight: [u8; 3],
+    pub highlight_text: [u8; 3],
+    pub gray_text: [u8; 3],
+}
+
 /// **What a window's system-settings ear heard** ([`SystemSettingsWatch`]), so the loop
 /// re-reads the one fact it is about (T-FRESH-FACTS).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SystemNews {
     /// A system-wide preference may have moved: `WM_SETTINGCHANGE` (the `Environment`
-    /// broadcast among them) and `WM_THEMECHANGED` on Windows; the appearance and the
-    /// accessibility display options on macOS.
+    /// broadcast among them), `WM_THEMECHANGED` and `WM_SYSCOLORCHANGE` on Windows; the
+    /// appearance and the accessibility display options on macOS.
     Preferences,
     /// A display's mode or the set of displays changed: `WM_DISPLAYCHANGE` on Windows,
     /// `NSApplicationDidChangeScreenParametersNotification` on macOS.
@@ -19652,24 +20459,33 @@ pub use windows_impl::{
     SystemSettingsWatch, Taskbar, a_box_would_be_seen, active_keyboard_layout,
     adopt_parent_console, announce_explorer_menu_change, apartments_left, cancel_composition,
     cjk_font_families, client_area_animation_enabled, clipboard_text, cloaked_from_attribute,
-    current_thread_priority, current_user_registry_string, current_user_registry_subkeys,
-    detach_console, directory_folds_case, documents_directory, dpi_at, exposed_from_probe,
-    exposure_probe_points, file_product_version, flash_window, get_dpi_for_window, get_window_rect,
-    get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
-    install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
-    keyboard_layout_shift_table, keyboard_layouts, leave_process, let_the_system_translate_touch,
-    message_box, monitor_id_at, monospace_family_named, monospace_font_families, os_ui_language,
-    pointer_position, pointer_position_in_window, read_context_menu, recycle,
-    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
-    stand_window_at, standalone_alert, std_error_is_console, stop_flashing_window,
-    system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
-    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
-    write_to_console,
+    contacts_seen, current_thread_priority, current_user_registry_string,
+    current_user_registry_subkeys, detach_console, directory_folds_case, documents_directory,
+    dpi_at, exposed_from_probe, exposure_probe_points, file_product_version, flash_window,
+    get_dpi_for_window, get_window_rect, get_work_area, hide_every_window_of_this_process,
+    install_console_ctrl_handler, install_context_menu, install_window_class_background,
+    is_window_cloaked, is_window_minimized, keyboard_layout_shift_table, keyboard_layouts,
+    leave_process, let_the_system_translate_touch, monitor_id_at, monospace_family_named,
+    monospace_font_families, mouse_button_down, os_ui_language, pointer_position,
+    pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
+    register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, silence_std_streams, stand_window_at, standalone_alert,
+    std_error_is_console, stop_flashing_window, system_backdrop_available, system_high_contrast,
+    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
+    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
+    virtual_key_is_dead, virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
+
+/// **Say one thing in the system's box, over no window** — the ownerless door every platform
+/// keeps: a launch about to exit, a road process's failure, the panic hook's alert. On Windows
+/// it is the system's box over no window (`windows_impl::message_box`), which also serves the
+/// owned box a stop raises through [`SeenBox::say`] (0.4.10 plan row 72).
+#[cfg(windows)]
+pub fn message_box(title: &str, text: &str) {
+    windows_impl::message_box(None, title, text);
+}
 
 /// **The same doors, on a machine with no Win32** (M1-1).
 ///
@@ -19685,13 +20501,14 @@ mod portable_impl;
 #[cfg(not(windows))]
 pub use portable_impl::{
     CustomWindowFrame, FilePickKind, ImeSystemCaret, ShellPickKind, active_keyboard_layout,
-    adopt_parent_console, announce_explorer_menu_change, detach_console, directory_folds_case,
-    hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
-    is_window_cloaked, keyboard_layout_shift_table, keyboard_layouts, leave_process,
-    let_the_system_translate_touch, read_context_menu, redirect_std_streams_to_file,
-    register_clipboard_owner, remove_context_menu, set_system_backdrop, silence_std_streams,
-    system_backdrop_available, thread_mouse_capture, virtual_key_for_character,
-    virtual_key_is_dead, virtual_key_of_scan_code, write_std_error, write_to_console,
+    adopt_parent_console, announce_explorer_menu_change, contacts_seen, detach_console,
+    directory_folds_case, hide_every_window_of_this_process, install_console_ctrl_handler,
+    install_context_menu, is_window_cloaked, keyboard_layout_shift_table, keyboard_layouts,
+    leave_process, let_the_system_translate_touch, mouse_button_down, read_context_menu,
+    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
+    set_system_backdrop, silence_std_streams, system_backdrop_available, system_high_contrast,
+    thread_mouse_capture, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
+    write_std_error, write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).
@@ -20399,8 +21216,8 @@ pub use portable_impl::{
 mod app_delegate;
 
 pub use app_delegate::{
-    AppDelegate, AppDelegateEvent, AppDelegateEventKind, AppDelegateOrigin, TerminationAnswer,
-    TerminationDecision, path_from_file_url,
+    AppDelegate, AppDelegateEvent, AppDelegateEventKind, AppDelegateOrigin, QuitReason,
+    TerminationAnswer, TerminationDecision, path_from_file_url,
 };
 
 /// **The selectors added to winit's own application delegate** (M3-1, and the
@@ -23799,12 +24616,14 @@ mod apartment_order_tests {
 /// forward; this is the part with an opinion in it.
 #[cfg(all(test, windows))]
 mod system_preference_message_tests {
-    use super::windows_impl::{DeviceHeader, device_header, system_news_of};
-    use crate::SystemNews;
+    use super::windows_impl::{
+        DeviceHeader, device_header, high_contrast_is_on, high_contrast_of, system_news_of,
+    };
+    use crate::{HighContrastColours, SystemNews};
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_INPUTLANGCHANGE, WM_MOUSEMOVE, WM_NCHITTEST,
-        WM_SETTINGCHANGE, WM_THEMECHANGED,
+        SPI_SETHIGHCONTRAST, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_INPUTLANGCHANGE, WM_MOUSEMOVE,
+        WM_NCHITTEST, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
     };
 
     const DBT_DEVICEARRIVAL: usize = 0x8000;
@@ -23841,6 +24660,71 @@ mod system_preference_message_tests {
         );
         assert_eq!(system_news_of(WM_MOUSEMOVE, WPARAM(0), None), None);
         assert_eq!(system_news_of(WM_NCHITTEST, WPARAM(0), None), None);
+    }
+
+    /// RED (T-HIGH-CONTRAST) — **a contrast theme turned on or off, or its colours edited in
+    /// place, is heard as a preference.** The toggle arrives as `WM_SETTINGCHANGE` with
+    /// `wParam = SPI_SETHIGHCONTRAST` (the arm reads no `wParam`, so it is the same arm as every
+    /// other setting); an edit of the theme's colours is `WM_SYSCOLORCHANGE`.
+    ///
+    /// MUTATION (observed red): drop the `WM_SYSCOLORCHANGE` arm from `system_news_of` — an owner who edits
+    /// Aquatic's background while it is on keeps the old colours in Folio until something else
+    /// wakes the loop.
+    #[test]
+    fn a_contrast_theme_toggled_or_edited_is_a_preference() {
+        assert_eq!(
+            system_news_of(
+                WM_SETTINGCHANGE,
+                WPARAM(SPI_SETHIGHCONTRAST.0 as usize),
+                None
+            ),
+            Some(SystemNews::Preferences)
+        );
+        assert_eq!(
+            system_news_of(WM_SYSCOLORCHANGE, WPARAM(0), None),
+            Some(SystemNews::Preferences)
+        );
+    }
+
+    /// RED (T-HIGH-CONTRAST) — **no contrast theme reads as nothing, and one in force reads as
+    /// its five colours, each in its own place.** `HCF_HIGHCONTRASTON` is the one bit that
+    /// says so: `HCF_AVAILABLE` (2) and the hot-key bits are set on machines where nothing is
+    /// on. A `COLORREF` is `0x00BBGGRR`.
+    ///
+    /// MUTATION (observed red): read the colours whatever the flag says (`high_contrast_of` ignoring `on`), or
+    /// test `dwFlags != 0` — a machine with no contrast theme is repainted in its system
+    /// colours.
+    #[test]
+    fn no_contrast_theme_reads_as_none_and_one_in_force_as_its_colours() {
+        assert!(!high_contrast_is_on(0b10), "HCF_AVAILABLE alone is not on");
+        assert!(!high_contrast_is_on(0b100_0100), "nor are the hot-key bits");
+        assert!(high_contrast_is_on(0b11));
+        let mut asked = false;
+        assert_eq!(
+            high_contrast_of(false, || {
+                asked = true;
+                [0; 5]
+            }),
+            None
+        );
+        assert!(!asked, "the colours are not read while no theme is on");
+        let colours = [
+            0x0000_0000,
+            0x00FF_FFFF,
+            0x00FF_FF00,
+            0x0000_0000,
+            0x0000_FF3F,
+        ];
+        assert_eq!(
+            high_contrast_of(true, || colours),
+            Some(HighContrastColours {
+                window: [0x00, 0x00, 0x00],
+                window_text: [0xFF, 0xFF, 0xFF],
+                highlight: [0x00, 0xFF, 0xFF],
+                highlight_text: [0x00, 0x00, 0x00],
+                gray_text: [0x3F, 0xFF, 0x00],
+            })
+        );
     }
 
     /// RED (T-FRESH-FACTS) — **a display mode change and a keyboard layout change
@@ -24940,15 +25824,51 @@ mod dir_watch_tests {
         assert!(retired(watch), "the watcher left within its bound");
     }
 
+    /// **A retirement door called on a worker the thread door started, its answer awaited
+    /// within `bound` and the door suites' patience after it**
+    /// (T-DIR-WATCH-RETIRE-DOORS-ON-A-CLOCK). The door's own wait is `bound`; a door that never
+    /// answers (a budget that never ends) fails the test by name rather than hanging it.
+    fn door_answered_within<T: Send + 'static>(
+        bound: Duration,
+        door: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        let (answered, answer) = mpsc::channel();
+        let worker = crate::spawn_at_priority(
+            "bt-dir-watch-test",
+            crate::ThreadPriority::Normal,
+            move |ctx| {
+                let _ = answered.send(door(ctx));
+            },
+        )
+        .expect("start a worker for the watch");
+        match answer.recv_timeout(bound + crate::door_skipped::PATIENCE) {
+            Ok(left) => {
+                worker.join().expect("the worker answered");
+                left
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(
+                worker
+                    .join()
+                    .expect_err("a worker that dropped its answer panicked"),
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "the retirement door did not answer within {bound:?} and the door suites' \
+                 patience after it"
+            ),
+        }
+    }
+
     /// **A watch retired the way the product retires one**: through its door, on a worker the
     /// thread door started, within `bound`. Answers whether the watcher left in time.
     fn retired_within(watch: DirWatch, bound: Duration) -> bool {
-        on_a_worker(move |ctx| watch.retire_within(ctx, bound))
+        door_answered_within(bound, move |ctx| watch.retire_within(ctx, bound))
     }
 
-    /// [`retired_within`] within the product's own bound.
+    /// [`retired_within`] within the door suites' patience: the watcher's leaving is the state
+    /// awaited. The product's own budget (`DIR_WATCH_RETIRE_BUDGET`, 2 s) is its real callers'
+    /// bound, never a test's pass condition (T-DIR-WATCH-RETIRE-DOORS-ON-A-CLOCK).
     fn retired(watch: DirWatch) -> bool {
-        retired_within(watch, crate::DIR_WATCH_RETIRE_BUDGET)
+        retired_within(watch, crate::door_skipped::PATIENCE)
     }
 
     /// A watch on `path` whose watcher stands inside its wake until the test lets it go (drops
@@ -25137,17 +26057,57 @@ mod dir_watch_set_tests {
         .expect("watch a directory this process just made")
     }
 
+    /// **A retirement door called on a worker the thread door started, its answer awaited
+    /// within `bound` and the door suites' patience after it**
+    /// (T-DIR-WATCH-RETIRE-DOORS-ON-A-CLOCK). The door's own wait is `bound`; a door that never
+    /// answers (a budget that never ends) fails the test by name rather than hanging it.
+    fn door_answered_within<T: Send + 'static>(
+        bound: Duration,
+        door: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
+    ) -> T {
+        let (answered, answer) = mpsc::channel();
+        let worker = crate::spawn_at_priority(
+            "bt-dir-watch-test",
+            crate::ThreadPriority::Normal,
+            move |ctx| {
+                let _ = answered.send(door(ctx));
+            },
+        )
+        .expect("start a worker for the watch");
+        match answer.recv_timeout(bound + crate::door_skipped::PATIENCE) {
+            Ok(left) => {
+                worker.join().expect("the worker answered");
+                left
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(
+                worker
+                    .join()
+                    .expect_err("a worker that dropped its answer panicked"),
+            ),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "the retirement door did not answer within {bound:?} and the door suites' \
+                 patience after it"
+            ),
+        }
+    }
+
+    /// A member retired through its door, on a worker, within `bound`.
     fn retired_within(watch: DirWatch, bound: Duration) -> bool {
-        on_a_worker(move |ctx| watch.retire_within(ctx, bound))
+        door_answered_within(bound, move |ctx| watch.retire_within(ctx, bound))
     }
 
+    /// [`retired_within`] within the door suites' patience: the member's leaving is the state
+    /// awaited, not the product's 2 s budget (T-DIR-WATCH-RETIRE-DOORS-ON-A-CLOCK).
     fn retired(watch: DirWatch) -> bool {
-        retired_within(watch, crate::DIR_WATCH_RETIRE_BUDGET)
+        retired_within(watch, crate::door_skipped::PATIENCE)
     }
 
+    /// The set retired through its door, on a worker, within the door suites' patience: its
+    /// thread's leaving is the state awaited, not the product's 2 s budget.
     fn set_retired(set: Arc<DirWatchSet>) -> bool {
         let set = Arc::try_unwrap(set).unwrap_or_else(|_| panic!("the test holds the set alone"));
-        on_a_worker(move |ctx| set.retire_within(ctx, crate::DIR_WATCH_RETIRE_BUDGET))
+        let bound = crate::door_skipped::PATIENCE;
+        door_answered_within(bound, move |ctx| set.retire_within(ctx, bound))
     }
 
     /// The next word `label` said within the budget, skipping everyone else's.
@@ -28053,6 +29013,10 @@ mod macos_video_signature_tests {
 
     use crate::source_test;
 
+    /// The door's signature with its paths and its layout taken out: rustfmt
+    /// wraps a signature that an arm's indentation pushes past the line width
+    /// (`fn f(\n    a: A,\n) -> R`), and the wrap — the opening break and the
+    /// trailing comma — is the file's layout, not a different door.
     fn signature(query: &ItemQuery) -> String {
         source_test::signature(source_test::declaration(query))
             .replace("std::path::", "")
@@ -28061,6 +29025,8 @@ mod macos_video_signature_tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
+            .replace("( ", "(")
+            .replace(", )", ")")
     }
 
     /// RED — **each of the three first-frame doors has the same signature on
@@ -28072,7 +29038,9 @@ mod macos_video_signature_tests {
     /// bt-platform` runs on both machines.
     ///
     /// MUTATION: drop the `fit_height` from the macOS arm, or give it a
-    /// `Result` where the others have an `Option`, and this names the door.
+    /// different return type (an `Option` where the others have a `Result`, or
+    /// the reverse), and this names the door. The normaliser takes out only
+    /// rustfmt's wrap, so neither change is read as layout.
     #[test]
     fn every_first_frame_door_keeps_its_signature_on_every_machine() {
         for door in [
@@ -28527,8 +29495,8 @@ mod macos_player_signature_tests {
     /// RED — **every verb `bt-app` reaches for has the same signature on every
     /// machine.**
     ///
-    /// The thirteen doors `video_seat.rs` and `main.rs` actually call, plus the
-    /// three the tests do. `Adapter` and `open_on` are deliberately **not** on
+    /// The eighteen doors `video_seat.rs`, `main.rs` and the tests call.
+    /// `Adapter` and `open_on` are deliberately **not** on
     /// this list: the port's backend inventory (§2.5) classes `Adapter` as the
     /// one type that does not survive — it names D3D11 against WARP, which has
     /// no twin on a platform where the frame never touches a Direct3D device —
@@ -28542,6 +29510,9 @@ mod macos_player_signature_tests {
             "open",
             "source",
             "state",
+            "state_at",
+            "open_runs_out_at",
+            "never_built",
             "frame",
             "standing_frame",
             "frame_cost",
@@ -28750,11 +29721,16 @@ mod macos_player_signature_tests {
 
 /// Gesture-only terminal clipboard acquisition; text fields retain `clipboard_text`.
 pub mod clipboard;
-pub use clipboard::{ClipboardPayload, PictureBytes, PictureEncoding, UnsupportedKind};
+pub use clipboard::{
+    ClipboardPayload, ClipboardRead, ClipboardSequence, PictureBytes, PictureEncoding,
+    PromisedEntry, PromisedFiles, UnsupportedKind,
+};
+/// A clipboard promise, rendered into a folder on a worker (plan row 81).
+pub mod clipboard_promise;
 #[cfg(windows)]
 mod windows_clipboard;
 #[cfg(windows)]
-pub use windows_clipboard::{clipboard_payload, pixels_through_gdi};
+pub use windows_clipboard::{clipboard_payload, pixels_through_gdi, render_clipboard_promise};
 #[cfg(target_os = "macos")]
 mod macos_clipboard_payload;
 #[cfg(target_os = "macos")]
@@ -28762,8 +29738,23 @@ mod macos_file_urls;
 #[cfg(target_os = "macos")]
 pub use macos_clipboard_payload::clipboard_payload;
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn clipboard_payload(_worker: &admission::WorkerCtx) -> Result<ClipboardPayload, String> {
-    Err("terminal clipboard acquisition is unavailable on this platform".to_owned())
+pub fn clipboard_payload(_worker: &admission::WorkerCtx) -> ClipboardRead {
+    ClipboardRead {
+        sequence: None,
+        offered: Vec::new(),
+        answer: Err("terminal clipboard acquisition is unavailable on this platform".to_owned()),
+    }
+}
+/// **A promise on a platform that never answers one** (macOS reads none; plan row 81): the
+/// clipboard lane cannot hand this door an offer here, so it renders nothing.
+#[cfg(not(windows))]
+pub fn render_clipboard_promise(
+    _worker: &admission::WorkerCtx,
+    _offer: &[PromisedEntry],
+    _into: &std::path::Path,
+    _progress: &clipboard_promise::RenderProgress,
+) -> Result<clipboard_promise::RenderedPromise, clipboard_promise::PromiseRefused> {
+    Err(clipboard_promise::PromiseRefused::NotRendered(None))
 }
 
 /// **The `CF_BITMAP` seam on a machine with no GDI.** `PictureEncoding::Bitmap`
@@ -28807,3 +29798,10 @@ pub use exchange::{
     Displaced, ExchangeRefusal, flush_directory, rename_without_replacing_durably,
     replace_keeping_displaced,
 };
+/// **A loopback server for tests that answers every connection until the test
+/// stops it**, recording each (0.4.9 plan row 127): the trust harness's
+/// time-stamp authority and the download tests' scripted server stand on it.
+/// Tests only, as [`trust_harness`] is.
+#[cfg(any(test, feature = "trust-harness"))]
+#[doc(hidden)]
+pub mod loopback_server;

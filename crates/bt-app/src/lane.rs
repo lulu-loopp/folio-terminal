@@ -510,6 +510,34 @@ where
             .map(|(id, _)| *id)
     }
 
+    /// **The drain's mark** ([`Mark`]): [`Self::earliest_owed`], read once by the one drain the
+    /// lane registers (`crates/bt-source/tests/lane_drains.rs`, T-LANE-DRAIN-MARK-GUARD) before
+    /// any of its targets is read, and handed to every take of that drain
+    /// ([`Request::take`]). The only way to a mark but the two named doors
+    /// ([`Self::mark_after_the_worker_ended`], and a test's [`Mark::unmarked_for_a_test`]).
+    pub(crate) fn drain_mark(&self) -> Mark<Id> {
+        Mark {
+            owed: self.earliest_owed(),
+            ledger: self.identity(),
+        }
+    }
+
+    /// **The mark of a take made after the lane's worker has ended or been let go** — no request
+    /// is held back by it, because none will be delivered after it: the lane's last take. A named
+    /// door with one caller (`persist::StorageLane::mark_after_the_worker_ended`, for the
+    /// preview's saves at a stop; `crates/bt-source/tests/lane_drains.rs`'s exceptions).
+    pub(crate) fn mark_after_the_worker_ended(&self) -> Mark<Id> {
+        Mark {
+            owed: None,
+            ledger: self.identity(),
+        }
+    }
+
+    /// This ledger's identity, as a mark carries it: its address, which its `Arc` keeps.
+    fn identity(&self) -> usize {
+        std::ptr::from_ref(self).addr()
+    }
+
     /// **The last identity this ledger minted**, or `None` before its first. On a lane that ends
     /// its identities in the order it minted them, every identity owed now that will end before a
     /// later admission is at or below it.
@@ -677,14 +705,39 @@ where
         self.id
     }
 
-    /// The terminal, once the request has ended; `None` before, and after it was taken.
-    pub(crate) fn take(&mut self) -> Option<TerminalOf<Id, O>> {
-        self.take_if(|_| true)
+    /// **The terminal, once the request has ended and stands below the drain's `mark`**
+    /// ([`Ledger::drain_mark`]); `None` before, at or past the mark, and after it was taken. A take
+    /// cannot be written without a mark, and a request at or past it waits for the next drain
+    /// even when it has ended since (T-LANE-DRAIN-MARK-GUARD).
+    pub(crate) fn take(&mut self, mark: &Mark<Id>) -> Option<TerminalOf<Id, O>> {
+        self.take_if(mark, |_| true)
     }
 
-    /// The terminal, once the request has ended, if `wanted` says so of it; left for a later take
-    /// otherwise.
+    /// [`Self::take`], if `wanted` says so of the terminal; left for a later take otherwise.
     pub(crate) fn take_if(
+        &mut self,
+        mark: &Mark<Id>,
+        wanted: impl FnOnce(&TerminalOf<Id, O>) -> bool,
+    ) -> Option<TerminalOf<Id, O>> {
+        self.is_marked_by(mark);
+        if !mark.below(self.id) {
+            return None;
+        }
+        self.take_terminal(wanted)
+    }
+
+    /// **A `Superseded` terminal, wherever the request stands against the drain's `mark`** — it
+    /// carries no answer, so no answer's order depends on it, and taking it at once frees its
+    /// place in a bound line. A named door with one caller (`computation_lane`'s share drain;
+    /// `crates/bt-source/tests/lane_drains.rs`'s exceptions).
+    pub(crate) fn take_superseded_past(&mut self, mark: &Mark<Id>) -> Option<TerminalOf<Id, O>> {
+        self.is_marked_by(mark);
+        self.take_terminal(|terminal| matches!(terminal, Terminal::Superseded { .. }))
+    }
+
+    /// The terminal, once the request has ended, if `wanted` says so of it — under a mark or a
+    /// named door, never on its own.
+    fn take_terminal(
         &mut self,
         wanted: impl FnOnce(&TerminalOf<Id, O>) -> bool,
     ) -> Option<TerminalOf<Id, O>> {
@@ -694,6 +747,53 @@ where
         let terminal = self.ledger.take(self.id, wanted);
         self.settled = terminal.is_some();
         terminal
+    }
+
+    /// That `mark` is this request's ledger's — a debug build's check: two ledgers of one
+    /// identity type (the computation lane's three shares, the git lane's shares) cannot be
+    /// told apart by the type.
+    fn is_marked_by(&self, mark: &Mark<Id>) {
+        debug_assert!(
+            mark.ledger == ANY_LEDGER || mark.ledger == self.ledger.identity(),
+            "{}: a take under another ledger's mark",
+            self.ledger.lane
+        );
+    }
+}
+
+/// **A drain's mark**: the earliest request its lane still owes, read once for the whole drain
+/// ([`Ledger::drain_mark`]), and the ledger it was read from. Every take of a request is under one
+/// ([`Request::take`]): a request at or past it is left for the next drain, so what one drain
+/// takes is a prefix of the lane's admission order whatever the worker does while the drain reads
+/// its targets. Only this module makes one; it is neither `Clone` nor `Copy`, and
+/// `crates/bt-source/tests/lane_drains.rs` holds that it is never kept past its drain.
+#[derive(Debug)]
+pub(crate) struct Mark<Id> {
+    owed: Option<Id>,
+    ledger: usize,
+}
+
+/// The ledger a test's unmarked take answers to: any.
+const ANY_LEDGER: usize = 0;
+
+impl<Id: Copy + Ord> Mark<Id> {
+    /// The earliest request still owed when the mark was read; `None`, none was.
+    pub(crate) fn owed(&self) -> Option<Id> {
+        self.owed
+    }
+
+    /// Whether `id` stands below the mark — every request does, when none was owed.
+    pub(crate) fn below(&self, id: Id) -> bool {
+        self.owed.is_none_or(|owed| id < owed)
+    }
+
+    /// **No mark**: every ended request is taken — a test's way to hear one request alone.
+    #[cfg(test)]
+    pub(crate) fn unmarked_for_a_test() -> Self {
+        Self {
+            owed: None,
+            ledger: ANY_LEDGER,
+        }
     }
 }
 
@@ -739,6 +839,18 @@ impl Executor {
         Self {
             band: self.band,
             stack: Some(bytes),
+            #[cfg(test)]
+            script: self.script.clone(),
+        }
+    }
+
+    /// **This executor, its workers started at `band`** — for a worker one lane starts on
+    /// another's behalf: the carry pass's end runs a person's Explorer press written down while a
+    /// member held the deployment latch at the press's own band (0.4.10 plan row 68b).
+    pub(crate) fn with_band(&self, band: ThreadPriority) -> Self {
+        Self {
+            band,
+            stack: self.stack,
             #[cfg(test)]
             script: self.script.clone(),
         }
@@ -973,11 +1085,11 @@ where
         let mut book = lock(&self.book);
         if !book.started {
             if let Err(end) = start(Arc::new(Ran(Arc::clone(&self.ledger)))) {
-                // Said after the lane's lock is let go. A lock of the calling lane's own may still
-                // be held (the program walk's, across its admission); that is harmless: a refused
-                // start means the lane has no worker to wait on it, and a requester or consumer
-                // waiting on it waits only for one diagnostics line's write — the door answered
-                // without waiting for a thread, and nothing here waits for one either.
+                // Said after the lane's lock is let go. No caller keeps a lock of its own across
+                // the admission: the program walk's kept its lane's lock across it until row 160,
+                // and now keeps it only for its urgency read. A refused start means the lane has
+                // no worker to wait on it — the door answered without waiting for a thread, and
+                // nothing here waits for one either.
                 drop(book);
                 self.ledger.say_not_started(&end);
                 return Err(Refused::NotStarted(end.to_string()));
@@ -1082,17 +1194,17 @@ where
     }
 
     /// **The application takes every terminal it is owed below the earliest request still owed**
-    /// ([`Ledger::earliest_owed`], read once, before the requests are looked at), in the order the
+    /// ([`Ledger::drain_mark`], read once, before the requests are looked at), in the order the
     /// ledger minted them, each once. A request at or past the mark waits for the next take even
     /// when it has ended since. One lock; never waits for the worker.
     pub(crate) fn ended(&self) -> Vec<(Id, TerminalOf<Id, O>)> {
-        let owed = self.ledger.earliest_owed();
+        let mark = self.ledger.drain_mark();
         let mut book = lock(&self.book);
         let ended: Vec<(Id, TerminalOf<Id, O>)> = book
             .held
             .iter_mut()
-            .take_while(|(id, _)| owed.is_none_or(|owed| **id < owed))
-            .filter_map(|(id, request)| Some((*id, request.take()?)))
+            .take_while(|(id, _)| mark.below(**id))
+            .filter_map(|(id, request)| Some((*id, request.take(&mark)?)))
             .collect();
         for (id, _) in &ended {
             book.held.remove(id);
@@ -1133,7 +1245,7 @@ pub(crate) enum Relation {
 /// The requester holds what [`Self::ask`] admitted. The identities end in the order they were
 /// minted — one worker, first in first out, a displaced or joined request ending no later than
 /// the one that ends it, the worker's end ending the rest — so a consumer may take the terminals
-/// below [`Ledger::earliest_owed`] as a prefix.
+/// below [`Ledger::drain_mark`] as a prefix.
 pub(crate) struct Queue<Id, O, Job>
 where
     Id: Copy + Ord + fmt::Debug + From<u64> + Send + 'static,
@@ -1309,6 +1421,22 @@ where
         self.ledger.publish(id, terminal)
     }
 
+    /// **The asker's newer request `by` replaces `request`**: it is ended `Superseded { by }` —
+    /// unless its terminal came first, which then stands — and its terminal taken here, by the
+    /// asker that holds it, with no mark: it reaches no surface, and the asker keeps it for its
+    /// drain to answer in its turn. A named door with one caller (`clipboard_lane`'s
+    /// `ClipboardLane::supersede`; `crates/bt-source/tests/lane_drains.rs`'s exceptions).
+    pub(crate) fn supersede_and_take(
+        &self,
+        mut request: Request<Id, O>,
+        by: Id,
+    ) -> TerminalOf<Id, O> {
+        self.withdraw(request.id(), Terminal::Superseded { by });
+        request
+            .take_terminal(|_| true)
+            .expect("a request still held has a terminal once it is superseded")
+    }
+
     /// How many requests wait in line, admitted and not yet taken by the worker — where a test
     /// sees a request wait for the one before it.
     #[cfg(test)]
@@ -1327,6 +1455,29 @@ pub(crate) fn answer_of<Id, T, E>(terminal: Terminal<Id, T, E>) -> Option<T> {
         | Terminal::Superseded { .. }
         | Terminal::WorkerGone => None,
     }
+}
+
+/// **Every target's answers, in admission order across the targets** — what each target `K` took
+/// below the drain's mark ([`Ledger::drain_mark`], read once for the whole drain), merged by
+/// the identity the ledger minted, which is the order the requests were admitted in and, on a lane
+/// with one worker and one line, the order they ended in. The consumer answers them in this
+/// order, each in the target that asked: a drain that answered one target's and then the next's
+/// would raise a later answer before an earlier one another target holds.
+pub(crate) fn in_admission_order<K, Id, T>(
+    per_target: impl IntoIterator<Item = (K, Vec<(Id, T)>)>,
+) -> Vec<(K, Id, T)>
+where
+    K: Copy,
+    Id: Ord + Copy,
+{
+    let mut all: Vec<(K, Id, T)> = Vec::new();
+    for (target, answers) in per_target {
+        for (id, answer) in answers {
+            all.push((target, id, answer));
+        }
+    }
+    all.sort_by_key(|(_, id, _)| *id);
+    all
 }
 
 /// Where a task begins, outside its panic catch: the suite's gate holds it here, or ends the
@@ -1698,7 +1849,12 @@ pub(crate) const GIT_MUTATION: Contract = Contract {
 /// go; the ledger owes 50 at once (`persist::STORAGE_BOUND`: the fixed askers' 18 and the
 /// preview's 32), one running and the rest waiting, an answer not yet taken holding its place,
 /// and refuses the rest at the door; a failure (a panic in one request's work) is said once per
-/// request, and the worker goes on.
+/// request, and the worker goes on; the answers are taken by one drain for the whole
+/// application — the lane's earliest request still owed read once, every asker's answers below
+/// it, merged by admission order and heard in that order (`App::storage_answers`,
+/// T-STORAGE-LANE-ORDER-BY-CONSTRUCTION) — and the session's receipts, the launch backup and a
+/// trial's receipt, each left to the sink at admission and read on its own road, are no
+/// delivery of the lane's.
 #[cfg(test)]
 pub(crate) const STORAGE: Contract = Contract {
     lane: Some(LaneName::Storage),
@@ -1855,8 +2011,9 @@ pub(crate) enum Failure {
     NeverStarted,
     /// An answer that should have arrived within the suite's patience did not.
     NoAnswer,
-    /// A submission blocked the asker.
-    SubmissionWaited { longest_ms: u128 },
+    /// A call of the asker's waited on the held executor: the [`Gate`] let go on its own, its cap
+    /// run out, `lapses` times before the claim was done with it.
+    SubmissionWaited { lapses: usize },
     /// The lane admitted or ran more (or fewer) than its declared bound.
     BoundBroken { declared: usize, observed: usize },
     /// A lane with no admission bound took every request of the flood and refused none.
@@ -2075,7 +2232,8 @@ pub(crate) trait LaneUnderTest {
     /// event loop.
     fn probe(&self) -> &WakeProbe;
     /// Put request `question` on the lane for `target` through the lane's own admission. Returns
-    /// at once — how long it took is the suite's to measure.
+    /// at once — whether it waited is the suite's to see: a call that blocks on the held executor
+    /// comes back only when the [`Gate`] lets go on its own, and the gate counts that.
     fn submit(&mut self, target: u32, question: u64) -> Admission;
     /// The target incarnation `target` goes (a window closes, a tab closes).
     fn close_target(&mut self, target: u32);
@@ -2241,9 +2399,59 @@ pub(crate) fn wait_until(what: &str, done: impl FnMut() -> bool) {
     );
 }
 
+/// **Long work another thread does, waited for while it moves**: `done` asked again until it
+/// holds, the suite's [`PATIENCE`] starting over each time `remaining` (how much of the `of` units
+/// of work is still to do) changes. A loaded machine that does the work slowly is waited for,
+/// however long the whole takes; work that stops moving for one [`PATIENCE`] before `done` fails
+/// the test that awaited `what`, by name and with how much was still to do, rather than hanging
+/// it. Where a single event ends the work, [`receive`] or [`wait_until`] waits for it instead.
+///
+/// `remaining` must move one way only, falling as the work is done: a count that could go back
+/// and forth would keep the wait alive without the work getting nearer its end.
+///
+/// The loop looks at the two every [`LOOK_EVERY`], so a wait through a long drain leaves the
+/// core to the work it waits for. That is a poll interval, never a pass condition: the verdict
+/// comes only from `done` and `remaining`.
+#[cfg(test)]
+pub(crate) fn while_progressing(
+    what: &str,
+    of: usize,
+    mut remaining: impl FnMut() -> usize,
+    mut done: impl FnMut() -> bool,
+) {
+    let mut seen = remaining();
+    let mut since = Instant::now();
+    while !done() {
+        let now = remaining();
+        if now != seen {
+            seen = now;
+            since = Instant::now();
+        } else if since.elapsed() >= PATIENCE {
+            assert!(
+                done(),
+                "no progress within the lane suite's patience while awaiting {what}: {seen} of {of} still to take"
+            );
+            return;
+        }
+        std::thread::sleep(LOOK_EVERY);
+    }
+}
+
+/// How often [`while_progressing`] looks at the work it waits for: a poll interval, never a
+/// pass condition.
+#[cfg(test)]
+const LOOK_EVERY: Duration = Duration::from_millis(2);
+
 /// **A hold a fake puts its work behind**: the suite holds it; the fake passes it where its work
 /// begins and stands there while it is held; the suite waits, within [`PATIENCE`], until a worker
 /// is standing in it — the signal that the work has been taken and has not ended.
+///
+/// A held hold is a cap, never a pass condition, as the executor's [`Gate`] is: a worker standing
+/// in it longer than its cap ([`PATIENCE`] unless [`Hold::lapse_after`] says otherwise) lets go on
+/// its own, once, and the hold counts it ([`Hold::lapses`]). Only a call that waited on the
+/// standing worker can need that release to come back (or the test itself holding past the cap,
+/// which a passing test never does), so [`Hold::release`] reads the count and a count above zero
+/// is red: a door that waits on the held work is a failure on the test's thread, not a hang.
 ///
 /// Its limit: a worker woken by [`Hold::release`] is counted as standing until it has run again,
 /// so a `hold` straight after a `release` can let the next [`Hold::wait_standing`] return on that
@@ -2262,6 +2470,10 @@ struct HoldState {
     held: bool,
     /// How many workers stand in the hold now.
     standing: usize,
+    /// How long a worker stands before the hold lets go on its own; `None` is [`PATIENCE`].
+    cap: Option<Duration>,
+    /// How many times the hold let go on its own, its cap run out while still held.
+    lapses: usize,
 }
 
 #[cfg(test)]
@@ -2271,34 +2483,72 @@ impl Hold {
         lock(&self.state).held = true;
     }
 
+    /// Lets every standing worker go, and fails the test if the hold had let go on its own
+    /// before: something waited on the worker standing in it.
     pub(crate) fn release(&self) {
-        lock(&self.state).held = false;
+        let lapses = {
+            let mut state = lock(&self.state);
+            state.held = false;
+            state.lapses
+        };
         self.changed.notify_all();
+        assert_eq!(
+            lapses, 0,
+            "the hold let go on its own: a call waited on the worker standing in it"
+        );
+    }
+
+    /// How many times the hold let go on its own because a worker stood in it past its cap.
+    pub(crate) fn lapses(&self) -> usize {
+        lock(&self.state).lapses
+    }
+
+    /// **For the hold's own test only**: the hold lets go on its own after `cap` instead of
+    /// [`PATIENCE`]. A worker that stands until something it waits for comes lapses once under any
+    /// cap, so a short one only spares the test the wait.
+    pub(crate) fn lapse_after(&self, cap: Duration) {
+        lock(&self.state).cap = Some(cap);
     }
 
     /// **Called by the fake where its work begins**: counted as standing, and kept there while the
-    /// hold is held.
+    /// hold is held — until its cap runs out, when the hold lets go on its own, once, and counts
+    /// it. The cap is one deadline, from this worker's arrival: the condition variable's own timed
+    /// wait keeps it across every wake (a pass entering, a release, a spurious one), so the lapse
+    /// lands at the cap, never earlier and not a second cap later. Nothing here reads the time.
     pub(crate) fn pass(&self) {
         let mut state = lock(&self.state);
         state.standing += 1;
         self.changed.notify_all();
-        while state.held {
-            state = self
-                .changed
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
+        let cap = state.cap.unwrap_or(PATIENCE);
+        let (mut state, waited) = self
+            .changed
+            .wait_timeout_while(state, cap, |state| state.held)
+            .unwrap_or_else(PoisonError::into_inner);
+        if waited.timed_out() && state.held {
+            state.held = false;
+            state.lapses += 1;
+            self.changed.notify_all();
         }
         state.standing -= 1;
     }
 
     /// Waits until a worker stands in the hold; a worker that never comes fails the test that
-    /// awaited `what`, by name, rather than hanging it.
+    /// awaited `what`, by name, rather than hanging it. A hold that has let go on its own fails it
+    /// at once: the worker that stood in it has gone on, and what the test called before this
+    /// waited on it ([`Self::release`]'s verdict, read here as well).
     pub(crate) fn wait_standing(&self, what: &str) {
         let (state, waited) = self
             .changed
-            .wait_timeout_while(lock(&self.state), PATIENCE, |state| state.standing == 0)
+            .wait_timeout_while(lock(&self.state), PATIENCE, |state| {
+                state.standing == 0 && state.lapses == 0
+            })
             .unwrap_or_else(PoisonError::into_inner);
+        let lapses = state.lapses;
         drop(state);
+        assert_eq!(
+            lapses, 0,
+            "the hold let go on its own before {what}: a call waited on the worker standing in it"
+        );
         assert!(
             !waited.timed_out(),
             "nothing stood in the hold within the lane suite's patience while awaiting {what}"
@@ -2308,16 +2558,17 @@ impl Hold {
 /// How long it watches before concluding that something does not happen.
 #[cfg(test)]
 const QUIET: Duration = Duration::from_millis(300);
-/// A submission slower than this made the asker wait.
-#[cfg(test)]
-const PROMPT: Duration = Duration::from_secs(1);
-/// A held executor lets go after this on its own, so a submission that blocks on it comes back
-/// (slow, and caught) instead of hanging the suite.
-#[cfg(test)]
-const HOLD_LIMIT: Duration = Duration::from_secs(5);
-
 /// **The executor's gate**: the suite holds it, counts what passed it, and can make the worker die
 /// in it.
+///
+/// A held gate is a cap, never a pass condition: a worker held in it longer than the gate's cap
+/// ([`PATIENCE`] unless [`Gate::lapse_after`] says otherwise) lets go on its own, once, and the
+/// gate counts it ([`Gate::lapses`]). Only a call that waited on the held worker can need that
+/// release to come back (or the suite itself holding the gate past its cap, which a passing claim
+/// never does), so a count above zero is the asker having waited — read as state, and a call
+/// blocked on the executor turns into a failure rather than a hang. The suite's claims read the
+/// count as their verdict (`check`); every other test reads it at [`Gate::release`], which is red
+/// after a lapse.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Gate {
@@ -2344,6 +2595,10 @@ struct GateState {
     taken: usize,
     /// Whether the suite has looked at the lent file since the last lend.
     looked: bool,
+    /// How long a worker stays held before the gate lets go on its own; `None` is [`PATIENCE`].
+    cap: Option<Duration>,
+    /// How many times the gate let go on its own, its cap run out while still held.
+    lapses: usize,
 }
 
 /// **What one execution holds of the file the suite lent it** ([`Gate::lend`]): the file, opened
@@ -2368,16 +2623,27 @@ pub(crate) const REFUSED_START: &str = "the lane contract suite refuses this thr
 #[cfg(test)]
 impl Gate {
     /// **Called by the seam's scripted worker where a task begins**, outside the task's panic
-    /// catch ([`task`]): counted, held, and the worker ended here when the suite asks.
+    /// catch ([`task`]): counted, held, and the worker ended here when the suite asks. A hold that
+    /// outlasts the gate's cap is let go here, once, and counted as a lapse.
     pub(crate) fn arrive(&self) {
         let mut state = lock(&self.state);
         state.entered += 1;
         self.changed.notify_all();
+        let cap = state.cap.unwrap_or(PATIENCE);
         let since = Instant::now();
-        while state.held && since.elapsed() < HOLD_LIMIT {
+        while state.held {
+            if since.elapsed() >= cap {
+                state.held = false;
+                state.lapses += 1;
+                self.changed.notify_all();
+                break;
+            }
+            // What is left of the cap, not the whole cap again: a wake of the gate's condvar (an
+            // entry, an execution, a release elsewhere) does not restart it.
+            let left = cap.saturating_sub(since.elapsed());
             state = self
                 .changed
-                .wait_timeout(state, HOLD_LIMIT)
+                .wait_timeout(state, left)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
@@ -2471,9 +2737,27 @@ impl Gate {
         lock(&self.state).held = true;
     }
 
+    /// Lets the held worker go, and fails the test if the gate had let go on its own before:
+    /// something waited on the held worker. The suite's own claims let go with [`Self::let_go`]
+    /// instead, and `check` reads the count as their verdict.
     pub(crate) fn release(&self) {
-        lock(&self.state).held = false;
+        let lapses = self.let_go();
+        assert_eq!(
+            lapses, 0,
+            "the gate let go on its own: a call waited on the held worker"
+        );
+    }
+
+    /// **The suite's own release**: lets the held worker go and answers how many times the gate
+    /// had let go on its own, for `check` to judge ([`Self::lapses`]).
+    fn let_go(&self) -> usize {
+        let lapses = {
+            let mut state = lock(&self.state);
+            state.held = false;
+            state.lapses
+        };
         self.changed.notify_all();
+        lapses
     }
 
     /// The next request to pass (or the one held now) ends the worker it passes on — that one
@@ -2484,6 +2768,20 @@ impl Gate {
 
     pub(crate) fn entered(&self) -> usize {
         lock(&self.state).entered
+    }
+
+    /// How many times the gate let go on its own because a hold outlasted its cap: each one is a
+    /// call that waited on the held worker.
+    pub(crate) fn lapses(&self) -> usize {
+        lock(&self.state).lapses
+    }
+
+    /// **For a planted lane only**: the gate lets go on its own after `cap` instead of
+    /// [`PATIENCE`]. A lane that cannot return before its worker moves lapses once under any cap,
+    /// so a short one only spares the test the wait. Or for a test whose held worker keeps
+    /// something another call waits on, the lapse being that wait (`attention_wire`'s budget test).
+    pub(crate) fn lapse_after(&self, cap: Duration) {
+        lock(&self.state).cap = Some(cap);
     }
 
     fn executed(&self) -> Vec<u64> {
@@ -2629,11 +2927,9 @@ impl Run<'_> {
         self.lane.contract()
     }
 
-    fn submit(&mut self, target: u32, question: u64) -> (Admission, Duration) {
+    fn submit(&mut self, target: u32, question: u64) -> Admission {
         self.requests += 1;
-        let started = Instant::now();
-        let admission = self.lane.submit(target, question);
-        (admission, started.elapsed())
+        self.lane.submit(target, question)
     }
 
     /// Drain until `done` holds for everything found so far, or [`PATIENCE`] runs out.
@@ -2685,11 +2981,11 @@ impl Run<'_> {
     /// Hold the executor and put request `0` on it, waiting until it has started.
     fn hold_one(&mut self) -> Result<Admission, Failure> {
         self.lane.gate().hold();
-        let (first, _) = self.submit(0, 0);
+        let first = self.submit(0, 0);
         if self.lane.gate().wait_entered(1) {
             Ok(first)
         } else {
-            self.lane.gate().release();
+            self.lane.gate().let_go();
             Err(Failure::NeverStarted)
         }
     }
@@ -2727,20 +3023,17 @@ fn full_lane_answers_without_waiting(run: &mut Run<'_>) -> Result<(), Failure> {
         Bound::Unbounded => 64,
     };
     let mut admissions = vec![first];
-    let mut longest = Duration::ZERO;
     for question in 1..=flood as u64 {
-        let (admission, took) = run.submit(0, question);
-        longest = longest.max(took);
-        admissions.push(admission);
+        admissions.push(run.submit(0, question));
     }
     // What the consumer hears while the executor is still held: the refusals, if the lane gives
     // them.
     let while_held = run.lane.drain();
-    run.lane.gate().release();
-    if longest > PROMPT {
-        return Err(Failure::SubmissionWaited {
-            longest_ms: longest.as_millis(),
-        });
+    // The flood returned while the executor was held, unless the gate had to let go for it.
+    let lapses = run.lane.gate().lapses();
+    run.lane.gate().let_go();
+    if lapses > 0 {
+        return Err(Failure::SubmissionWaited { lapses });
     }
     let mut found = while_held;
     match contract.replacement {
@@ -2796,8 +3089,8 @@ fn full_lane_answers_without_waiting(run: &mut Run<'_>) -> Result<(), Failure> {
 
 #[cfg(test)]
 fn every_request_has_its_own_identity(run: &mut Run<'_>) -> Result<(), Failure> {
-    let (first, _) = run.submit(0, 7);
-    let (second, _) = run.submit(0, 7);
+    let first = run.submit(0, 7);
+    let second = run.submit(0, 7);
     let mut found = Vec::new();
     let settled = match run.contract().replacement {
         Replacement::LatestValue => {
@@ -2847,9 +3140,9 @@ fn order_is_as_declared(run: &mut Run<'_>) -> Result<(), Failure> {
             Replacement::LatestValue => 0,
             Replacement::Fifo => (question % 2) as u32,
         };
-        admissions.push(run.submit(target, question).0);
+        admissions.push(run.submit(target, question));
     }
-    run.lane.gate().release();
+    run.lane.gate().let_go();
     let mut found = Vec::new();
     match contract.replacement {
         Replacement::LatestValue => {
@@ -2938,9 +3231,9 @@ fn an_abandoned_or_older_answer(run: &mut Run<'_>) -> Result<(), Failure> {
     match run.contract().cancellation {
         Cancellation::Abandon => {
             let gone = run.hold_one()?;
-            let (kept, _) = run.submit(1, 1);
+            let kept = run.submit(1, 1);
             run.lane.close_target(0);
-            run.lane.gate().release();
+            run.lane.gate().let_go();
             let mut found = Vec::new();
             let mut sunk = Vec::new();
             // The gone target's answer is found dropped, or in the lane's sink.
@@ -2967,12 +3260,12 @@ fn an_abandoned_or_older_answer(run: &mut Run<'_>) -> Result<(), Failure> {
             Ok(())
         }
         Cancellation::Never => {
-            let (older, _) = run.submit(0, 0);
+            let older = run.submit(0, 0);
             let mut found = Vec::new();
             if !run.settle(&mut found, |found| has_key(found, older.key())) {
                 return Err(Failure::NoAnswer);
             }
-            let (newer, _) = run.submit(0, 1);
+            let newer = run.submit(0, 1);
             if !run.settle(&mut found, |found| has_key(found, newer.key())) {
                 return Err(Failure::NoAnswer);
             }
@@ -2994,9 +3287,9 @@ fn every_request_ends_exactly_once(run: &mut Run<'_>) -> Result<(), Failure> {
     let first = run.hold_one()?;
     let mut admissions = vec![first];
     for question in 1..=5 {
-        admissions.push(run.submit(0, question).0);
+        admissions.push(run.submit(0, question));
     }
-    run.lane.gate().release();
+    run.lane.gate().let_go();
     let mut found = Vec::new();
     let newest = admissions.last().map_or(0, Admission::key);
     let settled = match run.contract().replacement {
@@ -3056,7 +3349,7 @@ fn every_request_ends_exactly_once(run: &mut Run<'_>) -> Result<(), Failure> {
 fn the_wake_follows_the_publication(run: &mut Run<'_>) -> Result<(), Failure> {
     // The worker parks inside its wake; what the consumer drains then was published before it.
     run.lane.probe().arm_rendezvous();
-    let (first, _) = run.submit(0, 0);
+    let first = run.submit(0, 0);
     if !run.lane.probe().wait_parked() {
         run.lane.probe().let_go();
         return Err(Failure::NoWake);
@@ -3069,7 +3362,7 @@ fn the_wake_follows_the_publication(run: &mut Run<'_>) -> Result<(), Failure> {
     // A wake that reaches nobody: the next drain, whatever brings it, still finds the answer.
     run.lane.probe().lose_wakes();
     let before = run.lane.probe().wakes();
-    let (second, _) = run.submit(0, 1);
+    let second = run.submit(0, 1);
     if !run.lane.probe().wait_wakes_past(before) {
         return Err(Failure::NoWake);
     }
@@ -3089,7 +3382,7 @@ fn answers_held_are_bounded(run: &mut Run<'_>) -> Result<(), Failure> {
     };
     for question in 0..asked as u64 {
         let before = run.lane.probe().wakes();
-        let (admission, _) = run.submit(0, question);
+        let admission = run.submit(0, question);
         // A request refused at the door has its terminal in hand, and nothing to wake for.
         if admission.refused.is_none() && !run.lane.probe().wait_wakes_past(before) {
             return Err(Failure::NoWake);
@@ -3112,11 +3405,11 @@ fn a_dead_worker_is_observable(run: &mut Run<'_>) -> Result<(), Failure> {
     let first = run.hold_one()?;
     let mut admissions = vec![first];
     for question in 1..=2 {
-        admissions.push(run.submit(0, question).0);
+        admissions.push(run.submit(0, question));
     }
     let before = run.lane.probe().wakes();
     run.lane.gate().kill();
-    run.lane.gate().release();
+    run.lane.gate().let_go();
     if !run.lane.gate().wait_killed() {
         return Err(Failure::NeverStarted);
     }
@@ -3161,9 +3454,9 @@ fn a_superseded_request_says_so(run: &mut Run<'_>) -> Result<(), Failure> {
     let first = run.hold_one()?;
     let mut admissions = vec![first];
     for question in 1..=3 {
-        admissions.push(run.submit(0, question).0);
+        admissions.push(run.submit(0, question));
     }
-    run.lane.gate().release();
+    run.lane.gate().let_go();
     let newest = admissions.last().map_or(0, Admission::key);
     let mut found = Vec::new();
     if !run.settle(&mut found, |found| has_key(found, newest)) {
@@ -3203,8 +3496,8 @@ fn a_joined_request_carries_its_twin(run: &mut Run<'_>) -> Result<(), Failure> {
     // One running, and the same question asked twice behind it.
     const TWIN: u64 = 7;
     run.hold_one()?;
-    let twins = [run.submit(0, TWIN).0, run.submit(0, TWIN).0];
-    run.lane.gate().release();
+    let twins = [run.submit(0, TWIN), run.submit(0, TWIN)];
+    run.lane.gate().let_go();
     let keys = [twins[0].key(), twins[1].key()];
     let mut found = Vec::new();
     if !run.settle(&mut found, |found| {
@@ -3285,13 +3578,13 @@ fn a_failure_is_said_once(run: &mut Run<'_>) -> Result<(), Failure> {
         run.lane.gate().hold();
         let mut asked = Vec::new();
         for (at, (question, fails)) in round.iter().enumerate() {
-            asked.push((run.submit(0, *question).0, *fails));
+            asked.push((run.submit(0, *question), *fails));
             if at == 0 && !run.lane.gate().wait_entered(entered + 1) {
-                run.lane.gate().release();
+                run.lane.gate().let_go();
                 return Err(Failure::NeverStarted);
             }
         }
-        run.lane.gate().release();
+        run.lane.gate().let_go();
         let keys: Vec<u64> = asked.iter().map(|(admission, _)| admission.key()).collect();
         let settled = asked
             .iter()
@@ -3334,9 +3627,9 @@ fn an_orphaned_answer_reaches_its_sink(run: &mut Run<'_>) -> Result<(), Failure>
     match run.contract().cancellation {
         Cancellation::Abandon => {
             let gone = run.hold_one()?;
-            let (kept, _) = run.submit(1, 1);
+            let kept = run.submit(1, 1);
             run.lane.close_target(0);
-            run.lane.gate().release();
+            run.lane.gate().let_go();
             let mut found = Vec::new();
             let mut sunk = Vec::new();
             // An abandoning lane runs its requests in order: by the time the kept request's answer
@@ -3363,7 +3656,7 @@ fn an_orphaned_answer_reaches_its_sink(run: &mut Run<'_>) -> Result<(), Failure>
         }
         Cancellation::Never => {
             // The application asked, does not go, and holds the answer: it is the sink.
-            let (asked, _) = run.submit(0, 0);
+            let asked = run.submit(0, 0);
             let mut found = Vec::new();
             if !run.settle(&mut found, |found| has_key(found, asked.key())) {
                 return Err(Failure::NoAnswer);
@@ -3376,11 +3669,11 @@ fn an_orphaned_answer_reaches_its_sink(run: &mut Run<'_>) -> Result<(), Failure>
 #[cfg(test)]
 fn a_withdrawn_request_ends_cancelled_once(run: &mut Run<'_>) -> Result<(), Failure> {
     let first = run.hold_one()?;
-    let (second, _) = run.submit(0, 1);
+    let second = run.submit(0, 1);
     match run.contract().withdrawal {
         Withdrawal::Never => {
             // Nothing is withdrawn here, so nothing may end `Cancelled`.
-            run.lane.gate().release();
+            run.lane.gate().let_go();
             let mut found = Vec::new();
             let mut sunk = Vec::new();
             if !run.settle_with_sink(&mut found, &mut sunk, |found, _| {
@@ -3403,14 +3696,14 @@ fn a_withdrawn_request_ends_cancelled_once(run: &mut Run<'_>) -> Result<(), Fail
         }
         Withdrawal::ByTheAsker => {
             // One running, the one to withdraw waiting behind it, and one more behind that.
-            let (kept, _) = run.submit(0, 2);
+            let kept = run.submit(0, 2);
             let Some(ticket) = second.ticket else {
-                run.lane.gate().release();
+                run.lane.gate().let_go();
                 return Err(Failure::IdentityAmbiguous { answers: 0 });
             };
             let _ = first;
             run.lane.withdraw(0, ticket);
-            run.lane.gate().release();
+            run.lane.gate().let_go();
             let key = second.key();
             let mut found = Vec::new();
             let mut sunk = Vec::new();
@@ -3451,7 +3744,7 @@ fn a_withdrawn_request_leaves_the_line(run: &mut Run<'_>) -> Result<(), Failure>
     let first = run.hold_one()?;
     match contract.withdrawal {
         Withdrawal::Never => {
-            run.lane.gate().release();
+            run.lane.gate().let_go();
             let mut found = Vec::new();
             if !run.settle(&mut found, |found| has_key(found, first.key())) {
                 return Err(Failure::NoAnswer);
@@ -3466,9 +3759,9 @@ fn a_withdrawn_request_leaves_the_line(run: &mut Run<'_>) -> Result<(), Failure>
                 Bound::Unbounded => 64,
             };
             for question in 1..=rounds as u64 {
-                let (asked, _) = run.submit(0, question);
+                let asked = run.submit(0, question);
                 let Some(ticket) = asked.ticket else {
-                    run.lane.gate().release();
+                    run.lane.gate().let_go();
                     return Err(Failure::RefusedAfterWithdrawals {
                         round: question as usize,
                         rounds,
@@ -3477,7 +3770,7 @@ fn a_withdrawn_request_leaves_the_line(run: &mut Run<'_>) -> Result<(), Failure>
                 run.lane.withdraw(0, ticket);
             }
             let in_line = run.lane.in_line();
-            run.lane.gate().release();
+            run.lane.gate().let_go();
             let mut found = Vec::new();
             if !run.settle(&mut found, |found| has_key(found, first.key())) {
                 return Err(Failure::NoAnswer);
@@ -3499,7 +3792,7 @@ fn an_answer_is_published_after_its_resources_are_released(
     let file = crate::test_support::ScratchFile(bt_testpath::temp_path("lane-suite-lent"));
     std::fs::write(&file.0, b"held by the work while it runs").expect("the suite's own file");
     run.lane.gate().lend(file.0.clone());
-    let (asked, _) = run.submit(0, 0);
+    let asked = run.submit(0, 0);
     let mut found = Vec::new();
     let answered =
         asked.refused.is_none() && run.settle(&mut found, |found| has_key(found, asked.key()));
@@ -3522,12 +3815,23 @@ fn an_answer_is_published_after_its_resources_are_released(
 
 /// **Run one claim on one lane**: how many requests it asked, and what it found. Whatever the
 /// claim left held is let go after it.
+///
+/// A claim that passed while its gate let go on its own ([`Gate::lapses`]) is
+/// [`Failure::SubmissionWaited`]: one of the suite's calls — a submission, a drain, a withdrawal,
+/// none of which may wait — waited on the held executor, and the claim passed on a hold that had
+/// already broken. A claim that failed keeps its own failure: it names what the lane did, which is
+/// what a declared failure pins by kind, and a lapse beside it only makes the run red twice over.
 #[cfg(test)]
 pub(crate) fn check(lane: &mut dyn LaneUnderTest, claim: Claim) -> (usize, Result<(), Failure>) {
     let mut run = Run { lane, requests: 0 };
-    let result = claim.check(&mut run);
+    let found = claim.check(&mut run);
     let requests = run.requests;
-    run.lane.gate().release();
+    let lapses = run.lane.gate().lapses();
+    let result = match found {
+        Ok(()) if lapses > 0 => Err(Failure::SubmissionWaited { lapses }),
+        found => found,
+    };
+    run.lane.gate().let_go();
     run.lane.probe().let_go();
     (requests, result)
 }

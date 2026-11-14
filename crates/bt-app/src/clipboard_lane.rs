@@ -27,7 +27,16 @@
 //!   the page); or a copy's write, carrying its bytes ([`Ask::Write`]) and what the window says once
 //!   it has landed (`ClipboardWriteEffect`).
 //! * **Ordering.** One thread, one FIFO queue (`lane::Queue`): requests run, and end, in the
-//!   order they were minted, so a copy and the paste after it read what was copied.
+//!   order they were minted, so a copy and the paste after it read what was copied. They are
+//!   answered in that order too, across every window, copies and pastes together: the
+//!   application reads the earliest request still owed ([`ClipboardLane::drain_mark`]) once,
+//!   each window takes the answers its requests hold below it ([`ClipboardAsks::answered`]), and
+//!   they are put back in the order the ledger minted them before any is answered
+//!   (`lane::in_admission_order`; `FolioApp::answer_clipboard`). A request that ends while the
+//!   windows are being read waits for the next drain, so no later answer is taken before it,
+//!   however slow the drain is beside the worker. A copy a newer one replaces keeps its terminal
+//!   in the asks for that drain ([`OwedCopy::ended`]), and a paste is marked ended only when its
+//!   own answer comes up ([`Answered::Paste`]), so no answer is spent on another's turn.
 //! * **Start.** The worker is started by the first request; a start the thread door refuses
 //!   refuses that request alone, at the door ([`Declined::NotStarted`], said once by the ledger),
 //!   and the next request starts it again.
@@ -71,8 +80,9 @@
 //! * **Wake.** The worker publishes the terminal first and then wakes the loop
 //!   (`AppEvent::ClipboardAnswered`); the ledger wakes it the same way when the worker ends, after
 //!   every owed request has its terminal. The loop takes the answers without waiting and never
-//!   blocks on the lane; each window's turn also takes whatever has ended, so a lost wake loses no
-//!   answer.
+//!   blocks on the lane, on the wake's turn and only there: a window's own turn takes none, so no
+//!   window answers ahead of the others; it keeps the paste's deadline. An answer whose wake was
+//!   lost is taken by the next wake's drain.
 //!
 //! **Between a paste's press and its answer** the pane it was aimed at holds the person's input
 //! ([`PasteHold`]: keys, input-method commits, mouse reports, another paste or a dropped path),
@@ -100,8 +110,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bt_platform::ClipboardPayload;
+use std::path::Path;
+
 use bt_platform::admission::WorkerCtx;
+use bt_platform::clipboard_promise::{PromiseRefused, RenderProgress, RenderedPromise};
+use bt_platform::{ClipboardPayload, ClipboardRead, ClipboardSequence, PromisedEntry};
 
 use crate::lane::{self, Executor, Ledger, Owed, Queue, Refused, Relation, Saying, Terminal};
 use crate::{ClipboardWriteEffect, PasteTarget, PreviewSurface, TextFieldSeat};
@@ -167,7 +180,13 @@ pub(crate) enum Ask {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Reply {
     Text(String),
-    Payload(ClipboardPayload),
+    /// What a terminal paste reads, and the clipboard's own count of its changes at the read
+    /// (plan row 81): the number the refusal line says, so the read line and the refusal line
+    /// can be matched in `diagnostics.log`.
+    Payload {
+        sequence: Option<ClipboardSequence>,
+        payload: ClipboardPayload,
+    },
     Written,
 }
 
@@ -181,6 +200,27 @@ pub(crate) type ClipboardTerminal = Terminal<ClipboardId, Reply, String>;
 /// its own clipboard and never the machine's.
 pub(crate) trait ClipboardDoor: Send + Sync {
     fn serve(&self, worker: &WorkerCtx, ask: &Ask) -> Result<Reply, String>;
+    /// **Render a promise the clipboard offered into `into`** (plan row 81) — on the promise's
+    /// render thread (`worker`), never this lane's, and called only from
+    /// `clipboard_picture::stage_promise`: the door asks the source for the files `offer` lists,
+    /// the clipboard's own descriptor read again and compared, each step advancing `progress`. A
+    /// door whose clipboard answers no promise renders none.
+    fn render_promised_files(
+        &self,
+        worker: &WorkerCtx,
+        offer: &[PromisedEntry],
+        into: &Path,
+        progress: &RenderProgress,
+    ) -> Result<RenderedPromise, PromiseRefused> {
+        let _ = (worker, offer, into, progress);
+        Err(PromiseRefused::NotRendered(None))
+    }
+
+    /// **How long a render may go without a step before it is given up** (review N14):
+    /// [`crate::clipboard_picture::STALL_BOUND`]; a test's door says a shorter one.
+    fn stall_bound(&self) -> Duration {
+        crate::clipboard_picture::STALL_BOUND
+    }
 }
 
 /// **The machine's clipboard**: `bt_platform`'s three worker-only doors, one per ask.
@@ -192,11 +232,72 @@ impl ClipboardDoor for PlatformClipboard {
     fn serve(&self, worker: &WorkerCtx, ask: &Ask) -> Result<Reply, String> {
         match ask {
             Ask::Text => bt_platform::clipboard_text(worker).map(Reply::Text),
-            Ask::Payload => bt_platform::clipboard_payload(worker).map(Reply::Payload),
+            Ask::Payload => {
+                let read = bt_platform::clipboard_payload(worker);
+                crate::diagnostics::note(&clipboard_read_line(&read));
+                let sequence = read.sequence;
+                read.answer
+                    .map(|payload| Reply::Payload { sequence, payload })
+            }
             Ask::Write(text) => {
                 bt_platform::set_clipboard_text(worker, text).map(|()| Reply::Written)
             }
         }
+    }
+
+    fn render_promised_files(
+        &self,
+        worker: &WorkerCtx,
+        offer: &[PromisedEntry],
+        into: &Path,
+        progress: &RenderProgress,
+    ) -> Result<RenderedPromise, PromiseRefused> {
+        bt_platform::render_clipboard_promise(worker, offer, into, progress)
+    }
+}
+
+/// **The read line** (plan row 81): what one terminal paste's read of the clipboard answered,
+/// written on the worker after the read, whatever it answered —
+/// `clipboard read: sequence=<N|none> answered=<files(k)|text|picture(enc)|promise(k)|
+/// promise(unsupported)|nothing|failed>[; offered: <names>]`. The format names are listed only
+/// when the answer was nothing or a promise; names, never content: no text, no file name, no
+/// reason a failure gave (the lane's ledger says that).
+pub(crate) fn clipboard_read_line(read: &ClipboardRead) -> String {
+    let sequence = read
+        .sequence
+        .map_or_else(|| "none".to_owned(), |sequence| sequence.0.to_string());
+    let answered = match &read.answer {
+        Ok(ClipboardPayload::Files(files)) => format!("files({})", files.len()),
+        Ok(ClipboardPayload::Text(_)) => "text".to_owned(),
+        Ok(ClipboardPayload::Picture(pictures)) => match pictures.first() {
+            Some(picture) => format!("picture({})", picture_word(picture.encoding)),
+            None => "picture".to_owned(),
+        },
+        Ok(ClipboardPayload::Promise(promise)) => format!("promise({})", promise.entries.len()),
+        Ok(ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise { .. })) => {
+            "promise(unsupported)".to_owned()
+        }
+        Ok(ClipboardPayload::Nothing) => "nothing".to_owned(),
+        Err(_) => "failed".to_owned(),
+    };
+    if read.offered.is_empty() {
+        format!("clipboard read: sequence={sequence} answered={answered}")
+    } else {
+        format!(
+            "clipboard read: sequence={sequence} answered={answered}; offered: {}",
+            read.offered.join(", ")
+        )
+    }
+}
+
+/// A picture encoding's word in the read line.
+fn picture_word(encoding: bt_platform::PictureEncoding) -> &'static str {
+    match encoding {
+        bt_platform::PictureEncoding::Png => "png",
+        bt_platform::PictureEncoding::Tiff => "tiff",
+        bt_platform::PictureEncoding::Bitmap => "bitmap",
+        bt_platform::PictureEncoding::DibV5 => "dibv5",
+        bt_platform::PictureEncoding::Dib => "dib",
     }
 }
 
@@ -351,6 +452,14 @@ impl ClipboardLane {
             .is_some_and(|paste| paste > copy)
     }
 
+    /// **The drain's mark** ([`lane::Mark`]): the earliest request still owed a terminal — every
+    /// request below it has ended, because the one worker ends them in the order they were minted
+    /// (and its end ends the rest). The application reads it once for a whole drain, before any
+    /// window takes its answers ([`ClipboardAsks::answered`]).
+    pub(crate) fn drain_mark(&self) -> lane::Mark<ClipboardId> {
+        self.queue.ledger().drain_mark()
+    }
+
     /// **The asker withdraws `request`** (`Cancelled`): it is ended `Cancelled` — unless its
     /// terminal came first, which then stands — and let go, so whichever terminal it has goes to the
     /// lane's sink and never to a surface. A request the worker has not reached yet is dropped by the
@@ -364,15 +473,8 @@ impl ClipboardLane {
     /// **The asker's newer request `by` replaces `older`** (`Superseded { by }`): `older` is ended
     /// so — unless its terminal came first — and its terminal taken, here, by the asker that holds
     /// it; it reaches no surface. A request the worker has not reached yet is dropped unrun.
-    pub(crate) fn supersede(
-        &self,
-        mut older: ClipboardRequest,
-        by: ClipboardId,
-    ) -> ClipboardTerminal {
-        self.queue.withdraw(older.id(), Terminal::Superseded { by });
-        older
-            .take()
-            .expect("a request still held has a terminal once it is superseded")
+    pub(crate) fn supersede(&self, older: ClipboardRequest, by: ClipboardId) -> ClipboardTerminal {
+        self.queue.supersede_and_take(older, by)
     }
 }
 
@@ -424,10 +526,11 @@ pub(crate) enum PasteInto {
     Preview(PreviewSurface),
 }
 
-/// **A paste a window is owed**: its identity, its request until its terminal is in hand, where
-/// it goes, and when it was asked (the deadline's clock). A terminal paste's answer is spent only
-/// when it reaches the front of its pane's [`PasteHold`], so an answer can be in hand and wait
-/// behind an earlier paste of the same pane.
+/// **A paste a window is owed**: its identity, its request until its terminal is taken, where it
+/// goes, and when it was asked (the deadline's clock). `ended` is set when the drain answers it in
+/// its turn (`Runtime::answer_clipboard_request`), or when the window withdraws it. A terminal
+/// paste's answer is spent only when it reaches the front of its pane's [`PasteHold`], so an
+/// answer can be in hand and wait behind an earlier paste of the same pane.
 pub(crate) struct OwedPaste {
     pub(crate) id: ClipboardId,
     pub(crate) request: Option<ClipboardRequest>,
@@ -443,10 +546,27 @@ impl OwedPaste {
     }
 }
 
-/// **A copy a window is owed**: its request, and what the window says once it has landed.
+/// **A copy a window is owed**: its identity, its request until a newer copy replaces it, the
+/// terminal that replacement found ([`ClipboardLane::supersede`]: `Superseded`, or its own when it
+/// had ended first) — answered by the drain in its turn like every other, never on the press —
+/// and what the window says once it has landed.
 pub(crate) struct OwedCopy {
-    pub(crate) request: ClipboardRequest,
+    pub(crate) id: ClipboardId,
+    pub(crate) request: Option<ClipboardRequest>,
+    pub(crate) ended: Option<ClipboardTerminal>,
     pub(crate) effect: ClipboardWriteEffect,
+}
+
+impl OwedCopy {
+    /// A copy just admitted: owed, with `effect` to apply once it has landed.
+    pub(crate) fn asked(request: ClipboardRequest, effect: ClipboardWriteEffect) -> Self {
+        Self {
+            id: request.id(),
+            request: Some(request),
+            ended: None,
+            effect,
+        }
+    }
 }
 
 /// **What one window owes the clipboard's answers** — its pastes and its copies, each in the
@@ -474,6 +594,65 @@ impl ClipboardAsks {
     pub(crate) fn is_empty(&self) -> bool {
         self.pastes.is_empty() && self.copies.is_empty()
     }
+
+    /// **Take every answer below `mark`** — the lane's [`ClipboardLane::drain_mark`], read once
+    /// for every window of one drain — in the order the lane minted the requests, copies and
+    /// pastes together, without waiting for one; each request's terminal taken once. A copy's
+    /// leaves the asks with what the window says once it has landed; a paste's goes with its
+    /// answer, and the paste stays owed until that answer is handled in its turn, so an earlier
+    /// paste's answer does not spend it from its pane's hold ahead of a request between them. A
+    /// request at or past `mark` is left for the next drain even when it has ended since, so that
+    /// no window takes an answer before an earlier one another window has not been asked for yet.
+    pub(crate) fn answered(
+        &mut self,
+        mark: &lane::Mark<ClipboardId>,
+    ) -> Vec<(ClipboardId, Answered)> {
+        let mut taken = Vec::new();
+        let mut at = 0;
+        while at < self.copies.len() {
+            let copy = &mut self.copies[at];
+            let id = copy.id;
+            let ended = if !mark.below(id) {
+                None
+            } else if copy.ended.is_some() {
+                copy.ended.take()
+            } else {
+                copy.request.as_mut().and_then(|request| request.take(mark))
+            };
+            let Some(ended) = ended else {
+                at += 1;
+                continue;
+            };
+            let OwedCopy { effect, .. } = self.copies.remove(at);
+            taken.push((id, Answered::Copy { effect, ended }));
+        }
+        for paste in &mut self.pastes {
+            if paste.ended.is_none()
+                && let Some(ended) = paste
+                    .request
+                    .as_mut()
+                    .and_then(|request| request.take(mark))
+            {
+                paste.request = None;
+                taken.push((paste.id, Answered::Paste { ended }));
+            }
+        }
+        taken.sort_by_key(|(id, _)| *id);
+        taken
+    }
+}
+
+/// **One answer a window took from the lane** ([`ClipboardAsks::answered`]), for the application
+/// to answer in admission order across the windows (`lane::in_admission_order`).
+pub(crate) enum Answered {
+    /// A copy's terminal, and what the window says once the copy has landed.
+    Copy {
+        effect: ClipboardWriteEffect,
+        ended: ClipboardTerminal,
+    },
+    /// A paste's terminal, put in its [`OwedPaste::ended`] when it is answered and spent where
+    /// the paste was aimed — a terminal's from the front of its pane's hold.
+    Paste { ended: ClipboardTerminal },
 }
 
 /// One thing a pane holds, in the order the person offered it.
@@ -490,7 +669,7 @@ pub(crate) enum Held {
 /// the way a pane in birth holds them). One queue per pane: each paste asked for it takes its
 /// place ([`Held::Paste`]), and every write offered after it waits behind it as the write it was
 /// ([`Held::Typed`]), so `Ctrl+V`, `k`, `Ctrl+V` reaches the shell as the first paste, `k`, the
-/// second. Held on the pane's `LeafSession`, so a pane that closes takes what it held with it.
+/// second. Held on the pane's `ShellSession`, so a pane that closes takes what it held with it.
 #[derive(Debug, Default)]
 pub(crate) struct PasteHold {
     items: RefCell<VecDeque<Held>>,
@@ -572,10 +751,12 @@ pub(crate) mod contract_adapter {
     use bt_platform::admission::WorkerCtx;
 
     use super::{
-        Ask, ClipboardDoor, ClipboardId, ClipboardLane, ClipboardRequest, ClipboardTerminal, Reply,
+        Answered, Ask, ClipboardAsks, ClipboardDoor, ClipboardId, ClipboardLane, ClipboardTerminal,
+        OwedCopy, Reply,
     };
+    use crate::ClipboardWriteEffect;
     use crate::lane::{
-        Admission, CLIPBOARD, Contract, Delivered, Executor, Gate, LaneUnderTest, Outcome,
+        self, Admission, CLIPBOARD, Contract, Delivered, Executor, Gate, LaneUnderTest, Outcome,
         Terminal, WakeProbe,
     };
 
@@ -624,9 +805,10 @@ pub(crate) mod contract_adapter {
         door: Arc<dyn ClipboardDoor>,
         gate: Arc<Gate>,
         probe: Arc<WakeProbe>,
-        /// One window's requests per open target, in the order asked; a closed window's are
-        /// dropped, as `WindowRuntime`'s `ClipboardAsks` is.
-        windows: BTreeMap<u32, BTreeMap<ClipboardId, ClipboardRequest>>,
+        /// One window's [`ClipboardAsks`] per open target — every question is a copy, held as
+        /// `Runtime::submit_clipboard_write` holds one; a closed window's are dropped, as
+        /// `WindowRuntime`'s are.
+        windows: BTreeMap<u32, ClipboardAsks>,
         /// The suite's own record of which question each id carried, for its tally.
         questions: HashMap<ClipboardId, u64>,
         /// What the lane's sink has been handed and the suite not yet read.
@@ -690,7 +872,11 @@ pub(crate) mod contract_adapter {
                 Ok(request) => {
                     let id = request.id();
                     self.questions.insert(id, question);
-                    self.windows.entry(target).or_default().insert(id, request);
+                    self.windows
+                        .entry(target)
+                        .or_default()
+                        .copies
+                        .push(OwedCopy::asked(request, ClipboardWriteEffect::None));
                     Admission {
                         ticket: Some(id.number()),
                         question,
@@ -712,38 +898,44 @@ pub(crate) mod contract_adapter {
         /// `Runtime::withdraw_paste`: the window takes the request out of its asks and withdraws
         /// it.
         fn withdraw(&mut self, target: u32, ticket: u64) {
-            let request = self
+            let copies = &mut self
                 .windows
                 .get_mut(&target)
-                .and_then(|asks| asks.remove(&ClipboardId(ticket)))
+                .expect("the suite withdraws a request it holds")
+                .copies;
+            let at = copies
+                .iter()
+                .position(|copy| copy.id == ClipboardId(ticket))
                 .expect("the suite withdraws a request it holds");
-            self.lane.withdraw(request);
+            let request = copies.remove(at).request;
+            self.lane
+                .withdraw(request.expect("the suite withdraws a copy still owed"));
         }
 
-        /// `Runtime::settle_clipboard`: every open window takes what has ended, in the order its
-        /// requests were minted.
+        /// `FolioApp::answer_clipboard`: the lane's earliest request still owed, read once; every
+        /// open window takes its answers below it ([`ClipboardAsks::answered`]); and they are
+        /// answered in admission order across the windows (`lane::in_admission_order`).
         fn drain(&mut self) -> Vec<Delivered> {
-            let mut found: Vec<(ClipboardId, Delivered)> = Vec::new();
-            for (window, asks) in &mut self.windows {
-                let ended: Vec<(ClipboardId, ClipboardTerminal)> = asks
-                    .iter_mut()
-                    .filter_map(|(id, request)| Some((*id, request.take()?)))
-                    .collect();
-                for (id, terminal) in ended {
-                    asks.remove(&id);
-                    found.push((
-                        id,
-                        Delivered {
-                            target: Some(*window),
-                            ticket: Some(id.number()),
-                            question: self.questions.get(&id).copied(),
-                            outcome: outcome(&terminal),
-                        },
-                    ));
-                }
-            }
-            found.sort_by_key(|(id, _)| *id);
-            found.into_iter().map(|(_, delivered)| delivered).collect()
+            let owed = self.lane.drain_mark();
+            let held: Vec<(u32, Vec<(ClipboardId, Answered)>)> = self
+                .windows
+                .iter_mut()
+                .map(|(window, asks)| (*window, asks.answered(&owed)))
+                .collect();
+            lane::in_admission_order(held)
+                .into_iter()
+                .map(|(window, id, answered)| {
+                    let Answered::Copy { ended, .. } = answered else {
+                        unreachable!("the suite asks the clipboard lane only for writes")
+                    };
+                    Delivered {
+                        target: Some(window),
+                        ticket: Some(id.number()),
+                        question: self.questions.get(&id).copied(),
+                        outcome: outcome(&ended),
+                    }
+                })
+                .collect()
         }
 
         fn offer_stale(&mut self, _ticket: u64) {
@@ -831,7 +1023,7 @@ mod tests {
         let take = |request: &mut ClipboardRequest| {
             let mut ended = None;
             wait_until("a terminal", || {
-                ended = request.take();
+                ended = request.take(&lane::Mark::unmarked_for_a_test());
                 ended.is_some()
             });
             ended.expect("taken")
@@ -905,7 +1097,7 @@ mod tests {
         for request in [&mut running, &mut after] {
             let mut ended = None;
             wait_until("a write's answer", || {
-                ended = request.take();
+                ended = request.take(&lane::Mark::unmarked_for_a_test());
                 ended.is_some()
             });
             assert_eq!(ended, Some(Terminal::Done(Reply::Written)));
@@ -919,6 +1111,229 @@ mod tests {
             *sunk.lock().unwrap_or_else(PoisonError::into_inner),
             [(withdrawn_id, Terminal::Cancelled)],
             "its one terminal went to the sink"
+        );
+    }
+
+    /// A door that writes nothing anywhere and says each write landed.
+    struct Lands;
+
+    impl ClipboardDoor for Lands {
+        fn serve(&self, _worker: &WorkerCtx, _ask: &Ask) -> Result<Reply, String> {
+            Ok(Reply::Written)
+        }
+    }
+
+    /// RED (T-CLIPBOARD-ORDER-HOLDS-BY-SPEED, plan row 72) — **an answer that ends while the
+    /// windows are read waits for the next drain**, so admission order holds across drains, not
+    /// only inside one, however slow the drain is beside the worker.
+    ///
+    /// Window A asked copies 1, 3 and 5, window B 2, 4 and 6. With 1–3 answered and the worker
+    /// held on 4, a drain reads the earliest request still owed (4), then A takes its answers; the
+    /// worker is let go and answers 4, 5 and 6 before B is read — the moment a slow drain gives a
+    /// fast worker. B takes only 2, below the mark, so the first drain answers 1, 2, 3 and the next
+    /// 4, 5, 6. Read without the mark, B would take 2, 4 and 6 at once and A's 5 would come after
+    /// 6 (`lane_contract_tests` saw that as `OrderBroken` 4 runs in 6 at opt-level 0, 2026-10-26).
+    /// No timing decides it: the worker is moved between the two windows' reads by the test.
+    ///
+    /// MUTATION: take every ended answer whatever the mark (drop the `mark.below` check in
+    /// [`ClipboardAsks::answered`] and `lane::Request::take_if`'s refusal at or past the mark, the second layer since T-LANE-DRAIN-MARK-GUARD; both
+    /// dropped, observed red 2026-10-31), and 6 is answered before 5.
+    #[test]
+    fn an_answer_that_ends_while_the_windows_are_read_waits_for_the_next_drain() {
+        let gate = Arc::new(Gate::default());
+        let (wake, wakes) = wake_channel();
+        let lane = ClipboardLane::start(
+            &Executor::scripted(Arc::clone(&gate)),
+            wake,
+            |_: &str| {},
+            |_, _| {},
+        );
+        let door: Arc<dyn ClipboardDoor> = Arc::new(Lands);
+        let mut a = ClipboardAsks::default();
+        let mut b = ClipboardAsks::default();
+        let mut copy = |into_a: bool| {
+            let request = lane
+                .submit(Arc::clone(&door), Ask::Write("复制 copied".to_owned()))
+                .expect("the lane admits it");
+            let id = request.id();
+            let owed = OwedCopy::asked(request, ClipboardWriteEffect::None);
+            if into_a {
+                a.copies.push(owed);
+            } else {
+                b.copies.push(owed);
+            }
+            id
+        };
+        let mut ids = vec![copy(true), copy(false), copy(true)];
+        for at in 0..3 {
+            wait_for_a_wake(&wakes, &format!("answer {} of 3", at + 1));
+        }
+        gate.hold();
+        ids.push(copy(false));
+        assert!(gate.wait_entered(4), "the worker holds the fourth copy");
+        ids.push(copy(true));
+        ids.push(copy(false));
+
+        let answered = |drain: Vec<(u32, ClipboardId, Answered)>| -> Vec<ClipboardId> {
+            drain
+                .into_iter()
+                .map(|(_, id, answered)| {
+                    assert!(
+                        matches!(
+                            answered,
+                            Answered::Copy {
+                                ended: Terminal::Done(Reply::Written),
+                                ..
+                            }
+                        ),
+                        "every copy landed"
+                    );
+                    id
+                })
+                .collect()
+        };
+        let owed = lane.drain_mark();
+        assert_eq!(
+            owed.owed(),
+            Some(ids[3]),
+            "the fourth is the earliest still owed"
+        );
+        let first_a = a.answered(&owed);
+        gate.release();
+        for at in 3..6 {
+            wait_for_a_wake(&wakes, &format!("answer {} of 6", at + 1));
+        }
+        let first_b = b.answered(&owed);
+        let first = answered(lane::in_admission_order([(0, first_a), (1, first_b)]));
+        let owed = lane.drain_mark();
+        let second = answered(lane::in_admission_order([
+            (0, a.answered(&owed)),
+            (1, b.answered(&owed)),
+        ]));
+        assert_eq!(
+            first,
+            ids[..3],
+            "the first drain answers what ended before it"
+        );
+        assert_eq!(
+            second,
+            ids[3..],
+            "and the next drain the rest, in admission order"
+        );
+        assert!(a.is_empty() && b.is_empty(), "nothing is left owed");
+    }
+
+    /// PIN (plan row 81, T-PASTE-REFUSAL-SAYS-WHY) — **the read line says what the read answered,
+    /// at which sequence, and the format names only when the answer was nothing or a promise**:
+    /// never the text, a file's name or a failure's words.
+    ///
+    /// MUTATION: write `nothing` for a promise in `clipboard_read_line`, or leave the offered
+    /// names out — the promise's row goes red.
+    #[test]
+    fn the_read_line_says_what_the_read_answered_and_names_only_formats() {
+        use bt_platform::{
+            ClipboardPayload, ClipboardRead, ClipboardSequence, PictureBytes, PictureEncoding,
+            PromisedEntry, PromisedFiles, UnsupportedKind,
+        };
+        let read =
+            |sequence: Option<u64>, offered: &[&str], answer: Result<ClipboardPayload, String>| {
+                super::clipboard_read_line(&ClipboardRead {
+                    sequence: sequence.map(ClipboardSequence),
+                    offered: offered.iter().map(|name| (*name).to_owned()).collect(),
+                    answer,
+                })
+            };
+        let picture = |encoding| {
+            ClipboardPayload::Picture(vec![PictureBytes {
+                encoding,
+                bytes: vec![1, 2, 3],
+            }])
+        };
+        for (encoding, word) in [
+            (PictureEncoding::Png, "png"),
+            (PictureEncoding::Bitmap, "bitmap"),
+            (PictureEncoding::DibV5, "dibv5"),
+            (PictureEncoding::Dib, "dib"),
+            (PictureEncoding::Tiff, "tiff"),
+        ] {
+            assert_eq!(
+                read(Some(1663), &[], Ok(picture(encoding))),
+                format!("clipboard read: sequence=1663 answered=picture({word})")
+            );
+        }
+        assert_eq!(
+            read(
+                Some(1720),
+                &[],
+                Ok(ClipboardPayload::Text("secret 秘密".to_owned()))
+            ),
+            "clipboard read: sequence=1720 answered=text"
+        );
+        assert_eq!(
+            read(
+                Some(1694),
+                &[],
+                Ok(ClipboardPayload::Files(vec![
+                    "a.txt".into(),
+                    "秘密.txt".into()
+                ]))
+            ),
+            "clipboard read: sequence=1694 answered=files(2)"
+        );
+        assert_eq!(
+            read(
+                Some(1756),
+                &["FileGroupDescriptorW", "FileContents", "PNG"],
+                Ok(ClipboardPayload::Promise(PromisedFiles {
+                    entries: vec![PromisedEntry {
+                        name: "report 报告.pdf".to_owned(),
+                        size: Some(9),
+                        folder: false,
+                    }],
+                    picture_passed_over: true,
+                }))
+            ),
+            "clipboard read: sequence=1756 answered=promise(1); offered: FileGroupDescriptorW, FileContents, PNG"
+        );
+        assert_eq!(
+            read(
+                Some(412),
+                &["NSFilesPromisePboardType"],
+                Ok(ClipboardPayload::Refused(UnsupportedKind::Promise {
+                    picture_passed_over: false
+                }))
+            ),
+            "clipboard read: sequence=412 answered=promise(unsupported); offered: NSFilesPromisePboardType"
+        );
+        assert_eq!(
+            read(
+                Some(1801),
+                &["Rich Text Format", "Locale"],
+                Ok(ClipboardPayload::Nothing)
+            ),
+            "clipboard read: sequence=1801 answered=nothing; offered: Rich Text Format, Locale"
+        );
+        assert_eq!(
+            read(None, &[], Err("OpenClipboard failed for 秘密".to_owned())),
+            "clipboard read: sequence=none answered=failed"
+        );
+    }
+
+    /// PIN — **every read the machine's clipboard answers a terminal paste writes its line, to the
+    /// file** (plan row 81, R10): on the worker, through `diagnostics::note`, so a Console run keeps
+    /// it as a GUI run does, and before the answer leaves for the window.
+    ///
+    /// MUTATION: drop the `note` from `PlatformClipboard::serve`, or write the line to stderr — red.
+    #[test]
+    fn the_machines_clipboard_writes_its_read_line_on_the_worker() {
+        let serve = crate::test_support::squeezed(crate::test_support::item_body(
+            &bt_source::ItemQuery::method("PlatformClipboard", "serve").of_trait("ClipboardDoor"),
+        ));
+        assert!(
+            serve.contains(
+                "letread=bt_platform::clipboard_payload(worker);crate::diagnostics::note(&clipboard_read_line(&read));"
+            ),
+            "{serve}"
         );
     }
 }

@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::{Gone, OwnerGone};
+use crate::TerminalPane;
 use crate::runtime::files::{files_root_of, files_row_activation, files_row_menu_subject};
 use crate::runtime::handoff::reveal_ask;
 use crate::runtime::panes::popup_owner;
@@ -1230,6 +1231,7 @@ impl<B: Backend> Runtime<'_, B> {
             Popup::Palette => {
                 self.window.palette = None;
                 self.window.palette_layout = None;
+                self.window.drawn_fields.palette = None;
             }
         }
         // **And the rail is asked again, because its answer just changed under a
@@ -1588,13 +1590,13 @@ impl<B: Backend> Runtime<'_, B> {
             has_selection: self
                 .sessions
                 .get(&seat)
-                .and_then(|leaf| leaf.session.selection_text())
+                .and_then(|TerminalPane { session: leaf, .. }| leaf.session.selection_text())
                 .is_some_and(|text| !text.is_empty()),
-            // A successor in birth beside this pane's shell (`LeafSession::successor`).
+            // A successor in birth beside this pane's shell (`TerminalPane::successor`).
             restart_in_flight: self
                 .sessions
                 .get(&seat)
-                .is_some_and(crate::LeafSession::restart_in_flight),
+                .is_some_and(TerminalPane::restart_in_flight),
             // The same question `Find…` will ask when it runs, asked of the same
             // function: one door, so a greyed row and a declined verb can never
             // disagree about which panes a search can be addressed to.
@@ -1706,10 +1708,12 @@ impl<B: Backend> Runtime<'_, B> {
         // `position_of` and not `index_of_id`: the tick names a row of the table
         // being drawn, and a pane whose profile has been deleted has no row to
         // tick rather than the fallback's.
-        let current = self
-            .sessions
-            .get(&seat)
-            .and_then(|leaf| profiles::position_of(&leaf.launch.profile));
+        let current =
+            self.sessions
+                .get(&seat)
+                .and_then(|TerminalPane { session: leaf, .. }| {
+                    profiles::position_of(&leaf.launch.profile)
+                });
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
         let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
@@ -2711,15 +2715,16 @@ impl<B: Backend> Runtime<'_, B> {
         // owes a frame; one standing still owes nothing, which is why the
         // deadline reports nothing then. A turn on which the clocks above
         // changed something has news of its own and goes through.
-        if !changed && !self.animation_frame_is_due() {
+        // Asked only with work: a float standing still asks the gate nothing.
+        if !self.paced_frame(changed, |rt| {
+            rt.window
+                .float
+                .drawn()
+                .any(|win| win.fade(now, rt.app.motion, scale).moving)
+        }) {
             return Ok(());
         }
-        let animating = self
-            .window
-            .float
-            .drawn()
-            .any(|win| win.fade(now, self.app.motion, scale).moving);
-        if (changed || animating) && self.refresh_overlay() {
+        if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -3189,6 +3194,12 @@ impl<B: Backend> Runtime<'_, B> {
         // chrome pass and are not this pass's to throw away.
         self.window
             .git_graphs_shown
+            .retain(|surface, _| !matches!(surface, PreviewSurface::Float(_)));
+        // And their search runs with them (row 180 review N3): a window still
+        // drawn records its run again in `push_float_graph`.
+        self.window
+            .drawn_fields
+            .graph_search
             .retain(|surface, _| !matches!(surface, PreviewSurface::Float(_)));
         let scale = self.window.renderer.scale_factor() as f32;
         let mut layers = marks::Band::default();
@@ -3807,8 +3818,11 @@ impl<B: Backend> Runtime<'_, B> {
                 .map(|tab| (tab, leaf.seat)),
         };
         files_root_of(
-            seat.and_then(|(tab, seat)| tab.sessions.get(&seat))
-                .map(|leaf| leaf.folder(&pane_folder::SystemProcessFolders)),
+            seat.and_then(|(tab, seat)| tab.sessions.get(&seat)).map(
+                |TerminalPane { session: leaf, .. }| {
+                    leaf.folder(&pane_folder::SystemProcessFolders)
+                },
+            ),
             &bt_pty::SystemShellEnvironment,
         )
     }

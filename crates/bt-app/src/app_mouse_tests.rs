@@ -1314,6 +1314,7 @@ fn a_pan_enters_the_wheel_road_as_pixels() {
         .filter_map(|&(begins, ends, (x, y))| {
             track.step(
                 begins,
+                false,
                 ends,
                 (x, y),
                 (x - window_origin.0, y - window_origin.1),
@@ -1378,18 +1379,19 @@ fn a_pan_enters_the_wheel_road_as_pixels() {
 /// Ticket 11's second blocking criterion is a second scroll road beside the wheel's. The runtime
 /// half of the pan needs a window and a GPU, so this pins its shape by reading its items through
 /// `bt-source`: the method that spends parked pans moves the pointer through `pointer_moved` and
-/// turns the wheel through `queue_wheel` — the two doors a mouse uses — and scrolls nothing
+/// turns the wheel through `queue_wheel`, as a finger (0.4.9 plan row 117) — the two doors a mouse
+/// uses — and scrolls nothing
 /// itself; and the wake the touch door sends is answered in one place, by that method, in every
 /// window.
 ///
 /// MUTATION: spend the travel with `scroll_view_exact_in` instead of `queue_wheel` and the first
-/// assertion goes red; answer `TouchPanned` with `Ok(())` and the last one does.
+/// assertion goes red; answer `TouchPanned` with `Ok(())` and the pan-wake one does.
 #[test]
 fn a_parked_pan_is_spent_through_the_wheels_own_entrance() {
     let spend = squeezed_body("Runtime", "spend_parked_pans");
     assert!(
-        spend.contains("self.queue_wheel(delta)?"),
-        "the travel enters the wheel road where a notch does"
+        spend.contains("self.queue_wheel(delta,WheelHand::Finger)?"),
+        "the travel enters the wheel road where a notch does, as a finger's (row 117)"
     );
     assert!(
         spend.contains("self.flush_wheel()?;self.pointer_moved(position)?;"),
@@ -1407,9 +1409,9 @@ fn a_parked_pan_is_spent_through_the_wheels_own_entrance() {
     assert!(
         source().union()[answers.spans()[0].start()..].starts_with(concat!(
             "AppEvent::TouchPanned",
-            " => self.for_each_window(|runtime| runtime.spend_parked_pans()),"
+            " => self.spend_touch_pans(),"
         )),
-        "and it is answered by spending every window's parked pans"
+        "and it is answered by the application's spend"
     );
 }
 
@@ -2449,7 +2451,7 @@ fn an_osc_8_link_on_the_alternate_screen_is_found_and_keeps_its_press() {
         .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
         .unwrap();
     session
-        .feed(b"\x1b]8;;file:///D:/Developer/folio-terminal/test.md\x1b\\test.md\x1b]8;;\x1b\\")
+        .feed(b"\x1b]8;;file:///D:/Developer/lunar-workshop/test.md\x1b\\test.md\x1b]8;;\x1b\\")
         .unwrap();
     let modes = session.terminal_modes();
     assert!(modes.alternate_screen);
@@ -2461,7 +2463,7 @@ fn an_osc_8_link_on_the_alternate_screen_is_found_and_keeps_its_press() {
     let link = frame
         .hyperlink_at(hit.row, hit.column)
         .expect("the alternate screen is scanned, so the label is a link there");
-    assert_eq!(link.uri, "file:///D:/Developer/folio-terminal/test.md");
+    assert_eq!(link.uri, "file:///D:/Developer/lunar-workshop/test.md");
 
     // Same reading `pressed_cell_target` makes of that cell, and the press
     // that follows from it.
@@ -3858,6 +3860,7 @@ fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
         button: MouseButton::Left,
         started: None,
         os: None,
+        contacts: bt_platform::ContactMark::default(),
         last: None,
     };
     assert_eq!(

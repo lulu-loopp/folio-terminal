@@ -1091,7 +1091,7 @@ fn resting_band(body_right: f32, scale: f32) -> RestingBand {
 /// **`has_rail` is the leaf's standing fact and never this frame's stack.** A
 /// width that followed the stack would resize the shell each time a mark
 /// arrived and each time a program entered or left the alternate screen (where
-/// [`host_rect`] hides the rail); see `LeafSession::has_rail` for the fact and
+/// [`host_rect`] hides the rail); see `ShellSession::has_rail` for the fact and
 /// its one owner.
 ///
 /// The pixel size the child is told stays the seat's — see the call sites —

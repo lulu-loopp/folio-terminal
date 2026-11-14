@@ -842,6 +842,14 @@ pub fn resident_channel() -> Option<Channel> {
 
 static RESIDENT_CHANNEL: std::sync::OnceLock<Channel> = std::sync::OnceLock::new();
 
+/// **A test's process taken for a resident run whose streams go nowhere**: no screen is
+/// watching it ([`a_screen_is_watching`]), so an alert is owed to a box, as in a resident run.
+/// Only for a test in a process of its own — the channel is set once per process.
+#[cfg(test)]
+pub(crate) fn as_a_resident_run_nobody_watches() {
+    let _ = RESIDENT_CHANNEL.set(Channel::Nowhere);
+}
+
 fn choose_resident_channel(storage: &Path, previous_run_last_wrote: Option<SystemTime>) -> Channel {
     if console_was_asked_for(crate::entry_doors::installed().named.iter().cloned()) {
         // The console was named by this run. Keep it, keep the group membership
@@ -1038,7 +1046,6 @@ mod tests {
     };
     use bt_platform::admission::doors;
     use bt_source::ItemQuery;
-    use std::sync::mpsc::{SyncSender, sync_channel};
     use std::time::Duration;
 
     fn names(list: &[&str]) -> Vec<OsString> {
@@ -1211,14 +1218,24 @@ mod tests {
 
     // ── T-DIAGNOSTICS-NOTE-OFF-THE-WINDOW-THREAD: the log's own writer ─────
 
-    /// A writer thread for `drain` that does not start writing until the test lets it.
-    fn a_held_writer(drain: Drain) -> (SyncSender<()>, std::thread::JoinHandle<()>) {
-        let (go, held) = sync_channel::<()>(0);
+    /// A writer thread for `drain` that does not start writing until the test lets it: it stands
+    /// in the returned hold (`crate::lane::Hold`) until the test's `release`. A door the test calls
+    /// meanwhile that waits on the writer lets the hold go on its own at its cap, and the release
+    /// is red — never a hang.
+    fn a_held_writer(
+        drain: Drain,
+    ) -> (
+        std::sync::Arc<crate::lane::Hold>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let go = std::sync::Arc::new(crate::lane::Hold::default());
+        go.hold();
+        let held = std::sync::Arc::clone(&go);
         let writer = bt_platform::spawn_at_priority(
             "bt-diagnostics-test",
             bt_platform::ThreadPriority::BelowNormal,
             move |ctx| {
-                let _ = held.recv();
+                held.pass();
                 drain.serve(ctx);
             },
         )
@@ -1242,6 +1259,52 @@ mod tests {
                 .join()
                 .expect("the settling thread returned")
         })
+    }
+
+    /// [`settled`] within the lane suite's patience, where the writer is free to take every
+    /// earlier line: anything but [`Settled::Written`] fails the test that awaited `what`, by
+    /// name. The settle's own bound is the suite's hang cap here, never a race the test runs.
+    fn settled_written(queue: &Queue, what: &str) {
+        let settled = settled(queue, crate::lane::PATIENCE);
+        assert_eq!(
+            settled,
+            Settled::Written,
+            "not written within the lane suite's patience while awaiting {what}"
+        );
+    }
+
+    /// [`settled_written`] for [`Queue::settle_in_panic`], the panic hook's settle.
+    fn settled_in_panic_written(queue: &Queue, what: &str) {
+        let settled = queue.settle_in_panic(crate::lane::PATIENCE);
+        assert_eq!(
+            settled,
+            Settled::Written,
+            "not written within the lane suite's patience while awaiting {what}"
+        );
+    }
+
+    /// [`settled`], asked while the test's writer is still held: the settle runs on a thread of
+    /// its own and its answer is awaited within the lane suite's patience. Answers that answer,
+    /// `None` if it did not come in that patience, and the settling thread — which the test joins
+    /// only after it has let the writer go and given its verdict, so a settle that waits past its
+    /// bound for the held writer is red, never a hang.
+    fn settled_while_held(
+        queue: &std::sync::Arc<Queue>,
+        within: Duration,
+    ) -> (Option<Settled>, std::thread::JoinHandle<()>) {
+        let (said, heard) = std::sync::mpsc::channel();
+        let settling = {
+            let queue = std::sync::Arc::clone(queue);
+            std::thread::spawn(move || {
+                let _ = said.send(settled(&queue, within));
+            })
+        };
+        let mut answer = None;
+        let _ = crate::lane::within_patience(|| {
+            answer = heard.try_recv().ok();
+            answer.is_some()
+        });
+        (answer, settling)
     }
 
     fn lines_of(log: &Path) -> Vec<String> {
@@ -1274,8 +1337,8 @@ mod tests {
             "the caller wrote the line itself: {:?}",
             lines_of(&log)
         );
-        go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        go.release();
+        settled_written(&queue, "the writer taking the stderr line");
         assert_eq!(lines_of(&log), ["BT_WEB refused about:blank"]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1300,11 +1363,10 @@ mod tests {
             "the stderr line".to_owned(),
         );
         super::note_on(Some(&queue), Some(Channel::Log), "the note last");
-        go.send(()).expect("the writer is waiting");
-        assert_eq!(
-            settled(&queue, Duration::from_secs(5)),
-            Settled::Written,
-            "the fence was answered only once every earlier line was written"
+        go.release();
+        settled_written(
+            &queue,
+            "the writer taking the note, the stderr line and the note",
         );
         assert_eq!(
             lines_of(&log),
@@ -1346,8 +1408,8 @@ mod tests {
             "the trace sink's last report".to_owned(),
         );
         super::note_on(Some(&queue), Some(Channel::Log), "a note before the settle");
-        go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        go.release();
+        settled_written(&queue, "the writer taking the lines the settle covers");
         super::way_out_line_on(
             Some(&log),
             None,
@@ -1434,8 +1496,8 @@ mod tests {
             "a console run's line reaches the console's queue, and a silenced run's reaches nothing"
         );
         super::note_on(Some(&queue), Some(Channel::Console), "a note, for the file");
-        go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        go.release();
+        settled_written(&queue, "the writer taking the note");
         assert_eq!(lines_of(&log), ["a note, for the file"]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1463,8 +1525,8 @@ mod tests {
             "the caller wrote the line itself: {:?}",
             lines_of(&log)
         );
-        go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        go.release();
+        settled_written(&queue, "the writer taking the line");
         assert_eq!(lines_of(&log), ["a clipboard picture could not be saved"]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1481,27 +1543,39 @@ mod tests {
     ///
     /// MUTATION: make `Queue::settle` answer without waiting for the fence and the first
     /// assertion goes red.
+    ///
+    /// The settle with the writer held runs on a thread of its own ([`settled_while_held`]), so
+    /// a settle that waits past its bound — `recv()` for `recv_timeout(within)` in
+    /// `Queue::settle` — is red, never a hang.
     #[test]
     fn the_settle_answers_only_once_every_earlier_line_is_on_the_disk() {
         let directory = a_reports_directory("settle");
         let log = directory.join(super::LOG_FILENAME);
         let (queue, drain) = Queue::new(log.clone());
+        let queue = std::sync::Arc::new(queue);
         let (go, writer) = a_held_writer(drain);
         assert!(queue.offer("the first".to_owned()));
         assert!(queue.offer("the second".to_owned()));
+        let (held, settling) = settled_while_held(&queue, Duration::from_millis(50));
+        let unwritten = lines_of(&log).is_empty();
+        go.release();
+        // The verdict after the writer is let go and before the settle is joined.
+        assert!(
+            held.is_some(),
+            "the settle waited past its bound for a held writer"
+        );
         assert_eq!(
-            settled(&queue, Duration::from_millis(50)),
-            Settled::OutOfTime,
+            held,
+            Some(Settled::OutOfTime),
             "a settle was answered with nothing written"
         );
-        assert!(lines_of(&log).is_empty());
-        go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        assert!(unwritten);
+        settling.join().expect("the settling thread returned");
+        settled_written(&queue, "the writer let go taking both lines");
         assert_eq!(lines_of(&log), ["the first", "the second"]);
-        assert_eq!(
-            queue.settle_in_panic(Duration::from_secs(5)),
-            Settled::Written,
-            "the panic hook's settle is answered by the same writer"
+        settled_in_panic_written(
+            &queue,
+            "the panic hook's settle, answered by the same writer",
         );
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1526,10 +1600,10 @@ mod tests {
             !queue.offer("three".to_owned()),
             "a full queue refuses at once"
         );
-        go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        go.release();
+        settled_written(&queue, "the writer taking the two lines before the loss");
         assert!(queue.offer("four".to_owned()));
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settled_written(&queue, "the writer taking the line after the loss");
         assert_eq!(lines_of(&log), ["one", "two", &super::lost_line(1), "four"]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1545,11 +1619,16 @@ mod tests {
     ///
     /// MUTATION: size the channel at the lines' depth alone (no `FENCE_ROOM`) and the
     /// settle with the writer held is `Unanswered`, not `OutOfTime`.
+    ///
+    /// The settle with the writer held runs on a thread of its own ([`settled_while_held`]), so
+    /// a settle that waits past its bound — `recv()` for `recv_timeout(within)` in
+    /// `Queue::settle` — is red, never a hang.
     #[test]
     fn a_full_queue_still_takes_the_fence_and_the_loss_is_written_above_it() {
         let directory = a_reports_directory("full-fence");
         let log = directory.join(super::LOG_FILENAME);
         let (queue, drain) = Queue::with_depth(log.clone(), 2);
+        let queue = std::sync::Arc::new(queue);
         let (go, writer) = a_held_writer(drain);
         assert!(queue.offer("one".to_owned()));
         assert!(queue.offer("two".to_owned()));
@@ -1557,13 +1636,20 @@ mod tests {
             !queue.offer("three".to_owned()),
             "a full queue refuses a line"
         );
+        let (held, settling) = settled_while_held(&queue, Duration::from_millis(50));
+        go.release();
+        // The verdict after the writer is let go and before the settle is joined.
+        assert!(
+            held.is_some(),
+            "the settle waited past its bound for a held writer"
+        );
         assert_eq!(
-            settled(&queue, Duration::from_millis(50)),
-            Settled::OutOfTime,
+            held,
+            Some(Settled::OutOfTime),
             "the fence did not get in behind a full queue"
         );
-        go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(5)), Settled::Written);
+        settling.join().expect("the settling thread returned");
+        settled_written(&queue, "the writer let go taking the lines and the loss");
         assert_eq!(lines_of(&log), ["one", "two", &super::lost_line(1)]);
         drop(queue);
         writer.join().expect("the writer ends with its queue");
@@ -1588,11 +1674,8 @@ mod tests {
         assert!(queue.offer("the refusal said just before the panic".to_owned()));
         crate::the_fatal_road(
             || {
-                go.send(()).expect("the writer is waiting");
-                assert_eq!(
-                    queue.settle_in_panic(Duration::from_secs(5)),
-                    Settled::Written
-                );
+                go.release();
+                settled_in_panic_written(&queue, "the fatal road's settle");
             },
             || {
                 assert!(append_note(&log, "thread 'bt-x' panicked at the line"));
@@ -1620,6 +1703,12 @@ mod tests {
     ///
     /// MUTATION: put the sender behind a `Mutex` taken with `try_lock`, a line dropped on
     /// `WouldBlock`, and lines go missing.
+    ///
+    /// The writer is waited for by the queue's close: the producers' half dropped, it takes
+    /// every line still queued and ends, while the count of lines it has still to take falls
+    /// ([`crate::lane::while_progressing`]). A loaded machine that writes the 40,000 lines slowly
+    /// is waited for; a writer that stops taking them is red by name, never a hang. It was a
+    /// 30 s settle, which a loaded machine ran out of (row 128).
     #[test]
     fn two_producers_lose_nothing_and_keep_their_order() {
         const EACH: usize = 20_000;
@@ -1637,8 +1726,16 @@ mod tests {
             }
         });
         let (go, writer) = a_held_writer(drain);
-        go.send(()).expect("the writer is waiting");
-        assert_eq!(settled(&queue, Duration::from_secs(30)), Settled::Written);
+        let to_take = std::sync::Arc::clone(&queue.lines);
+        drop(queue);
+        go.release();
+        crate::lane::while_progressing(
+            "the writer taking both producers' lines",
+            2 * EACH,
+            || to_take.load(std::sync::atomic::Ordering::Acquire),
+            || writer.is_finished(),
+        );
+        writer.join().expect("the writer ends with its queue");
         let lines = lines_of(&log);
         assert_eq!(lines.len(), 2 * EACH, "lines went missing");
         for name in ["left", "right"] {
@@ -1646,14 +1743,13 @@ mod tests {
                 .iter()
                 .filter(|line| line.starts_with(&format!("{name} ")))
                 .collect();
+            assert_eq!(mine.len(), EACH, "{name}'s lines went missing");
             let expected: Vec<String> = (0..EACH).map(|index| format!("{name} {index}")).collect();
             assert!(
                 mine.iter().zip(&expected).all(|(line, want)| *line == want),
                 "{name}'s lines are out of order"
             );
         }
-        drop(queue);
-        writer.join().expect("the writer ends with its queue");
         let _ = std::fs::remove_dir_all(&directory);
     }
 

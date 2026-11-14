@@ -15,16 +15,52 @@
 
 use super::*;
 
+#[cfg(target_os = "macos")]
 use std::ffi::OsStr;
+#[cfg(target_os = "macos")]
 use std::sync::Mutex;
 
+#[cfg(target_os = "macos")]
 use bt_persist::UpdateCheckV1;
+#[cfg(target_os = "macos")]
 use bt_platform::HostPlatform;
 
+#[cfg(target_os = "macos")]
 use crate::update_job::{
     Bytes, Failure, Fetching, Gathered, Job, Offer, Presenters, Request, State, Verb,
 };
-use crate::update_txn::{Actor, Effect, HeaderOutcome, Phase, PhaseKind, may};
+use crate::update_txn::{Actor, Effect, PhaseKind, may};
+#[cfg(target_os = "macos")]
+use crate::update_txn::{HeaderOutcome, Phase};
+
+use crate::update_prepare::sum_for;
+#[cfg(target_os = "macos")]
+use crate::update_prepare::{AtLaunch, at_launch};
+
+/// The test's own ways to make a driver (macOS only: their only users are the
+/// tests that press one).
+#[cfg(target_os = "macos")]
+impl MacPrepare {
+    /// A driver for `bundle`, with `tools` and `channel` — a test's.
+    pub(crate) fn with(bundle: PathBuf, tools: Arc<dyn Tools>, channel: Option<Channel>) -> Self {
+        Self {
+            bundle,
+            tools,
+            channel,
+            layouts: own_layouts(),
+            record: None,
+        }
+    }
+
+    /// This driver with `ours` in place of the road's own layout — a test's
+    /// fake layout, which records or refuses (U-41a1).
+    pub(crate) fn laid_out(self, ours: Arc<dyn PreparePoint>) -> Self {
+        Self {
+            layouts: Layouts::of(ours),
+            ..self
+        }
+    }
+}
 
 /// Real images, bundles and mounts, shared with `update_startup`'s tests.
 pub(crate) mod fixture {
@@ -33,10 +69,12 @@ pub(crate) mod fixture {
     use std::process::Output;
 
     /// The synthetic bundles' identifier.
+    #[cfg(target_os = "macos")]
     pub(crate) const IDENTIFIER: &str = "io.github.lulu-loopp.folio.u27-test";
 
     /// The requirement a test holds a synthetic bundle to, standing for the
     /// running bundle's designated requirement.
+    #[cfg(target_os = "macos")]
     pub(crate) const REQUIREMENT: &str = "identifier \"io.github.lulu-loopp.folio.u27-test\"";
 
     /// Whether this is the platform these tests run their real half on.
@@ -53,6 +91,7 @@ pub(crate) mod fixture {
     }
 
     /// Run `program`, which must succeed.
+    #[cfg(target_os = "macos")]
     pub(crate) fn run(program: &str, arguments: &[&OsStr]) -> Output {
         let output = answer(program, arguments);
         assert!(
@@ -92,8 +131,10 @@ pub(crate) mod fixture {
 
     /// **Detaches every image mounted under its folder when dropped** — for a
     /// test whose folder another guard removes.
+    #[cfg(target_os = "macos")]
     pub(crate) struct Detach(pub(crate) PathBuf);
 
+    #[cfg(target_os = "macos")]
     impl Drop for Detach {
         fn drop(&mut self) {
             detach_all(&self.0);
@@ -121,6 +162,7 @@ pub(crate) mod fixture {
 
     /// **A signed synthetic bundle** `<parent>/<name>` of `version`, whose one
     /// resource says `notice`.
+    #[cfg(target_os = "macos")]
     pub(crate) fn bundle(parent: &Path, name: &str, version: &str, notice: &str) -> PathBuf {
         bundle_needing(
             parent,
@@ -132,6 +174,7 @@ pub(crate) mod fixture {
     }
 
     /// [`bundle`], whose sealed `FolioMinUpdater` is `needs` (U-42c).
+    #[cfg(target_os = "macos")]
     pub(crate) fn bundle_needing(
         parent: &Path,
         name: &str,
@@ -145,6 +188,7 @@ pub(crate) mod fixture {
 
     /// [`bundle_needing`], whose sealed `FolioUpdateProtocol` is `protocol`,
     /// or which seals none (E1-a2).
+    #[cfg(target_os = "macos")]
     pub(crate) fn bundle_sealing(
         parent: &Path,
         name: &str,
@@ -200,6 +244,7 @@ pub(crate) mod fixture {
     }
 
     /// Ad-hoc sign `bundle` again.
+    #[cfg(target_os = "macos")]
     pub(crate) fn sign(bundle: &Path) {
         run(
             "/usr/bin/codesign",
@@ -213,6 +258,7 @@ pub(crate) mod fixture {
     }
 
     /// `CFBundleShortVersionString` of `bundle`.
+    #[cfg(target_os = "macos")]
     pub(crate) fn version_of(bundle: &Path) -> String {
         let plist = bundle.join("Contents").join("Info.plist");
         let output = run(
@@ -230,6 +276,7 @@ pub(crate) mod fixture {
     }
 
     /// **A compressed read-only image of `folder`** at `image`.
+    #[cfg(target_os = "macos")]
     pub(crate) fn image_of(folder: &Path, image: &Path) -> PathBuf {
         run(
             "/usr/bin/hdiutil",
@@ -251,6 +298,7 @@ pub(crate) mod fixture {
     }
 
     /// **A small empty image** at `image`.
+    #[cfg(target_os = "macos")]
     pub(crate) fn blank_image(image: &Path) -> PathBuf {
         run(
             "/usr/bin/hdiutil",
@@ -272,6 +320,7 @@ pub(crate) mod fixture {
     /// **Attach `image` read-only at a fresh mount point inside `mount_dir`**
     /// (made if missing) with no record kept — the way a dead Prepare leaves
     /// one — and answer the mount point.
+    #[cfg(target_os = "macos")]
     pub(crate) fn attach(image: &Path, mount_dir: &Path) -> PathBuf {
         std::fs::create_dir_all(mount_dir).unwrap();
         run(
@@ -292,6 +341,7 @@ pub(crate) mod fixture {
     }
 
     /// Every file under `root`, with its bytes, sorted by path.
+    #[cfg(target_os = "macos")]
     pub(crate) fn listing(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         fn walk(base: &Path, at: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
             for entry in std::fs::read_dir(at).unwrap() {
@@ -313,6 +363,7 @@ pub(crate) mod fixture {
     }
 
     /// The marker the cask's `postflight_steps` write (`packaging/homebrew/folio.rb`).
+    #[cfg(target_os = "macos")]
     pub(crate) const HOMEBREW_MARKER: &str =
         r#"{"v":1,"manager":"homebrew","uninstall_hook":false}"#;
 
@@ -322,6 +373,7 @@ pub(crate) mod fixture {
     /// `.metadata/config.json` naming the app folder, and `<version>/Folio.app`
     /// linking to the app (`Moved#post_move`); and the cask's two marks on
     /// `app`. Answers the Caskroom.
+    #[cfg(target_os = "macos")]
     pub(crate) fn homebrew_install(prefix: &Path, version: &str, app: &Path) -> PathBuf {
         let caskroom = prefix.join("Caskroom").join("folio");
         let metadata = caskroom.join(".metadata");
@@ -340,6 +392,7 @@ pub(crate) mod fixture {
 
     /// One installed version in the Caskroom `caskroom`: its caskfile under
     /// the timestamp `stamp`, and its link to `app`.
+    #[cfg(target_os = "macos")]
     pub(crate) fn record_version(caskroom: &Path, version: &str, stamp: &str, app: &Path) {
         let casks = caskroom
             .join(".metadata")
@@ -360,6 +413,7 @@ pub(crate) mod fixture {
     }
 
     /// The cask's two marks on `bundle`, the second naming `caskroom`.
+    #[cfg(target_os = "macos")]
     pub(crate) fn mark(bundle: &Path, caskroom: &Path) {
         for (name, value) in [
             (
@@ -388,6 +442,7 @@ pub(crate) mod fixture {
     /// `<prefix>/brew-calls` — the manager Folio's road never runs
     /// (managed-update R3, §3.1). Answers the record's path, which a road
     /// that ran it would have made.
+    #[cfg(target_os = "macos")]
     pub(crate) fn fake_brew(prefix: &Path) -> PathBuf {
         let calls = prefix.join("brew-calls");
         let bin = prefix.join("bin");
@@ -406,17 +461,20 @@ pub(crate) mod fixture {
     }
 }
 
+#[cfg(target_os = "macos")]
 use fixture::{
     HOMEBREW_MARKER, Scratch, answer, attach, blank_image, bundle, bundle_needing, bundle_sealing,
-    fake_brew, homebrew_install, image_of, listing, mark, mounted, on_macos, record_version,
+    fake_brew, homebrew_install, image_of, listing, mark, mounted, record_version,
 };
 
 /// The offer every test presses: `v0.4.7`, for macOS.
+#[cfg(target_os = "macos")]
 fn offer(txn: u8) -> Offer {
     Offer::mint(TxnId::new([txn; 16]), "v0.4.7", HostPlatform::MacOs).expect("a release tag")
 }
 
 /// Run `body` on a worker the thread door started, and wait for it.
+#[cfg(target_os = "macos")]
 fn on_a_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
     let worker = bt_platform::spawn_at_priority(
         "bt-u27-test",
@@ -436,6 +494,7 @@ fn on_a_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 's
 /// --deep --all-architectures -R=<requirement>`, the real `ditto` and the real
 /// rescue clone, and download folders under the test's own folder — each
 /// able to be told to fail, or (the copy) to alter what it made.
+#[cfg(target_os = "macos")]
 struct TestTools {
     requirement: String,
     downloads: PathBuf,
@@ -456,6 +515,7 @@ struct TestTools {
     unlistable: bool,
 }
 
+#[cfg(target_os = "macos")]
 impl TestTools {
     fn new(scratch: &Scratch) -> Self {
         Self {
@@ -478,6 +538,7 @@ impl TestTools {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Tools for TestTools {
     fn verify(&self, _worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
         let requirement = format!("-R={}", self.requirement);
@@ -570,6 +631,7 @@ impl Tools for TestTools {
 
 /// **The release, as a stand-in transport**: the image's bytes and the
 /// checksum document, written under the name each request asks for.
+#[cfg(target_os = "macos")]
 struct Release {
     image: PathBuf,
     sums: String,
@@ -578,6 +640,7 @@ struct Release {
     fetched: Mutex<Vec<String>>,
 }
 
+#[cfg(target_os = "macos")]
 impl Transport for Release {
     fn fetch(
         &self,
@@ -607,6 +670,7 @@ impl Transport for Release {
 
 /// `shasum`'s line for `image` under the offer's asset name, beside another
 /// file's.
+#[cfg(target_os = "macos")]
 fn sums_for(image: &Path) -> String {
     let digest = bt_winres::digest::hex(&bt_winres::digest::sha256(&std::fs::read(image).unwrap()));
     format!(
@@ -619,6 +683,7 @@ fn sums_for(image: &Path) -> String {
 /// **A running bundle and a release**: `<scratch>/apps/<running>` at 0.4.6,
 /// and an image whose `Folio.app` is 0.4.7 (`dress` may change it, re-signed
 /// after), with its checksum document.
+#[cfg(target_os = "macos")]
 struct Scene {
     scratch: Scratch,
     apps: PathBuf,
@@ -626,6 +691,7 @@ struct Scene {
     image: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl Scene {
     fn new(tag: &str, running: &str, dress: impl FnOnce(&Path)) -> Self {
         let scratch = Scratch::new(tag);
@@ -662,12 +728,14 @@ impl Scene {
 /// **Press Update on a job offering `v0.4.7` with `driver`**, and wait for
 /// the job to reach `Verified` or `Failed` — reading the reports the way the
 /// window thread does (`Job::drain_progress`).
+#[cfg(target_os = "macos")]
 fn press(driver: &MacPrepare, transport: SharedTransport, txn: u8) -> Job<u32> {
     press_as(driver, transport, txn, Channel::Ours, false)
 }
 
 /// [`press`] for a copy installed as `channel`, whose manager's record names
 /// it or not (`recorded`) — the evidence the card was offered on.
+#[cfg(target_os = "macos")]
 fn press_as(
     driver: &MacPrepare,
     transport: SharedTransport,
@@ -719,6 +787,7 @@ fn press_as(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn driver(scene: &Scene, tools: &Arc<TestTools>) -> MacPrepare {
     MacPrepare::with(
         scene.running.clone(),
@@ -728,6 +797,7 @@ fn driver(scene: &Scene, tools: &Arc<TestTools>) -> MacPrepare {
 }
 
 /// What the Prepare left behind for the job, read off the disk.
+#[cfg(target_os = "macos")]
 fn journal_on_disk(home: &Home) -> Journal {
     Journal::parse(&std::fs::read(home.journal()).expect("a journal")).expect("a whole journal")
 }
@@ -812,11 +882,9 @@ fn the_detach_is_granted_where_a_transaction_is_deleted() {
 ///
 /// MUTATION: in `eligible`, find the home from the image's bundle name
 /// (`Home::for_bundle(&bundle.with_file_name(IMAGE_BUNDLE))`).
+#[cfg(target_os = "macos")]
 #[test]
 fn renamed_bundle_updates_only_itself() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("renamed", "Folio Beta.app", |_| {});
     let sibling = bundle(&scene.apps, "Folio.app", "0.4.6", "a sibling");
     let sibling_before = listing(&sibling);
@@ -879,11 +947,9 @@ fn renamed_bundle_updates_only_itself() {
 ///
 /// MUTATION: in `eligible`, drop the `may_write_into` answer (take every
 /// folder as writable).
+#[cfg(target_os = "macos")]
 #[test]
 fn a_translocated_bundle_is_not_writable() {
-    if !on_macos() {
-        return;
-    }
     let scratch = Scratch::new("translocated");
     let source = scratch.root.join("source");
     std::fs::create_dir_all(&source).unwrap();
@@ -947,11 +1013,9 @@ fn a_translocated_bundle_is_not_writable() {
 ///
 /// MUTATION: in `macos_update::copy_bundle`, after `ditto`, remove the
 /// attribute from the copy (`/usr/bin/xattr -d com.apple.quarantine <to>`).
+#[cfg(target_os = "macos")]
 #[test]
 fn quarantine_is_preserved_end_to_end() {
-    if !on_macos() {
-        return;
-    }
     // No space: `xattr -p` prints one as `\x20`.
     const QUARANTINE: &str = "0081;66f5a1b2;FolioTest;";
     let scene = Scene::new("quarantine", "Folio.app", |new| {
@@ -994,11 +1058,9 @@ fn quarantine_is_preserved_end_to_end() {
 /// the scene's, signed after its `Info.plist` says it needs 99.0.0.
 ///
 /// MUTATION: in `check`, drop the `this < needed` refusal: the job verifies.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_bundle_that_needs_a_newer_updater_says_this_version_is_too_old() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("too-old", "Folio.app", |new| {
         let parent = new.parent().expect("the source folder");
         std::fs::remove_dir_all(new).unwrap();
@@ -1031,11 +1093,9 @@ fn a_bundle_that_needs_a_newer_updater_says_this_version_is_too_old() {
 /// or names no protocol.
 ///
 /// MUTATION: in `check`, drop the `spoken(..)` line: both jobs verify.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_bundle_that_speaks_another_update_protocol_or_none_is_refused() {
-    if !on_macos() {
-        return;
-    }
     for (case, protocol, seed) in [("protocol 2", Some("2"), 0x2d), ("no protocol", None, 0x2e)] {
         let scene = Scene::new("protocol", "Folio.app", |new| {
             let parent = new.parent().expect("the source folder");
@@ -1121,11 +1181,9 @@ fn the_sealed_protocol_is_held_to_this_builds_as_the_archive_reader_holds_it() {
 /// file after `ditto`; only the second check can see it.
 ///
 /// MUTATION: in `copy_verified`, drop the second `check` (answer `on_image`).
+#[cfg(target_os = "macos")]
 #[test]
 fn the_copy_is_verified_twice() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("twice", "Folio.app", |_| {});
     let tools = Arc::new(TestTools {
         alter_copy: true,
@@ -1154,11 +1212,9 @@ fn the_copy_is_verified_twice() {
 ///
 /// MUTATION: in `prepare_on`, drop the `make_durable` loop before the
 /// `Prepared` write — nothing is recorded.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_staged_set_is_made_durable_before_prepared_vouches_for_it() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("durable", "Folio.app", |_| {});
     let home = scene.home();
     let tools = Arc::new(TestTools {
@@ -1197,11 +1253,9 @@ fn the_staged_set_is_made_durable_before_prepared_vouches_for_it() {
 ///
 /// MUTATION: in `macos_update::flush_tree_with`, treat a folder `read_dir`
 /// refuses as empty — the press reaches `Verified`.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_staged_bundle_that_cannot_be_flushed_whole_is_refused() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("unflushable", "Folio.app", |_| {});
     let tools = Arc::new(TestTools {
         unlistable: true,
@@ -1228,11 +1282,9 @@ fn a_staged_bundle_that_cannot_be_flushed_whole_is_refused() {
 /// image attached; the clone fails after it came off.
 ///
 /// MUTATION: in `abandon`, record `Abandoned` and return without `clear`.
+#[cfg(target_os = "macos")]
 #[test]
 fn every_failure_road_detaches_and_removes_the_txn() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("roads", "Folio.app", |_| {});
     let home = scene.home();
     let garbage = scene.scratch.root.join("garbage.dmg");
@@ -1299,11 +1351,9 @@ fn every_failure_road_detaches_and_removes_the_txn() {
 ///
 /// MUTATION: in `at_launch`, answer `Counted` without clearing when the count
 /// reaches `Abandoned`.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_deferred_transaction_is_discarded_at_two_launches() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("deferred", "Folio.app", |_| {});
     let tools = Arc::new(TestTools::new(&scene.scratch));
     let job = press(&driver(&scene, &tools), scene.release(), 0x41);
@@ -1385,9 +1435,11 @@ fn a_deferred_transaction_is_discarded_at_two_launches() {
 
 /// The start's world for a later launch of a waiting transaction: nothing is
 /// started, no entrance is removed and nothing is mounted (U-33's `Quiet`).
+#[cfg(target_os = "macos")]
 #[derive(Default)]
 struct Quiet(Vec<String>);
 
+#[cfg(target_os = "macos")]
 impl crate::update_startup::World for Quiet {
     fn say(&mut self, line: &str) {
         self.0.push(line.to_owned());
@@ -1406,6 +1458,10 @@ impl crate::update_startup::World for Quiet {
     }
 
     fn on_a_worker(&mut self, _: crate::update_startup::OffThread) -> std::io::Result<()> {
+        panic!("a later launch handed a retirement to a worker")
+    }
+
+    fn wait_clock(&self) -> std::sync::Arc<dyn crate::update_apply::WaitClock> {
         panic!("a later launch handed a retirement to a worker")
     }
 }
@@ -1427,11 +1483,9 @@ impl crate::update_startup::World for Quiet {
 ///
 /// MUTATION: in `update_prepare_macos::resume`, answer the running bundle's
 /// version (`old.version`) instead of the staged one.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("resume-at-launch", "Folio.app", |_| {});
     let tools = Arc::new(TestTools::new(&scene.scratch));
     let pressed = press(&driver(&scene, &tools), scene.release(), 1);
@@ -1564,11 +1618,9 @@ fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
 /// left.
 ///
 /// MUTATION: in `still_valid`, drop the staged bundle's `check`.
+#[cfg(target_os = "macos")]
 #[test]
 fn revalidation_before_resume_refuses_a_changed_image() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("revalidate", "Folio.app", |_| {});
     let tools = Arc::new(TestTools::new(&scene.scratch));
     let job = press(&driver(&scene, &tools), scene.release(), 0x43);
@@ -1625,6 +1677,7 @@ fn revalidation_before_resume_refuses_a_changed_image() {
 
 /// What the road asked of a layout's Prepare, and the journal on disk when
 /// it asked: `None` where there was none yet.
+#[cfg(target_os = "macos")]
 type PrepareCall = (
     &'static str,
     Option<(PhaseKind, crate::update_txn::Adapter)>,
@@ -1634,18 +1687,21 @@ type PrepareCall = (
 /// Homebrew's on (managed-update §6): every call recorded with the journal on
 /// disk, delegated to Folio's own layout unless it is told to refuse with
 /// `refuse`.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Default)]
 struct PrepareRecorder {
     calls: Arc<Mutex<Vec<PrepareCall>>>,
     refuse: Option<Stop>,
 }
 
+#[cfg(target_os = "macos")]
 impl PrepareRecorder {
     fn calls(&self) -> Vec<PrepareCall> {
         self.calls.lock().unwrap().clone()
     }
 }
 
+#[cfg(target_os = "macos")]
 impl PreparePoint for PrepareRecorder {
     fn carried(&self, road: &Road<'_>) -> Result<Option<crate::update_txn::Carried>, Stop> {
         Ours.carried(road)
@@ -1690,11 +1746,9 @@ impl PreparePoint for PrepareRecorder {
 /// MUTATION: in `prepare_on`, acquire through `Ours` in place of the layout
 /// the adapter names (`layout.prepare` → `Ours.prepare`) — the recorder hears
 /// no `prepare`, and the refusing layout's press is `Verified`.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_and_a_refusal_abandons() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("layout-prepare", "Folio.app", |_| {});
     let tools = Arc::new(TestTools::new(&scene.scratch));
     let recorder = PrepareRecorder::default();
@@ -1761,6 +1815,7 @@ fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_and_a_refusal_aba
 // ── Homebrew's layout (0.4.8 D1, U-41b) ─────────────────────────────────────
 
 /// A copy the cask's marker says Homebrew installed, with no uninstall hook.
+#[cfg(target_os = "macos")]
 fn homebrew() -> Channel {
     Channel::Managed {
         manager: crate::install_channel::Manager::Homebrew,
@@ -1769,6 +1824,7 @@ fn homebrew() -> Channel {
 }
 
 /// The marks a Homebrew copy whose Caskroom is `caskroom` carries.
+#[cfg(target_os = "macos")]
 fn marks(caskroom: &Path) -> crate::update_txn::Carried {
     crate::update_txn::Carried {
         install: Some(HOMEBREW_MARKER.as_bytes().to_vec()),
@@ -1790,11 +1846,9 @@ fn marks(caskroom: &Path) -> crate::update_txn::Carried {
 ///
 /// MUTATION: in `Homebrew::prepare`, drop `carry(stage, carried)?` — the
 /// staged bundle has no marks.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_homebrew_copys_press_records_its_marks_and_carries_them_onto_the_staged_bundle() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("hb-carry", "Folio.app", |_| {});
     let prefix = scene.scratch.root.join("homebrew 前缀");
     let caskroom = homebrew_install(&prefix, "0.4.6", &scene.running);
@@ -1847,11 +1901,9 @@ fn a_homebrew_copys_press_records_its_marks_and_carries_them_onto_the_staged_bun
 ///
 /// MUTATION: in `carry`, skip the install-marker arm — the marker-only staged
 /// bundle is missing the one mark it was meant to carry.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_homebrew_carry_writes_each_existing_attribute_and_no_missing_one() {
-    if !on_macos() {
-        return;
-    }
     let scratch = Scratch::new("hb-one-mark");
     for (tag, carried) in [
         (
@@ -1889,11 +1941,9 @@ fn a_homebrew_carry_writes_each_existing_attribute_and_no_missing_one() {
 ///
 /// MUTATION: in `Homebrew::prepare`, drop the `still != *carried` refusal —
 /// the press reaches `Verified`.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_marker_that_changed_since_allocation_abandons_before_armed() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("hb-remark", "Folio.app", |_| {});
     let prefix = scene.scratch.root.join("homebrew 前缀");
     homebrew_install(&prefix, "0.4.6", &scene.running);
@@ -1930,11 +1980,9 @@ fn a_marker_that_changed_since_allocation_abandons_before_armed() {
 ///
 /// MUTATION: in `install_channel::recorded_target`, answer `Ok(())` without
 /// comparing the link's target with the bundle — the copy's press is taken.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_moved_or_second_marked_bundle_keeps_the_command() {
-    if !on_macos() {
-        return;
-    }
     let scene = Scene::new("hb-moved", "Folio.app", |_| {});
     let prefix = scene.scratch.root.join("homebrew 前缀");
     let caskroom = homebrew_install(&prefix, "0.4.6", &scene.running);
@@ -1992,11 +2040,9 @@ fn a_moved_or_second_marked_bundle_keeps_the_command() {
 ///
 /// MUTATION: in `install_channel::installed_version`, keep the *least*
 /// timestamp (`stamp.name < *name`) — the older version's link is read.
+#[cfg(target_os = "macos")]
 #[test]
 fn homebrews_record_is_read_as_homebrew_reads_it() {
-    if !on_macos() {
-        return;
-    }
     let scratch = Scratch::new("hb-record");
     let apps = scratch.root.join("自定义 Apps");
     std::fs::create_dir_all(&apps).unwrap();

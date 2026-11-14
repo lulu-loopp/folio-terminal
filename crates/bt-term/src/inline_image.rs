@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    io::{Cursor, Read},
+    io::{self, Cursor, Read},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::{Duration, UNIX_EPOCH},
@@ -521,6 +521,13 @@ pub enum InlineImageDecodeError {
     },
     InvalidPath,
     Io(String),
+    /// **The file is held by another program at this moment**
+    /// (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE): its open or its read was refused because
+    /// another handle does not share it ([`bt_effects::file_reads::held_elsewhere`]), in the
+    /// operating system's own words. An answer about the moment and not about the file, which is
+    /// why it is not [`Self::Io`]: the same read may succeed once the holder lets go, and a
+    /// surface that files it asks again within its bound rather than standing on a refusal.
+    HeldElsewhere(String),
     UnsupportedFormat,
     Decode(String),
     /// More pixels than the budget in force would hold, **before** any reduction
@@ -553,6 +560,9 @@ impl fmt::Display for InlineImageDecodeError {
             ),
             Self::InvalidPath => formatter.write_str("local image path is not admissible"),
             Self::Io(error) => write!(formatter, "local image read failed: {error}"),
+            Self::HeldElsewhere(error) => {
+                write!(formatter, "local image is held by another program: {error}")
+            }
             Self::UnsupportedFormat => {
                 formatter.write_str("inline image format is not supported in v1")
             }
@@ -713,6 +723,14 @@ impl InlineImageDecoder {
                     Some(cached) if cached.stamp == stamp => cached.decoded.clone()?,
                     _ => {
                         let decoded = read_and_decode_local_image(path, lane);
+                        // **A file held by another program is not remembered**
+                        // (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE): the answer is about the
+                        // moment, and the holder letting go changes nothing the stamp sees, so a
+                        // remembered `HeldElsewhere` would answer every later ask of the unchanged file
+                        // without reading it.
+                        if let Err(held @ InlineImageDecodeError::HeldElsewhere(_)) = decoded {
+                            return Err(held);
+                        }
                         self.local_path_cache.insert(
                             cache_key,
                             CachedLocalImage {
@@ -776,11 +794,8 @@ fn read_and_decode_local_image(
     {
         return Err(InlineImageDecodeError::InvalidPath);
     }
-    let mut file = bt_effects::file_reads::open(lane, path)
-        .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
+    let mut file = bt_effects::file_reads::open(lane, path).map_err(read_refused)?;
+    let metadata = file.metadata().map_err(read_refused)?;
     if !metadata.is_file() {
         return Err(InlineImageDecodeError::InvalidPath);
     }
@@ -794,7 +809,7 @@ fn read_and_decode_local_image(
     file.by_ref()
         .take(MAX_LOCAL_IMAGE_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
+        .map_err(read_refused)?;
     if bytes.len() as u64 > MAX_LOCAL_IMAGE_FILE_BYTES {
         return Err(InlineImageDecodeError::FileTooLarge {
             bytes: bytes.len() as u64,
@@ -802,6 +817,30 @@ fn read_and_decode_local_image(
         });
     }
     decode_local_image_bytes(&bytes)
+}
+
+/// **What a picture file's failed open or read is filed as**: [`InlineImageDecodeError::HeldElsewhere`]
+/// when another program holds the file at this moment ([`bt_effects::file_reads::held_elsewhere`]),
+/// and [`InlineImageDecodeError::Io`] for every other refusal of the disk — each in the operating
+/// system's own words (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE).
+fn read_refused(error: io::Error) -> InlineImageDecodeError {
+    if bt_effects::file_reads::held_elsewhere(&error) {
+        InlineImageDecodeError::HeldElsewhere(error.to_string())
+    } else {
+        InlineImageDecodeError::Io(error.to_string())
+    }
+}
+
+/// **[`read_refused`] for the window's ground**: [`BackgroundImageError::HeldElsewhere`] when
+/// another program holds the file at this moment, [`BackgroundImageError::Io`] for every other
+/// refusal of the disk (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES). The same one reading of "held"
+/// ([`bt_effects::file_reads::held_elsewhere`]), into the type the settings row speaks from.
+fn background_read_refused(error: io::Error) -> BackgroundImageError {
+    if bt_effects::file_reads::held_elsewhere(&error) {
+        BackgroundImageError::HeldElsewhere(error.to_string())
+    } else {
+        BackgroundImageError::Io(error.to_string())
+    }
 }
 
 fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
@@ -1072,6 +1111,13 @@ pub enum BackgroundImageError {
     /// decodes.
     InvalidPath,
     Io(String),
+    /// **Another program holds the file at this moment**
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): its open or its read was refused because another
+    /// handle does not share it ([`bt_effects::file_reads::held_elsewhere`]), in the operating
+    /// system's own words. An answer about the moment and not about the file, which is why it is
+    /// not [`Self::Io`]: the window asks once more before it says anything (`bt_app`'s
+    /// `background_answer`), and says it in [`Self::Io`]'s words when the second read is held too.
+    HeldElsewhere(String),
     /// The file is bigger than [`MAX_BACKGROUND_IMAGE_BYTES`]. Both numbers are
     /// carried so the sentence can name the limit it applied — an error that
     /// says only "too large" leaves the reader with no way to tell a 70 MB file
@@ -1092,7 +1138,9 @@ impl fmt::Display for BackgroundImageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPath => formatter.write_str("not a picture file this window can open"),
-            Self::Io(error) => write!(formatter, "could not be read: {error}"),
+            Self::Io(error) | Self::HeldElsewhere(error) => {
+                write!(formatter, "could not be read: {error}")
+            }
             Self::TooLarge { bytes, limit } => write!(
                 formatter,
                 "is {} and a background picture may be up to {}",
@@ -1190,10 +1238,8 @@ pub fn decode_background_image(
         return Err(BackgroundImageError::InvalidPath);
     }
     let mut file = bt_effects::file_reads::open(bt_effects::file_reads::Lane::InlineImage, path)
-        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
+        .map_err(background_read_refused)?;
+    let metadata = file.metadata().map_err(background_read_refused)?;
     if !metadata.is_file() {
         return Err(BackgroundImageError::InvalidPath);
     }
@@ -1207,7 +1253,7 @@ pub fn decode_background_image(
     file.by_ref()
         .take(MAX_BACKGROUND_IMAGE_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| BackgroundImageError::Io(error.to_string()))?;
+        .map_err(background_read_refused)?;
     if bytes.len() as u64 > MAX_BACKGROUND_IMAGE_BYTES {
         return Err(BackgroundImageError::TooLarge {
             bytes: bytes.len() as u64,
@@ -2764,7 +2810,7 @@ mod tests {
     /// continuation byte and the byte after `.png` was another one.
     #[test]
     fn path_candidates_open_after_any_non_token_character_and_close_at_any_closing_delimiter() {
-        let preview = rooted("Developer/folio-terminal/layout-preview.png");
+        let preview = rooted("Developer/lunar-workshop/layout-preview.png");
         for (open, close) in [
             ("（", "）"),
             ("见图（", "）"),
@@ -2798,7 +2844,7 @@ mod tests {
         for rejected in [
             // A root that continues a token is a suffix of that token, never a path. The `/` case
             // is load-bearing: it is what keeps a `file://` URI out of the native scan.
-            rooted_uri("Developer/folio-terminal/layout-preview.png"),
+            rooted_uri("Developer/lunar-workshop/layout-preview.png"),
             format!("见{nested}"),
             format!("v1.{nested}"),
             format!("x-{nested}"),
@@ -2827,8 +2873,8 @@ mod tests {
     fn file_uris_resolve_to_local_image_paths_under_the_same_admission_gates() {
         for (uri, expected) in [
             (
-                rooted_uri("Developer/folio-terminal/layout-preview.png"),
-                rooted("Developer/folio-terminal/layout-preview.png"),
+                rooted_uri("Developer/lunar-workshop/layout-preview.png"),
+                rooted("Developer/lunar-workshop/layout-preview.png"),
             ),
             (rooted_uri("x%20y.png"), rooted("x y.png")),
             (rooted_uri("%E5%9B%BE%E7%89%87.PNG"), rooted("图片.PNG")),
@@ -3004,8 +3050,8 @@ mod tests {
     fn working_directory_uris_decode_without_the_image_extension_gate() {
         for (uri, expected) in [
             (
-                rooted_uri("Developer/folio-terminal"),
-                rooted("Developer/folio-terminal"),
+                rooted_uri("Developer/lunar-workshop"),
+                rooted("Developer/lunar-workshop"),
             ),
             // A trailing slash is how a URI names a directory, not an empty final segment.
             (rooted_uri("Developer/"), rooted("Developer")),
@@ -3094,11 +3140,11 @@ mod tests {
     #[test]
     fn a_working_directory_may_be_spelled_the_way_a_windows_shell_can_spell_it() {
         for (uri, expected) in [
-            // `$e]7;file:///$P$e\` at `D:\Developer\folio-terminal`, measured off a real
+            // `$e]7;file:///$P$e\` at `D:\Developer\lunar-workshop`, measured off a real
             // pseudoconsole rather than composed here.
             (
-                r"file:///D:\Developer\folio-terminal",
-                r"D:\Developer\folio-terminal",
+                r"file:///D:\Developer\lunar-workshop",
+                r"D:\Developer\lunar-workshop",
             ),
             // …and in a directory whose name has a space, which `PROMPT` cannot encode.
             (r"file:///C:\Program Files", r"C:\Program Files"),
@@ -3107,8 +3153,8 @@ mod tests {
             (r"file:///C:\", r"C:\"),
             // Mixed, because nothing forbids it and a path is a path.
             (
-                r"file:///D:\Developer/folio-terminal",
-                r"D:\Developer\folio-terminal",
+                r"file:///D:\Developer/lunar-workshop",
+                r"D:\Developer\lunar-workshop",
             ),
         ] {
             assert_eq!(
@@ -3142,8 +3188,8 @@ mod tests {
         for (uri, expected) in [
             ("file:///home/alice/src", "/home/alice/src"),
             (
-                "file:///mnt/d/Developer/folio-terminal",
-                "/mnt/d/Developer/folio-terminal",
+                "file:///mnt/d/Developer/lunar-workshop",
+                "/mnt/d/Developer/lunar-workshop",
             ),
             // The trailing-slash and percent-decoding rules are the decoder's, not the drive's.
             ("file:///mnt/d/Developer/", "/mnt/d/Developer"),
@@ -4549,6 +4595,91 @@ mod tests {
         assert!(free, "and nothing holds its file when it comes back");
     }
 
+    /// RED on Windows (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) — **a picture file another
+    /// program holds is `HeldElsewhere`, not a refusal of the disk, and the same file decodes once the
+    /// holder lets go.** The holder is this test's own handle, opened sharing nothing, so the
+    /// decoder's open meets the sharing violation a program holding the file exclusively gives;
+    /// a file that is not there stays `Io`.
+    ///
+    /// MUTATION: have `read_refused` answer `Io` for every error — the held read is filed as a
+    /// refusal again; the first assertion goes red. Or let the decoder's memo remember a `HeldElsewhere` —
+    /// the unchanged file's next ask answers the remembered `HeldElsewhere` without reading; the second
+    /// assertion goes red.
+    #[cfg(windows)]
+    #[test]
+    fn a_picture_another_program_holds_is_held_and_decodes_once_it_is_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = bt_testpath::temp_path("betterterminal-inline-held");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("被占用 held.png");
+        std::fs::write(&path, png_of(3, 2, [0, 255, 0, 255])).unwrap();
+        let mut decoder = InlineImageDecoder::default();
+        let mut ask = |path: &Path| {
+            decoder.decode_in_lane(
+                InlineImageTask {
+                    occurrence_id: 0,
+                    source: InlineImageSource::LocalPath(path.to_owned()),
+                },
+                bt_effects::file_reads::Lane::Peek,
+            )
+        };
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let held = ask(&path);
+        drop(holder);
+        let let_go = ask(&path);
+        let missing = ask(&directory.join("不在 missing.png"));
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            matches!(held, Err(InlineImageDecodeError::HeldElsewhere(_))),
+            "a file held by another handle is held: {held:?}"
+        );
+        assert!(let_go.is_ok(), "and decodes once let go: {let_go:?}");
+        assert!(
+            matches!(missing, Err(InlineImageDecodeError::Io(_))),
+            "a file that is not there stays a refusal: {missing:?}"
+        );
+    }
+
+    /// RED — **a background picture another program holds is held, not unreadable**
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): the ground's own open meets the sharing violation
+    /// a program holding the file exclusively gives, and answers `HeldElsewhere`; once the holder
+    /// lets go the same file decodes; a file that is not there stays `Io`.
+    ///
+    /// MUTATION: have `background_read_refused` answer `Io` for every error — the held read is filed
+    /// as the disk's refusal again; the first assertion goes red.
+    #[cfg(windows)]
+    #[test]
+    fn a_background_picture_another_program_holds_is_held_and_decodes_once_it_is_let_go() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = bt_testpath::temp_path("betterterminal-background-held");
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("被占用 ground.png");
+        std::fs::write(&path, png_of(3, 2, [0, 0, 255, 255])).unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let held = decode_background_image(&path, (64, 64));
+        drop(holder);
+        let let_go = decode_background_image(&path, (64, 64));
+        let missing = decode_background_image(&directory.join("不在 missing.png"), (64, 64));
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            matches!(held, Err(BackgroundImageError::HeldElsewhere(_))),
+            "a ground held by another handle is held: {held:?}"
+        );
+        assert!(let_go.is_ok(), "and decodes once let go: {let_go:?}");
+        assert!(
+            matches!(missing, Err(BackgroundImageError::Io(_))),
+            "a file that is not there stays a refusal: {missing:?}"
+        );
+    }
+
     /// PIN — **the resample target is the largest monitor, one scale on both
     /// axes, and never an upscale.**
     #[test]
@@ -4595,6 +4726,7 @@ mod tests {
         for error in [
             BackgroundImageError::InvalidPath,
             BackgroundImageError::Io("access is denied".to_owned()),
+            BackgroundImageError::HeldElsewhere("being used by another process".to_owned()),
             BackgroundImageError::TooLarge {
                 bytes: 200 * 1024 * 1024,
                 limit: MAX_BACKGROUND_IMAGE_BYTES,

@@ -18,17 +18,17 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bt_platform::admission::{WaitToken, doors};
 use bt_render::{
-    CellMetrics, ChromeIcon, ChromeLabel, ChromeLabelWeight, ChromeQuad, ChromeTextAdvances,
-    DeviceFreeMeasure, FrameSource, FrameTrigger, GlyphCensus, ImeCursorArea, MathBandFace,
-    MathBandTrace, MathHit, MathToolBoxes, OverlayGroup, OverlayLayer, PeekImageOverlay,
-    PresentConfiguration, PresentOutcome, PresentPhase, PresentReceipt, PresentationGeometry,
-    PreviewBody, PreviewImage, PreviewParagraph, PreviewRun, PreviewRunBox, PreviewTextFrame,
-    PreviewTextRow, RenderError, RendererPresentState, SeatFrame, SeatViewport, TableBlockKey,
-    TableBlockPaint, VideoLayer, WebHole,
+    BodyKey, BodyState, BodyUse, CellMetrics, ChromeIcon, ChromeLabel, ChromeLabelWeight,
+    ChromeQuad, ChromeTextAdvances, DeviceFreeMeasure, FrameSource, FrameTrigger, GlyphCensus,
+    ImeCursorArea, MathBandFace, MathBandTrace, MathHit, MathToolBoxes, OverlayGroup, OverlayLayer,
+    PeekImageOverlay, PresentConfiguration, PresentOutcome, PresentPhase, PresentReceipt,
+    PresentationGeometry, PreviewBody, PreviewImage, PreviewParagraph, PreviewRun, PreviewRunBox,
+    PreviewTextFrame, PreviewTextRow, RenderError, RendererPresentState, SeatFrame, SeatViewport,
+    TableBlockKey, TableBlockPaint, VideoLayer, WebHole,
 };
 use bt_viewport::{MathBlockAnchor, ViewportFrame};
 use winit::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
@@ -67,6 +67,11 @@ pub(crate) enum WindowEffect {
     ImeArea([i32; 4]),
     /// macOS's Option key told to send Alt, or not.
     OptionAsAlt(bool),
+    /// The program's own icon worn at a scale (`WindowHost::wear_the_app_icon`).
+    AppIcon(f64),
+    /// The system's box said over the window (`WindowHost::say_in_a_box`), with its text — kept
+    /// here, and raised nowhere.
+    SaidInABox(String),
     /// The window's input-method facts read (`WindowHost::ime_facts`).
     ImeFactsRead,
     /// A line the window's runtime said in `diagnostics.log` (`WindowHost::note`), as it would
@@ -105,12 +110,21 @@ pub(crate) enum WindowEffect {
     RestartRegistered { flags: u32 },
     /// That registration taken back (`Backend::withdraw_restart`).
     RestartWithdrawn,
+    /// The system asked to end the program before the processes at the default shutdown level,
+    /// at this level (`Backend::ask_to_be_ended_first`, plan row 191).
+    ShutdownLevelAsked { level: u32 },
     /// A page's place in the window asked for, for the web engine (`WindowHost::page_address`).
     PageAddressed(bt_platform::PageVisual),
     /// A hand-off to the system: a file opened, a path revealed, an address handed over.
     HandedOff(bt_platform::Handoff),
-    /// A frame presented: how many seats it carried and what asked for it.
-    Presented { seats: usize, source: FrameSource },
+    /// A frame presented: how many seats it carried, what asked for it, and whether its body —
+    /// the clear, the ground and every pane — was drawn or the kept one put back (row 64a),
+    /// decided by the renderer's own [`BodyKey`].
+    Presented {
+        seats: usize,
+        source: FrameSource,
+        body: BodyUse,
+    },
     /// The surface resized to a physical width and height.
     Resized(u32, u32),
     /// The window moved to another display scale.
@@ -314,6 +328,13 @@ impl Backend for Headless {
         event_loop.ledger.record(WindowEffect::RestartWithdrawn);
         Ok(())
     }
+
+    fn ask_to_be_ended_first(event_loop: &HeadlessLoop, level: u32) -> Result<(), String> {
+        event_loop
+            .ledger
+            .record(WindowEffect::ShutdownLevelAsked { level });
+        Ok(())
+    }
 }
 
 /// **A window with no window**: an id, a size, a scale and a ledger.
@@ -347,6 +368,8 @@ pub(crate) struct HeadlessWindow {
 /// driven too; a test that wants the refusal scripts it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PlatformAnswers {
+    /// `WindowHost::is_visible`, winit's own reading: `Some(true)`.
+    pub(crate) visible: Option<bool>,
     /// `WindowHost::is_minimized`, winit's own reading: `Some(false)`.
     pub(crate) minimized: Option<bool>,
     /// `WindowHost::is_iconic`: `false`.
@@ -363,17 +386,23 @@ pub(crate) struct PlatformAnswers {
     pub(crate) glass: crate::GlassHere,
     /// `WindowHost::pointer_in_window`: `None`.
     pub(crate) pointer: Option<(i32, i32)>,
+    /// `WindowHost::mouse_button_down`, for every button: `true` — the hand still holds
+    /// whatever it pressed, so a test that latches a gesture keeps it until it says otherwise.
+    pub(crate) buttons_down: bool,
     /// `WindowHost::holds_the_foreground`, for every holder: `false`.
     pub(crate) holds_the_foreground: bool,
     /// `WindowHost::take_foreground`: `true`, the system lets it.
     pub(crate) takes_the_foreground: bool,
     /// `WindowHost::present_facts`: every fact unread.
     pub(crate) present_facts: bt_platform::NativePresentFacts,
+    /// `WindowHost::high_contrast`: `None`, no contrast theme on.
+    pub(crate) high_contrast: Option<bt_render::SystemContrast>,
 }
 
 impl Default for PlatformAnswers {
     fn default() -> Self {
         Self {
+            visible: Some(true),
             minimized: Some(false),
             iconic: false,
             cloaked: false,
@@ -382,9 +411,11 @@ impl Default for PlatformAnswers {
             work_area: None,
             glass: crate::GlassHere::Unknown,
             pointer: None,
+            buttons_down: true,
             holds_the_foreground: false,
             takes_the_foreground: true,
             present_facts: bt_platform::NativePresentFacts::default(),
+            high_contrast: None,
         }
     }
 }
@@ -502,7 +533,7 @@ impl WindowHost for HeadlessWindow {
         self.scale
     }
     fn is_visible(&self) -> Option<bool> {
-        Some(true)
+        self.answers.get().visible
     }
     fn is_maximized(&self) -> bool {
         false
@@ -572,11 +603,21 @@ impl WindowHost for HeadlessWindow {
     fn pointer_in_window(&self) -> Option<(i32, i32)> {
         self.answers.get().pointer
     }
+    fn mouse_button_down(
+        &self,
+        _button: bt_platform::PointerButton,
+        _latched: bt_platform::ContactMark,
+    ) -> bool {
+        self.answers.get().buttons_down
+    }
     fn present_facts(&self) -> bt_platform::NativePresentFacts {
         self.answers.get().present_facts
     }
     fn holds_the_foreground(&self, _holder: bt_platform::hotkey::Foreground) -> bool {
         self.answers.get().holds_the_foreground
+    }
+    fn high_contrast(&self) -> Option<bt_render::SystemContrast> {
+        self.answers.get().high_contrast
     }
     fn set_backdrop(&self, acrylic: bool) -> Result<(), String> {
         self.ledger.record(WindowEffect::Backdrop(acrylic));
@@ -629,6 +670,7 @@ impl WindowHost for HeadlessWindow {
         &self,
         _hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         _reason: Box<dyn Fn() -> String>,
+        _ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         self.ledger.record(WindowEffect::SessionEndWatched);
         None
@@ -662,12 +704,26 @@ impl WindowHost for HeadlessWindow {
         self.ledger
             .record(WindowEffect::OptionAsAlt(option_sends_alt));
     }
+    fn wear_the_app_icon(&self, scale_factor: f64) {
+        self.ledger.record(WindowEffect::AppIcon(scale_factor));
+    }
+    fn say_in_a_box(&self, seen: bt_platform::SeenBox, text: &str) {
+        let _ = seen;
+        self.ledger
+            .record(WindowEffect::SaidInABox(text.to_owned()));
+    }
     fn clipboard(
         &self,
         lane: &crate::clipboard_lane::ClipboardLane,
         ask: crate::clipboard_lane::Ask,
     ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined> {
-        lane.submit(Arc::new(self.clipboard.clone()), ask)
+        lane.submit(self.clipboard_door(), ask)
+    }
+    fn clipboard_door(&self) -> Arc<dyn crate::clipboard_lane::ClipboardDoor> {
+        Arc::new(self.clipboard.clone())
+    }
+    fn staging_folder(&self) -> PathBuf {
+        self.clipboard.staged_here()
     }
     fn hand_off(
         &self,
@@ -704,6 +760,26 @@ pub(crate) struct HeadlessClipboard(Arc<ClipboardScript>);
 #[derive(Default)]
 pub(crate) struct ClipboardScript {
     held: Mutex<Option<String>>,
+    /// **What a terminal paste reads instead of the text**, when a test put it there (plan row
+    /// 81): files, a picture, a promise or a refusal, as the platform's read would answer.
+    payload: Mutex<Option<bt_platform::ClipboardPayload>>,
+    /// Each promised entry's bytes, in the descriptor's order, or the result code its render
+    /// fails with — what the source behind a promise hands over when asked.
+    promised: Mutex<Vec<Result<Vec<u8>, u32>>>,
+    /// The source behind the promise panics when its first entry is asked for.
+    promise_panics: Mutex<bool>,
+    /// The source behind the promise stands in [`Self::stall`] when its first entry is asked for,
+    /// and the door's stall bound is this (review N14).
+    promise_stalls: Mutex<Option<Duration>>,
+    /// Where a stalling source stands, until the test lets it go.
+    stall: crate::lane::Hold,
+    /// How many renders of the promise have returned, whatever they answered.
+    renders_ended: Mutex<usize>,
+    /// The clipboard's own count of its changes: one more for every copy onto it.
+    sequence: Mutex<u64>,
+    /// The folder this window's pictures and promises are staged in, under the test's own
+    /// temporary name — never the machine's staging folder.
+    staging: OnceLock<PathBuf>,
     written: Mutex<Vec<String>>,
     refused_opens: Mutex<usize>,
     hold: crate::lane::Hold,
@@ -717,6 +793,51 @@ impl HeadlessClipboard {
     /// The clipboard now holds `text`, as if another program had copied it.
     pub(crate) fn holds(&self, text: &str) {
         *locked(&self.0.held) = Some(text.to_owned());
+        *locked(&self.0.payload) = None;
+        *locked(&self.0.sequence) += 1;
+    }
+
+    /// The clipboard now holds what a terminal paste reads as `payload` (plan row 81), as if
+    /// another program had copied it; the sequence it is read at is answered.
+    pub(crate) fn holds_payload(&self, payload: bt_platform::ClipboardPayload) -> u64 {
+        *locked(&self.0.payload) = Some(payload);
+        let mut sequence = locked(&self.0.sequence);
+        *sequence += 1;
+        *sequence
+    }
+
+    /// What the source behind a promise hands over for each entry, in order: its bytes, or the
+    /// result code its render fails with.
+    pub(crate) fn promise_renders(&self, contents: Vec<Result<Vec<u8>, u32>>) {
+        *locked(&self.0.promised) = contents;
+    }
+
+    /// The source behind the promise panics inside its render, as a source's code may.
+    pub(crate) fn promise_render_panics(&self) {
+        *locked(&self.0.promise_panics) = true;
+    }
+
+    /// **The source behind the promise stalls** — it hands nothing over, standing in the hold this
+    /// answers until the test releases it — and the door gives a render up after `bound` without
+    /// a step, as the product's does after `clipboard_picture::STALL_BOUND`.
+    pub(crate) fn promise_render_stalls(&self, bound: Duration) -> &crate::lane::Hold {
+        *locked(&self.0.promise_stalls) = Some(bound);
+        self.0.stall.hold();
+        &self.0.stall
+    }
+
+    /// How many renders of the promise have returned — a render its watcher gave up included.
+    pub(crate) fn promise_renders_ended(&self) -> usize {
+        *locked(&self.0.renders_ended)
+    }
+
+    /// The folder this clipboard's pastes are staged in — made on first asking, under a name of
+    /// the test's own.
+    pub(crate) fn staged_here(&self) -> PathBuf {
+        self.0
+            .staging
+            .get_or_init(|| bt_testpath::temp_path("folio-headless-clipboard-staging"))
+            .clone()
     }
 
     /// Everything written to it since the last time this was asked, in order.
@@ -763,15 +884,108 @@ impl crate::clipboard_lane::ClipboardDoor for HeadlessClipboard {
                 .clone()
                 .map(Reply::Text)
                 .ok_or_else(|| "the headless clipboard holds no text".to_owned()),
-            Ask::Payload => locked(&self.0.held)
-                .clone()
-                .map(|text| Reply::Payload(bt_platform::ClipboardPayload::Text(text)))
-                .ok_or_else(|| "the headless clipboard holds nothing".to_owned()),
+            Ask::Payload => {
+                let sequence = Some(bt_platform::ClipboardSequence(*locked(&self.0.sequence)));
+                if let Some(payload) = locked(&self.0.payload).clone() {
+                    return Ok(Reply::Payload { sequence, payload });
+                }
+                locked(&self.0.held)
+                    .clone()
+                    .map(|text| Reply::Payload {
+                        sequence,
+                        payload: bt_platform::ClipboardPayload::Text(text),
+                    })
+                    .ok_or_else(|| "the headless clipboard holds nothing".to_owned())
+            }
             Ask::Write(text) => {
                 *locked(&self.0.held) = Some(text.clone());
+                *locked(&self.0.payload) = None;
+                *locked(&self.0.sequence) += 1;
                 locked(&self.0.written).push(text.clone());
                 Ok(Reply::Written)
             }
+        }
+    }
+
+    /// **The promise rendered from the script**: the descriptor is what the clipboard holds now
+    /// (none when it no longer holds a promise), and each entry's bytes are what
+    /// [`HeadlessClipboard::promise_renders`] scripted — through the platform's own renderer, so the
+    /// judging, the caps and the clean-up are the product's.
+    fn render_promised_files(
+        &self,
+        worker: &bt_platform::admission::WorkerCtx,
+        offer: &[bt_platform::PromisedEntry],
+        into: &Path,
+        progress: &bt_platform::clipboard_promise::RenderProgress,
+    ) -> Result<
+        bt_platform::clipboard_promise::RenderedPromise,
+        bt_platform::clipboard_promise::PromiseRefused,
+    > {
+        let descriptor = match locked(&self.0.payload).as_ref() {
+            Some(bt_platform::ClipboardPayload::Promise(promise)) => promise.entries.clone(),
+            _ => Vec::new(),
+        };
+        let mut source = ScriptedPromise {
+            descriptor,
+            contents: locked(&self.0.promised).clone(),
+            panics: *locked(&self.0.promise_panics),
+            stalls: locked(&self.0.promise_stalls)
+                .is_some()
+                .then(|| Arc::clone(&self.0)),
+        };
+        let rendered = bt_platform::clipboard_promise::render_promise(
+            worker,
+            &mut source,
+            offer,
+            into,
+            bt_platform::clipboard_promise::PASTE_LIMITS,
+            progress,
+        );
+        *locked(&self.0.renders_ended) += 1;
+        rendered
+    }
+
+    /// The product's bound, or the one a stalling script set.
+    fn stall_bound(&self) -> Duration {
+        locked(&self.0.promise_stalls).unwrap_or(crate::clipboard_picture::STALL_BOUND)
+    }
+}
+
+/// The source behind a headless clipboard's promise: its descriptor and each entry's script.
+struct ScriptedPromise {
+    descriptor: Vec<bt_platform::PromisedEntry>,
+    contents: Vec<Result<Vec<u8>, u32>>,
+    panics: bool,
+    /// The script whose hold a stalling source stands in.
+    stalls: Option<Arc<ClipboardScript>>,
+}
+
+impl bt_platform::clipboard_promise::PromisedContents for ScriptedPromise {
+    fn descriptor(
+        &mut self,
+        _worker: &bt_platform::admission::WorkerCtx,
+    ) -> Result<Vec<bt_platform::PromisedEntry>, bt_platform::clipboard_promise::PromiseRefused>
+    {
+        Ok(self.descriptor.clone())
+    }
+    fn write_contents(
+        &mut self,
+        _worker: &bt_platform::admission::WorkerCtx,
+        index: usize,
+        file: &mut bt_platform::clipboard_promise::PromisedFile<'_>,
+    ) -> Result<(), bt_platform::clipboard_promise::PromiseRefused> {
+        assert!(!self.panics, "the scripted source panics inside its render");
+        if let Some(script) = &self.stalls {
+            script.stall.pass();
+        }
+        match self.contents.get(index) {
+            Some(Ok(bytes)) => file.write(bytes),
+            Some(Err(code)) => Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
+                Some(*code),
+            )),
+            None => Err(bt_platform::clipboard_promise::PromiseRefused::NotRendered(
+                None,
+            )),
         }
     }
 }
@@ -838,6 +1052,9 @@ pub(crate) struct HeadlessGlass {
     retained_revision: u64,
     font_revision: u64,
     perf_frame: u64,
+    /// What the kept body was drawn from — the renderer's own key, built by the renderer's own
+    /// function from this glass's mirror of the same inputs (row 64a).
+    body: Option<BodyKey>,
     video_layers: Vec<VideoLayer>,
     /// What the last frame was handed, read back by a test.
     pub(crate) preview_bodies: Vec<PreviewBody>,
@@ -872,6 +1089,7 @@ impl HeadlessGlass {
             retained_revision: 0,
             font_revision: 0,
             perf_frame: 0,
+            body: None,
             video_layers: Vec::new(),
             preview_bodies: Vec::new(),
             preview_images: Vec::new(),
@@ -1113,16 +1331,38 @@ impl Glass for HeadlessGlass {
     fn present_frame_with_phases(
         &mut self,
         token: WaitToken<'_, doors::PresentFrame>,
-        _gpu: &mut HeadlessDevice,
+        gpu: &mut HeadlessDevice,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
         _phase: impl FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
         let _ = token;
         self.perf_frame += 1;
+        let state = BodyState {
+            size: self.size,
+            font_revision: self.font_revision,
+            font_environment_epoch: gpu.font_environment_epoch,
+            theme_revision: bt_render::theme_revision(),
+            cursor_style: bt_render::current_cursor_style(),
+            cursor_blink_visible: self.cursor_blink_visible,
+            window_focused: self.window_focused,
+            base_metrics: self.base_metrics,
+            ground_alpha: bt_render::window_ground().alpha.to_bits(),
+        };
+        let body = if self
+            .body
+            .as_ref()
+            .is_some_and(|key| key.matches(&state, seats))
+        {
+            BodyUse::Reused
+        } else {
+            self.body = Some(BodyKey::of(state, seats));
+            BodyUse::Composed
+        };
         self.ledger.record(WindowEffect::Presented {
             seats: seats.len(),
             source: trigger.source,
+            body,
         });
         let now = Instant::now();
         Ok(PresentOutcome::Presented(PresentReceipt {
@@ -1575,6 +1815,14 @@ impl HeadlessFolio {
         folio
     }
 
+    /// **This window as a machine's first launch**: no settings file found, so the first-run card
+    /// is due, for a test of the card. Every other headless window is a later launch
+    /// (`StorageAskers::on`).
+    pub(crate) fn at_a_first_launch(mut self) -> Self {
+        self.app.settings_store.launch_found_the_file(false);
+        self
+    }
+
     /// One expose frame composed and handed to the glass, as a window's first paint is.
     pub(crate) fn draw(&mut self) {
         let mut runtime = self.runtime();
@@ -1616,6 +1864,33 @@ impl HeadlessFolio {
             .expect("a headless release is answered");
     }
 
+    /// **The window's double-click counters count every press from here on at one held
+    /// moment** ([`crate::PressClock::Held`], T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING): two
+    /// presses in one place are a double click however long the machine takes between them,
+    /// until [`Self::pointer_clock_runs`] moves the moment on.
+    pub(crate) fn hold_the_pointer_clock(&mut self) {
+        self.window.pointer_clock = crate::PressClock::Held(Instant::now());
+    }
+
+    /// **The held pointer clock moves on by `span`**, as the wall clock would have between
+    /// two presses — past [`crate::MULTI_CLICK_INTERVAL`], the next press is a first one.
+    pub(crate) fn pointer_clock_runs(&mut self, span: Duration) {
+        let crate::PressClock::Held(at) = self.window.pointer_clock else {
+            panic!("the test holds the pointer clock before it moves it");
+        };
+        self.window.pointer_clock = crate::PressClock::Held(at + span);
+    }
+
+    /// **Every paste press of the window's is stamped and settled at one held moment from here
+    /// on** ([`crate::PressClock::Held`] on its `paste_clock`,
+    /// T-CLIPBOARD-PASTE-PAST-DESK-BUSY-NOTICE-FLAKE): a paste owed since an earlier press is
+    /// never past [`crate::clipboard_lane::PASTE_DEADLINE`] at a later one, however long the
+    /// machine takes between them. A test that means the deadline passes its own clock to
+    /// `Runtime::settle_clipboard`.
+    pub(crate) fn hold_the_paste_clock(&mut self) {
+        self.window.paste_clock = crate::PressClock::Held(Instant::now());
+    }
+
     /// The facade over the two layers, as every event's handler gets it.
     pub(crate) fn runtime(&mut self) -> crate::Runtime<'_, Headless> {
         crate::Runtime {
@@ -1626,8 +1901,12 @@ impl HeadlessFolio {
 
     /// **Every clipboard request the window has made, answered and spent** (T-CLIPBOARD-LANE):
     /// the clipboard lane's worker serves them on its own thread, so the test waits, within the
-    /// lane suite's patience, until the window's turn — which takes each answer as the loop's wake
-    /// would bring it — finds nothing owed.
+    /// lane suite's patience, until the application's drain of the lane's wake
+    /// (`FolioApp::answer_clipboard`, for this one window: the earliest request still owed read
+    /// once, the window's answers below it taken and answered in order, then the window settled)
+    /// finds nothing owed. It runs that pass's steps for its one window rather than calling it
+    /// because a `HeadlessFolio` holds its window outside a `FolioApp`; the pass itself, and its
+    /// merge across windows, are driven through [`HeadlessApplication`].
     ///
     /// The turn's clock is held at the moment the owed paste was asked, so the paste's deadline
     /// never falls inside the wait: a test that means the deadline passes its own clock to
@@ -1643,6 +1922,12 @@ impl HeadlessFolio {
                 .map(|owed| owed.asked_at)
                 .min()
                 .unwrap_or_else(Instant::now);
+            let owed = runtime.app.clipboard_lane.drain_mark();
+            for (id, answered) in runtime.take_clipboard_answers(&owed) {
+                runtime
+                    .answer_clipboard_request(id, answered)
+                    .expect("the clipboard's answer is answered");
+            }
             runtime
                 .settle_clipboard(now)
                 .expect("the clipboard's answers are spent");
@@ -1684,6 +1969,7 @@ impl HeadlessApplication {
             ))),
             crate::profiles::settle_registry(),
             crate::explorer_menu::settle_package(),
+            crate::settings::settle_notices(),
         );
         application.app = Some(app);
         application.windows.insert(id, window);
@@ -1708,10 +1994,110 @@ impl HeadlessApplication {
     }
 }
 
+/// **The askers of `app`'s storage drain that are not on its session store's lane**, by name:
+/// none, in an application whose storage is laid out as the product's is — the session store's
+/// lane, and the other five askers on it (`App::storage_answers` reads its one mark from that
+/// lane's ledger and hands it to all of them).
+pub(crate) fn askers_off_the_storage_lane(app: &App<Headless>) -> Vec<&'static str> {
+    let lane = app.session_store.lane();
+    [
+        ("settings", app.settings_store.lane()),
+        ("keybindings", app.keybindings_store.lane()),
+        ("profiles", app.profiles_store.lane()),
+        ("pins", app.pins_store.lane()),
+        ("preview", app.preview_saves.lane()),
+    ]
+    .into_iter()
+    .filter(|(_, other)| !lane.is(other))
+    .map(|(asker, _)| asker)
+    .collect()
+}
+
+/// **The five storage askers an application holds besides its session store**, built on `lane`
+/// over the documents of `folder` — as the product builds them on `session_store.lane()` in its
+/// one data folder, the shortcut table read from the keybindings store as a launch reads it.
+struct StorageAskers {
+    settings_store: crate::persist::SettingsStore,
+    keybindings_store: crate::persist::KeybindingsStore,
+    shortcuts: crate::shortcuts::Shortcuts,
+    profiles_store: crate::persist::ProfilesStore,
+    pins_store: crate::pins::PinsStore,
+    preview_saves: crate::preview::PreviewSaves,
+}
+
+impl StorageAskers {
+    fn on(folder: &Path, lane: &crate::persist::StorageLane) -> Self {
+        // In the product's order (`Runtime::create`): settings, profiles, pins, then the
+        // keybindings and the shortcut table read from them, then the preview saves.
+        let mut settings_store = crate::persist::SettingsStore::at_on(
+            folder.join(crate::persist::SETTINGS_FILE_NAME),
+            lane.clone(),
+        );
+        // **A headless window is a later launch, not a machine's first** (0.4.10 plan row 73's
+        // macOS gate): its settings file counts as found, so the first-run card is never due and
+        // no test is at the mercy of the turn the card would come up on. That turn moves whenever
+        // the card's waits change (row 73 dropped the agent folders' one turn), and on a Mac, whose
+        // profile table offers no agent row for the card to wait on, it fell inside a test's own
+        // passes, where the card's modal took the keyboard or the press. A test of the card asks
+        // for a first launch (`HeadlessFolio::at_a_first_launch`).
+        settings_store.launch_found_the_file(true);
+        let profiles_store = crate::persist::ProfilesStore::at_on(
+            folder.join(crate::persist::PROFILES_FILE_NAME),
+            lane.clone(),
+        );
+        let pins_store =
+            crate::pins::PinsStore::at_on(folder.join(crate::pins::PINS_FILE_NAME), lane.clone());
+        let mut keybindings_store = crate::persist::KeybindingsStore::at_on(
+            folder.join(crate::persist::KEYBINDINGS_FILE_NAME),
+            lane.clone(),
+        );
+        let (shortcuts, _) = crate::settings_bundle::shortcuts_at_start(
+            &mut keybindings_store,
+            bt_platform::host_platform(),
+        );
+        Self {
+            settings_store,
+            keybindings_store,
+            shortcuts,
+            profiles_store,
+            pins_store,
+            preview_saves: crate::preview::PreviewSaves::on(lane.clone()),
+        }
+    }
+}
+
+impl App<Headless> {
+    /// **This application's storage, on `session_store`'s lane**: the store in, and the five
+    /// other askers built again on its lane over the documents of its folder — the product's
+    /// layout (one lane, its six askers; `App::storage_answers` reads its one mark from that
+    /// lane's ledger), for a harness that serves the lane itself (a scripted lane, a worker held
+    /// at a gate, a lane that refuses). The one door a test puts a session store in by.
+    pub(crate) fn storage_on(&mut self, session_store: crate::persist::SessionStore) {
+        let StorageAskers {
+            settings_store,
+            keybindings_store,
+            shortcuts,
+            profiles_store,
+            pins_store,
+            preview_saves,
+        } = StorageAskers::on(session_store.folder(), &session_store.lane());
+        self.settings_store = settings_store;
+        self.keybindings_store = keybindings_store;
+        self.shortcuts = shortcuts;
+        self.profiles_store = profiles_store;
+        self.pins_store = pins_store;
+        self.preview_saves = preview_saves;
+        self.session_store = session_store;
+    }
+}
+
 /// **A headless application**: every field at the value a launch with nothing on disk gives it,
-/// its stores at `root`, its workers started and waking `proxy` — but its storage lane, which no
-/// worker serves and none can start: every job handed to it is refused at the door (a preview
-/// save says "not saved"), and nothing a test does reaches a disk through it.
+/// its stores at `root`, its workers started and waking `proxy`. Its storage is the product's:
+/// one storage lane with a worker of its own, the session store's, woken as the product's wakes
+/// the loop (`AppEvent::DocumentsAnswered`), and the other five askers on it
+/// ([`StorageAskers::on`]). What its documents' stores write lands in `root`, the test's scratch
+/// folder; a test that needs the lane served otherwise puts a session store in through
+/// [`App::storage_on`].
 pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -> App<Headless> {
     use crate::*;
     let wake = |event: fn() -> AppEvent| {
@@ -1720,14 +2106,19 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
             let _ = proxy.send_event(event());
         }
     };
-    let lane = persist::StorageLane::without_a_worker(wake(|| AppEvent::DocumentsAnswered));
-    let session_store =
-        persist::SessionStore::at(root.join("session.json"), root.join("session.lock"));
-    let settings_store = persist::SettingsStore::at_on(root.join("settings.json"), lane.clone());
-    let mut keybindings_store =
-        persist::KeybindingsStore::at_on(root.join("keybindings.json"), lane.clone());
-    let (shortcuts, _) =
-        settings_bundle::shortcuts_at_start(&mut keybindings_store, bt_platform::host_platform());
+    let session_store = persist::SessionStore::at_waking(
+        root.join("session.json"),
+        root.join("session.lock"),
+        wake(|| AppEvent::DocumentsAnswered),
+    );
+    let StorageAskers {
+        settings_store,
+        keybindings_store,
+        shortcuts,
+        profiles_store,
+        pins_store,
+        preview_saves,
+    } = StorageAskers::on(root, &session_store.lane());
     let git_mutations = git_mutation_lane::GitMutationLane::new(
         git_mutation_lane::RepoTurns::new(),
         wake(|| AppEvent::GitReady),
@@ -1742,10 +2133,13 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         clipboard_lane: clipboard_lane::ClipboardLane::spawn(wake(|| AppEvent::ClipboardAnswered)),
         layout_tables: layout_tables::LayoutTables::spawn(proxy.clone(), Vec::new())
             .expect("the layout tables start"),
-        math_worker: Arc::new(computation_lane::ComputationLane::new(wake(|| {
-            AppEvent::MathReady
-        }))),
-        preview_saves: preview::PreviewSaves::on(lane.clone()),
+        // The product's lane, its formula engine the suite's: the faces Folio ships, no scan of
+        // the machine's fonts (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN).
+        math_worker: Arc::new(computation_lane::ComputationLane::making_engines_with(
+            computation_lane::fixtures::engine_without_the_machine,
+            wake(|| AppEvent::MathReady),
+        )),
+        preview_saves,
         git_mutations,
         foreground_program_worker: foreground_program::Worker::spawn(wake(|| AppEvent::MathReady))
             .expect("the foreground worker starts"),
@@ -1778,9 +2172,9 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         keybindings_fault: None,
         cli_refusals: Vec::new(),
         cli_preview: None,
-        profiles_store: persist::ProfilesStore::at_on(root.join("profiles.json"), lane.clone()),
+        profiles_store,
         profiles_fault: None,
-        pins_store: pins::PinsStore::at_on(root.join("pins.json"), lane),
+        pins_store,
         pins_fault: None,
         settings_fault: None,
         session_fault: None,
@@ -1877,10 +2271,11 @@ pub(crate) enum StartupStep {
     HandOver,
     /// Windows PowerShell's language-mode question started.
     LanguageQuestion,
-    /// The startup's `$PROFILE` observation started.
-    StartupMigration,
     /// Folio's own script's preparation started.
     ScriptPreparation,
+    /// The carry pass begun (0.4.10 plan row 68a), which observes and carries the `$PROFILE`s
+    /// since row 68c.
+    CarryPass,
     /// The first window opened, through the backend's door.
     WindowOpened,
     /// The parser questions about the PowerShell rows put to the probe.
@@ -1934,13 +2329,13 @@ pub(crate) fn start(argv: &str, walk: Vec<Vec<String>>) -> HeadlessStart {
                 step(StartupStep::LanguageQuestion);
                 crate::shell_integration::LanguageAsked::stand_in()
             },
-            migration: || {
-                step(StartupStep::StartupMigration);
-                crate::shell_integration::Migrated::stand_in()
-            },
             script: || {
                 step(StartupStep::ScriptPreparation);
                 crate::shell_integration::ScriptPrepared::stand_in()
+            },
+            carry: || {
+                step(StartupStep::CarryPass);
+                crate::carry_pass::CarryBegun::stand_in()
             },
             // Handed the request the run carries, as `Runtime::create` is handed the parsed one.
             window: |answers: &mut Vec<String>| {
@@ -1970,6 +2365,29 @@ mod tests {
     use super::*;
     use bt_platform::admission::admitted;
     use winit::window::CursorIcon;
+
+    /// RED (T-HEADLESS-HARNESS-ONE-STORAGE-LANE, plan row 123) — **a headless application's
+    /// storage askers are on its session store's lane**, as the product's six are
+    /// (`SessionStore::open`, and the settings, keybindings, profiles and pins stores and the
+    /// preview saves built on its `lane()`): the drain reads its one mark from that lane's
+    /// ledger and asks every asker under it, so an asker on another lane is asked under a mark
+    /// that is not its ledger's.
+    ///
+    /// Red on the base (`9ac40b223`): the session store had a working lane of its own and the
+    /// other five shared a lane no worker served — all five named.
+    #[test]
+    fn a_headless_applications_storage_askers_are_on_its_session_stores_lane() {
+        let folio = HeadlessFolio::with_tabs(
+            "one-storage-lane",
+            vec![crate::test_support::ringing_tab(1, 1)],
+            0,
+        );
+        assert_eq!(
+            askers_off_the_storage_lane(&folio.app),
+            Vec::<&str>::new(),
+            "every asker is on the session store's lane"
+        );
+    }
 
     /// RED — **the headless runtime records what the window would do**: every door of the
     /// window seam, knocked on once, leaves exactly one typed effect carrying its arguments, in
@@ -2001,6 +2419,7 @@ mod tests {
             PhysicalSize::new(3, 18).into(),
         );
         window.set_option_as_alt(true);
+        window.wear_the_app_icon(1.25);
         window.note("诊断 a line, said as it is written");
         // The window's questions to the system answer the documented stand-ins, and record
         // nothing; its instructions record what they were told.
@@ -2038,7 +2457,11 @@ mod tests {
         assert!(window.watch_system_settings(Box::new(|_| {})).is_none());
         assert!(
             window
-                .watch_session_end(Box::new(|_| {}), Box::new(String::new))
+                .watch_session_end(
+                    Box::new(|_| {}),
+                    Box::new(String::new),
+                    std::rc::Rc::new(|| {})
+                )
                 .is_none()
         );
         let uia = window
@@ -2059,7 +2482,7 @@ mod tests {
             .expect("the lane admits the write");
         let mut ended = None;
         crate::lane::wait_until("the headless clipboard's write", || {
-            ended = write.take();
+            ended = write.take(&crate::lane::Mark::unmarked_for_a_test());
             ended.is_some()
         });
         assert_eq!(
@@ -2190,6 +2613,7 @@ mod tests {
                 WindowEffect::Cursor(Cursor::Icon(CursorIcon::Text)),
                 WindowEffect::ImeArea([10, 20, 3, 18]),
                 WindowEffect::OptionAsAlt(true),
+                WindowEffect::AppIcon(1.25),
                 WindowEffect::Noted("诊断 a line, said as it is written".to_owned()),
                 WindowEffect::StoodAt(bt_platform::WindowRect {
                     left: 10,
@@ -2215,6 +2639,7 @@ mod tests {
                 WindowEffect::Presented {
                     seats: 0,
                     source: FrameSource::Expose,
+                    body: BodyUse::Composed,
                 },
                 WindowEffect::Resized(800, 600),
                 WindowEffect::Rescaled(2.0),

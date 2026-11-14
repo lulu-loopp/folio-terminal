@@ -148,6 +148,11 @@ pub(crate) trait Backend: Sized + 'static {
     /// **Take that back** — `bt_platform::session_end::withdraw_restart`: the process is
     /// handing itself over to an update's applier.
     fn withdraw_restart(event_loop: &Self::Loop) -> Result<(), String>;
+
+    /// **Ask the system to end this process before the processes at the default shutdown level**
+    /// (plan row 191) — `bt_platform::session_end::ask_to_be_ended_first`, once per process, by
+    /// the launch's first window (`FolioApp::ask_to_be_ended_before_the_shells`).
+    fn ask_to_be_ended_first(event_loop: &Self::Loop, level: u32) -> Result<(), String>;
 }
 
 /// **The product's backend**: winit's window, `bt-render`'s renderer over the shared device,
@@ -192,6 +197,10 @@ impl Backend for Native {
 
     fn withdraw_restart(_event_loop: &ActiveEventLoop) -> Result<(), String> {
         bt_platform::session_end::withdraw_restart()
+    }
+
+    fn ask_to_be_ended_first(_event_loop: &ActiveEventLoop, level: u32) -> Result<(), String> {
+        bt_platform::session_end::ask_to_be_ended_first(level)
     }
 }
 
@@ -264,12 +273,26 @@ pub(crate) trait WindowHost {
     /// Where the pointer is now, in this window's physical pixels —
     /// `bt_platform::pointer_position_in_window`; `None` where the platform will not say.
     fn pointer_in_window(&self) -> Option<(i32, i32)>;
+    /// **Whether a hand may still be holding `button`** — `bt_platform::mouse_button_down`:
+    /// `false` only when it is up and no release of it can still be on its way, counting only the
+    /// touch contacts that were down at the gesture's `latched` mark.
+    fn mouse_button_down(
+        &self,
+        button: bt_platform::PointerButton,
+        latched: bt_platform::ContactMark,
+    ) -> bool;
     /// The platform's present facts about this window, for a diagnostic line —
     /// `bt_platform::native_present_facts`; every field unread where there is no handle.
     fn present_facts(&self) -> bt_platform::NativePresentFacts;
     /// **Whether a remembered foreground holder is this window** —
     /// `bt_platform::hotkey::Foreground::is_window`; `false` without a handle.
     fn holds_the_foreground(&self, holder: bt_platform::hotkey::Foreground) -> bool;
+    /// **The Windows contrast theme in force** (T-HIGH-CONTRAST) —
+    /// [`crate::runtime::read_high_contrast`], one `SystemParametersInfoW` and, while a theme is
+    /// on, five `GetSysColor`; `None` with none on, and on every other platform. A fact of the
+    /// machine rather than of this window, asked through the window that heard the notice
+    /// announcing it, as the window's other questions to the system are.
+    fn high_contrast(&self) -> Option<bt_render::SystemContrast>;
     /// The system's own blur behind the window's ground — `bt_platform::set_system_backdrop`.
     fn set_backdrop(&self, acrylic: bool) -> Result<(), String>;
     /// Whether the window stays above other windows — `bt_platform::set_window_topmost`.
@@ -302,11 +325,13 @@ pub(crate) trait WindowHost {
         wake: Box<dyn Fn(bt_platform::SystemNews)>,
     ) -> Option<bt_platform::SystemSettingsWatch>;
     /// **The system's question when the session ends, heard by this window** —
-    /// `bt_platform::session_end::SessionEndWatch::install`; `None` where it cannot be.
+    /// `bt_platform::session_end::SessionEndWatch::install`; `None` where it cannot be. `ending`
+    /// is what the answer to `WM_ENDSESSION(TRUE)` waits for (plan row 201).
     fn watch_session_end(
         &self,
         hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         reason: Box<dyn Fn() -> String>,
+        ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch>;
     /// **What this window tells UI Automation**, through [`UiaDoor`].
     type Uia: UiaDoor;
@@ -337,6 +362,16 @@ pub(crate) trait WindowHost {
     fn note(&self, line: &str);
     /// macOS's Option key as Alt, or as the composing key the keyboard prints with.
     fn set_option_as_alt(&self, option_sends_alt: bool);
+    /// **The program's own icon, worn by this window at `scale_factor`** (0.4.10 plan row 71) —
+    /// [`crate::wear_app_icon`]: the executable's icon group, at the shell's small and big sizes
+    /// for that scale, as the window's own icon on Windows; nothing anywhere else.
+    fn wear_the_app_icon(&self, scale_factor: f64);
+    /// **The system's box, raised over this window** (0.4.10 plan row 72) — `seen`'s box, owned
+    /// by this window, saying `text` under the program's name: a stop's last word while its
+    /// windows still stand. The owned box has no taskbar button or Alt+Tab entry of its own, and
+    /// this window answers no input while it is up, as the window thread inside the box's loop
+    /// would not either way.
+    fn say_in_a_box(&self, seen: bt_platform::SeenBox, text: &str);
     /// The window's scale and rectangle as the platform reports them, beside winit's.
     fn dpi_snapshot(&self) -> anyhow::Result<crate::DpiSnapshot>;
     /// **One clipboard request, put on the clipboard lane for this window** — served through this
@@ -347,6 +382,13 @@ pub(crate) trait WindowHost {
         lane: &crate::clipboard_lane::ClipboardLane,
         ask: crate::clipboard_lane::Ask,
     ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined>;
+    /// **This window's clipboard door itself** (plan row 81): what a promise the clipboard
+    /// offered is rendered through, on the `clipboard-promise` worker — the door
+    /// [`Self::clipboard`]'s requests are served through.
+    fn clipboard_door(&self) -> Arc<dyn crate::clipboard_lane::ClipboardDoor>;
+    /// **The folder a pasted picture or promise is staged in** (plan row 81): the machine's
+    /// (`clipboard_picture::directory`), or a test's own, so no test sweeps the machine's.
+    fn staging_folder(&self) -> std::path::PathBuf;
     /// **One hand-off to the system, put on the OS hand-off lane** for this window — or why the
     /// window could not be named to the lane's door.
     fn hand_off(
@@ -452,6 +494,13 @@ impl WindowHost for Arc<Window> {
             .ok()
             .and_then(crate::runtime::pointer_in_native_window)
     }
+    fn mouse_button_down(
+        &self,
+        button: bt_platform::PointerButton,
+        latched: bt_platform::ContactMark,
+    ) -> bool {
+        bt_platform::mouse_button_down(button, latched)
+    }
     fn present_facts(&self) -> bt_platform::NativePresentFacts {
         crate::native_window_of(self)
             .ok()
@@ -460,6 +509,9 @@ impl WindowHost for Arc<Window> {
     }
     fn holds_the_foreground(&self, holder: bt_platform::hotkey::Foreground) -> bool {
         crate::native_window_of(self).is_ok_and(|native| holder.is_window(native))
+    }
+    fn high_contrast(&self) -> Option<bt_render::SystemContrast> {
+        crate::runtime::read_high_contrast()
     }
     fn set_backdrop(&self, acrylic: bool) -> Result<(), String> {
         bt_platform::set_system_backdrop(native_or_say(self)?, acrylic)
@@ -507,9 +559,10 @@ impl WindowHost for Arc<Window> {
         &self,
         hear: Box<dyn Fn(bt_platform::session_end::SessionEnd)>,
         reason: Box<dyn Fn() -> String>,
+        ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         let native = crate::native_window_of(self).ok()?;
-        bt_platform::session_end::SessionEndWatch::install(native, hear, reason).ok()
+        bt_platform::session_end::SessionEndWatch::install(native, hear, reason, ending).ok()
     }
     type Uia = bt_platform::uia::UiaHook;
     fn answer_ui_automation(
@@ -537,6 +590,12 @@ impl WindowHost for Arc<Window> {
     fn set_option_as_alt(&self, option_sends_alt: bool) {
         crate::option_as_alt(self, option_sends_alt);
     }
+    fn wear_the_app_icon(&self, scale_factor: f64) {
+        crate::wear_app_icon(self, scale_factor);
+    }
+    fn say_in_a_box(&self, seen: bt_platform::SeenBox, text: &str) {
+        seen.say(crate::native_window_of(self).ok(), crate::APP_NAME, text);
+    }
     fn dpi_snapshot(&self) -> anyhow::Result<crate::DpiSnapshot> {
         native_dpi_snapshot(self)
     }
@@ -545,7 +604,13 @@ impl WindowHost for Arc<Window> {
         lane: &crate::clipboard_lane::ClipboardLane,
         ask: crate::clipboard_lane::Ask,
     ) -> Result<crate::clipboard_lane::ClipboardRequest, crate::clipboard_lane::Declined> {
-        lane.submit(Arc::new(crate::clipboard_lane::PlatformClipboard), ask)
+        lane.submit(self.clipboard_door(), ask)
+    }
+    fn clipboard_door(&self) -> Arc<dyn crate::clipboard_lane::ClipboardDoor> {
+        Arc::new(crate::clipboard_lane::PlatformClipboard)
+    }
+    fn staging_folder(&self) -> std::path::PathBuf {
+        crate::clipboard_picture::directory()
     }
     fn hand_off(
         &self,

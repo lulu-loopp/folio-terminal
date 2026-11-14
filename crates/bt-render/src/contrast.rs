@@ -204,20 +204,85 @@ fn ratio_of_luminances(one: f64, other: f64) -> f64 {
 pub fn set_minimum_contrast(floor: MinimumContrast) -> bool {
     let moved = process_floor().swap(floor.bits(), Ordering::AcqRel) != floor.bits();
     if moved {
+        settle_floor_in_force();
         crate::theme::bump_theme_revision();
     }
     moved
 }
 
 /// Read the process-wide contrast floor from one atomic load.
+///
+/// The reader's own floor, the one `settings.json` names. What the grid is held to
+/// is [`floor_in_force`], which a contrast theme can raise above it.
 #[must_use]
 pub fn current_minimum_contrast() -> MinimumContrast {
     MinimumContrast::from_bits(process_floor().load(Ordering::Acquire))
 }
 
+/// **The floor a Windows contrast theme holds the grid to: WCAG 2 SC 1.4.3's 4.5:1 for
+/// body text** (owner ruling 2026-10-28, row 90 ③; `docs/DESIGN.md` §7.1.6, entry of the
+/// same date).
+///
+/// The theme replaces the scheme's background and foreground but not its sixteen ANSI
+/// colours, and a scheme's dark-canvas blue on Night sky's black is the very pair this
+/// module exists to repair. So while a theme is on the floor is the higher of the reader's
+/// own and this one; it is never written to `settings.json`, and when the theme goes off the
+/// reader's own is the floor again.
+pub(crate) const HIGH_CONTRAST_MINIMUM_CONTRAST: MinimumContrast = MinimumContrast::Ratio45;
+
+/// Raise the floor to [`HIGH_CONTRAST_MINIMUM_CONTRAST`] while a contrast theme is on, or
+/// lower it back to the reader's own. Called by [`crate::set_high_contrast`] alone, which
+/// advances the revision itself.
+pub(crate) fn set_high_contrast_floor(on: bool) {
+    let raised = if on {
+        HIGH_CONTRAST_MINIMUM_CONTRAST
+    } else {
+        MinimumContrast::Off
+    };
+    process_high_contrast_floor().store(raised.bits(), Ordering::Release);
+    settle_floor_in_force();
+}
+
+/// **The floor the grid is held to**: the higher of the reader's own and the contrast
+/// theme's, from one atomic load — so the default road stays the load and the branch the
+/// structural pin is about.
+#[must_use]
+pub(crate) fn floor_in_force() -> MinimumContrast {
+    MinimumContrast::from_bits(process_floor_in_force().load(Ordering::Acquire))
+}
+
+/// The higher of two floors. The rungs' bits are in the order of their ratios, `Off` lowest.
+const fn higher_floor(one: MinimumContrast, other: MinimumContrast) -> MinimumContrast {
+    if one.bits() >= other.bits() {
+        one
+    } else {
+        other
+    }
+}
+
+/// Write the floor in force from its two sources. Both writers run on the window thread,
+/// so the two loads here see each other's last store.
+fn settle_floor_in_force() {
+    let floor = higher_floor(
+        current_minimum_contrast(),
+        MinimumContrast::from_bits(process_high_contrast_floor().load(Ordering::Acquire)),
+    );
+    process_floor_in_force().store(floor.bits(), Ordering::Release);
+}
+
 fn process_floor() -> &'static AtomicU8 {
     static FLOOR: AtomicU8 = AtomicU8::new(0);
     &FLOOR
+}
+
+fn process_high_contrast_floor() -> &'static AtomicU8 {
+    static HIGH_CONTRAST_FLOOR: AtomicU8 = AtomicU8::new(0);
+    &HIGH_CONTRAST_FLOOR
+}
+
+fn process_floor_in_force() -> &'static AtomicU8 {
+    static FLOOR_IN_FORCE: AtomicU8 = AtomicU8::new(0);
+    &FLOOR_IN_FORCE
 }
 
 /// Held by every test that reads or writes the process floor — including the structural pin in
@@ -238,6 +303,8 @@ pub(crate) static FLOOR_UNDER_TEST: std::sync::Mutex<()> = std::sync::Mutex::new
 #[cfg(test)]
 pub(crate) struct FloorGuard {
     restore: MinimumContrast,
+    /// The contrast theme's raise as the test found it, put back with the reader's floor.
+    restore_high_contrast: u8,
     _held: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -249,6 +316,7 @@ impl FloorGuard {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self {
             restore: current_minimum_contrast(),
+            restore_high_contrast: process_high_contrast_floor().load(Ordering::Acquire),
             _held: held,
         }
     }
@@ -261,7 +329,9 @@ impl FloorGuard {
 #[cfg(test)]
 impl Drop for FloorGuard {
     fn drop(&mut self) {
+        process_high_contrast_floor().store(self.restore_high_contrast, Ordering::Release);
         set_minimum_contrast(self.restore);
+        settle_floor_in_force();
     }
 }
 
@@ -277,7 +347,7 @@ impl Drop for FloorGuard {
 /// other pair.
 #[must_use]
 pub fn raise_to_floor(foreground: [u8; 3], background: [u8; 3]) -> [u8; 3] {
-    let Some(floor) = current_minimum_contrast().ratio() else {
+    let Some(floor) = floor_in_force().ratio() else {
         // The default's whole cost, and the structural pin's whole content: one acquire load
         // and a branch, before a single channel has been read.
         return foreground;
@@ -869,6 +939,60 @@ mod tests {
                 assert_eq!(raise_to_floor(ink, ground), ink);
             }
         }
+    }
+
+    /// RED (T-HIGH-CONTRAST; DESIGN §7.1.6, entry 2026-10-28) — **a Windows contrast theme
+    /// holds the grid to 4.5:1 while it is on, above a lower floor of the reader's and never in
+    /// place of a higher one, and its going off leaves the reader's own floor in force.**
+    ///
+    /// Solarized Dark's colour 0 is its own paper (1.00:1); under a contrast theme that cell
+    /// is raised to WCAG 2 SC 1.4.3's 4.5:1 with the `Minimum contrast` row at Off, and the row
+    /// still reads Off. A reader who asked for 2:1 gets 4.5:1 while the theme is on and 2:1
+    /// again after it.
+    ///
+    /// MUTATION (observed red): have `raise_to_floor` read `current_minimum_contrast` again —
+    /// the theme's floor never reaches a cell; or drop `settle_floor_in_force` from
+    /// `set_high_contrast_floor` — the floor stays at 4.5:1 after the theme goes off.
+    #[test]
+    fn a_contrast_theme_raises_the_floor_to_four_and_a_half_and_off_returns_the_readers_own() {
+        let floor = FloorGuard::take();
+        floor.set(MinimumContrast::Off);
+        set_high_contrast_floor(true);
+        assert_eq!(floor_in_force(), MinimumContrast::Ratio45);
+        assert_eq!(
+            current_minimum_contrast(),
+            MinimumContrast::Off,
+            "the reader's own floor is not written"
+        );
+        let raised = raise_to_floor(SOLARIZED_BLACK, SOLARIZED_GROUND);
+        assert!(contrast_ratio(raised, SOLARIZED_GROUND) >= 4.5);
+
+        floor.set(MinimumContrast::Ratio2);
+        assert_eq!(
+            floor_in_force(),
+            MinimumContrast::Ratio45,
+            "the higher of the two"
+        );
+        set_high_contrast_floor(false);
+        assert_eq!(
+            floor_in_force(),
+            MinimumContrast::Ratio2,
+            "the reader's own again"
+        );
+        let ratio = contrast_ratio(
+            raise_to_floor(SOLARIZED_BLACK, SOLARIZED_GROUND),
+            SOLARIZED_GROUND,
+        );
+        assert!(
+            (2.0..4.5).contains(&ratio),
+            "held to 2:1 and no further: {ratio:.2}"
+        );
+
+        floor.set(MinimumContrast::Off);
+        assert_eq!(
+            raise_to_floor(SOLARIZED_BLACK, SOLARIZED_GROUND),
+            SOLARIZED_BLACK
+        );
     }
 
     /// The bound that lets [`raise_against`] be total, checked rather than asserted in prose.

@@ -999,6 +999,7 @@ mod tests {
 
     /// A bundle-shaped install path for the Homebrew record tests. The record
     /// reads paths and attributes only; it does not inspect the executable.
+    #[cfg(target_os = "macos")]
     fn homebrew_bundle(tag: &str) -> (PathBuf, PathBuf) {
         let root = bt_testpath::temp_path(&format!("folio-install-channel-homebrew-{tag}"));
         let _ = std::fs::remove_dir_all(&root);
@@ -1009,6 +1010,7 @@ mod tests {
         (root, exe)
     }
 
+    #[cfg(target_os = "macos")]
     fn remove_attribute(bundle: &Path, name: &str) {
         crate::update_prepare_macos::tests::fixture::run(
             "/usr/bin/xattr",
@@ -1030,11 +1032,9 @@ mod tests {
     ///
     /// MUTATION: in `derive_fact_with_caskrooms`, do not replace the bare
     /// bundle's channel when the default-prefix record succeeds — it is Ours.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_default_prefix_record_without_attributes_is_homebrew() {
-        if bt_platform::host_platform() != HostPlatform::MacOs {
-            return;
-        }
         let (root, exe) = homebrew_bundle("default");
         let bundle = install_root(&exe, HostPlatform::MacOs).unwrap();
         let prefix = root.join("prefix");
@@ -1087,11 +1087,9 @@ mod tests {
     ///
     /// MUTATION: in `recorded_target`, accept a link without comparing its
     /// canonical target — the first fact becomes Homebrew-managed.
+    #[cfg(target_os = "macos")]
     #[test]
     fn another_apps_record_and_no_default_record_leave_the_copy_row() {
-        if bt_platform::host_platform() != HostPlatform::MacOs {
-            return;
-        }
         let (root, exe) = homebrew_bundle("not-recorded");
         let other = root.join("Other/Folio.app");
         std::fs::create_dir_all(&other).unwrap();

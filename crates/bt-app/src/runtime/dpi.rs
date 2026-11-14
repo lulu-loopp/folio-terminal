@@ -2,15 +2,17 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use super::pointer::Ending;
+use crate::TerminalPane;
 use crate::pane_cell_metrics;
 use crate::runtime::floats::files_float_content_height;
 use crate::runtime::terminal::apply_leaf_metrics;
+use crate::runtime::terminal::write_pty_input;
 use crate::window_seam::prelude::*;
 use crate::{
     ResizeReanchor, Runtime, TabState, TextScale, card_trace, dpi_snapshot, earliest_deadline,
     ensure_metrics_match_authoritative_scale, ensure_swapchain_matches_inner, float, focus_thumb,
     hang_watch, log_dpi_snapshot, presentation_physical_size, psreadline_resize_repaint_input,
-    release_due_leaf_resize, scale_factors_match, seats, trace_surface_size_clamp, write_pty_input,
+    scale_factors_match, seats, trace_surface_size_clamp,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -171,7 +173,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// `resize_finish_deadline` already reads every leaf a few lines below in `about_to_wait`.
     ///
     /// A tab with no shell has no pending ConPTY resize to release, because nothing ever
-    /// scheduled one: the queue this drains is a `LeafSession` field, and there is no leaf
+    /// scheduled one: the queue this drains is a `ShellSession` field, and there is no leaf
     /// (§7.1.6h). Answering `None` is answering "nothing is owed and nothing has to be woken
     /// for", which is exactly true.
     pub(in crate::runtime) fn flush_pending_pty_resize(
@@ -215,7 +217,7 @@ impl<B: Backend> Runtime<'_, B> {
         let window = u64::from(self.window.window.id());
         for (index, tab) in self.window.tabs.iter_mut().enumerate() {
             let tab_id = tab.id;
-            for (seat, leaf) in tab.sessions.iter_mut() {
+            for (seat, TerminalPane { session: leaf, .. }) in tab.sessions.iter_mut() {
                 // The deferred local reflow lands inside this, immediately before the child hears
                 // the same size, in the same order every other resize path uses (actor first,
                 // then ConPTY, then the vendor reconcile). When nothing was deferred the actor
@@ -232,7 +234,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // only place it can be read, because the release is what moves it
                 // (`BT_CARD_TRACE`).
                 let grid_before = leaf.grid;
-                let (commit, leaf_wake) = release_due_leaf_resize(leaf, now, hand_on_the_geometry)?;
+                let (commit, leaf_wake) = leaf.release_due_size(now, hand_on_the_geometry)?;
                 wake_deadline = earliest_deadline([wake_deadline, leaf_wake]);
                 let Some(commit) = commit else {
                     continue;
@@ -641,6 +643,10 @@ impl<B: Backend> Runtime<'_, B> {
         // frame it is drawn — and this one is not: it is physical pixels, kept
         // from the display the list was last scrolled on.
         self.restate_panel_scroll(measured_at, scale_factor);
+        // **And the program's icon, at the scale the window is now drawn at** (0.4.10 plan row
+        // 71): the window was born wearing it at the old one, and the snap layouts, Alt+Tab and
+        // Task View draw it at this display's size.
+        self.window.window.wear_the_app_icon(scale_factor);
         // Every shell in every tab: a DPI change is a fact about the display, so
         // no screen anywhere in the window is exempt from it.
         //
@@ -747,7 +753,7 @@ pub(crate) fn apply_tabs_leaf_metrics(
     mut derive: impl FnMut(TextScale) -> Result<bt_render::CellMetrics>,
 ) -> Result<()> {
     for tab in tabs {
-        for (_, leaf) in tab.leaves_mut() {
+        for (_, leaf) in tab.panes_mut() {
             let metrics = derive(leaf.view.text_scale)?;
             apply_leaf_metrics(leaf, metrics);
         }

@@ -306,7 +306,7 @@ fn ctrl_a_selects_the_whole_draft() {
 #[test]
 fn only_a_page_with_a_file_behind_it_is_handed_over_to_a_browser() {
     for name in [
-        r"D:\Developer\folio-terminal\design\ui-mockup.html",
+        r"D:\Developer\lunar-workshop\design\ui-mockup.html",
         r"C:\Users\me\TIMELINE.HTM",
         r"D:\中文\页.html",
         r"D:\reports\report.pdf",
@@ -326,8 +326,8 @@ fn only_a_page_with_a_file_behind_it_is_handed_over_to_a_browser() {
     // that is not a local file has nothing to hand anybody.
     for (url, path) in [
         (
-            "file:///D:/Developer/folio-terminal/design/ui-mockup.html",
-            r"D:\Developer\folio-terminal\design\ui-mockup.html",
+            "file:///D:/Developer/lunar-workshop/design/ui-mockup.html",
+            r"D:\Developer\lunar-workshop\design\ui-mockup.html",
         ),
         (
             "file:///C:/Program%20Files/report.htm",

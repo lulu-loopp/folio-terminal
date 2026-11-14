@@ -893,6 +893,16 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # persistent domain, which is the supported way to read another domain of
     # the same user — and `NSValue` for the `NSNumber` that preference arrives
     # as.
+    # 0.4.10 plan row 17: why AppKit asked to quit — `+[NSAppleEventManager
+    # sharedAppleEventManager]`, its `currentAppleEvent` and the reason
+    # descriptor's `typeCodeValue` (`src/macos_app.rs`, `the_quit_events_reason`).
+    # **Not a package**: `NSAppleEventDescriptor` turns on `objc2-foundation`'s
+    # `bitflags` edge, which `Cargo.lock` already lists; `NSAppleEventManager`
+    # turns on nothing. The one selector between them,
+    # `attributeDescriptorForKeyword:`, is typed only behind
+    # `objc2-core-services`, a package, and is sent by name instead.
+    "NSAppleEventDescriptor",
+    "NSAppleEventManager",
     "std",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
@@ -1105,6 +1115,10 @@ windows = { version = "0.62.2", features = [
     # including when Folio itself exits (T-PROBE-CHILD).
     "Win32_System_JobObjects",
     "Win32_System_Memory",
+    # Plan row 81: `OleInitialize`, `OleGetClipboard`, `ReleaseStgMedium` and `OleUninitialize`
+    # — the OLE clipboard a promised file's contents are asked of, on a worker of its own
+    # (`windows_clipboard::render_clipboard_promise`). A feature, not a package.
+    "Win32_System_Ole",
     # `CreateNamedPipeW` / `ConnectNamedPipe` / `DisconnectNamedPipe` /
     # `WaitNamedPipeW`: the attention endpoint and the `folio attention` verb's
     # two ends.
@@ -1173,6 +1187,10 @@ windows = { version = "0.62.2", features = [
     # `docs/DESIGN.md` §8's bar.
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
+    # `HIGHCONTRASTW` and `HCF_HIGHCONTRASTON`: whether a Windows contrast theme
+    # is on (`system_high_contrast`, T-HIGH-CONTRAST, DESIGN §7.1.6). A feature,
+    # not a package, for `Win32_UI_Input_Ime`'s reason below.
+    "Win32_UI_Accessibility",
     # `WM_MOUSELEAVE`, which the `windows` crate files with the common controls:
     # the custom frame says it to the application when the pointer comes off the
     # maximize button it answered `HTMAXBUTTON` for (`window_button_passage`,
@@ -1194,6 +1212,11 @@ windows = { version = "0.62.2", features = [
     # the way it does for every other program (`let_the_system_translate_touch`).
     # A feature and not a package, for `Win32_UI_Input_Ime`'s reason above.
     "Win32_UI_Input_Touch",
+    # `GetPointerInfo`: whether a finger or a pen this thread saw go down is
+    # still on the glass, as this thread's own pointer messages last said
+    # (`mouse_button_down`, 0.4.9 plan row 107). A feature and not a package,
+    # for `Win32_UI_Input_Ime`'s reason above.
+    "Win32_UI_Input_Pointer",
     # The UI Automation provider interfaces and `UiaReturnRawElementProvider`: what a window tells
     # the touch keyboard, Narrator and a phone remote about its terminals (`src/uia_windows.rs`,
     # T-UIA-SKELETON). A feature of `windows`, already in the lock file: no new package.

@@ -1527,10 +1527,10 @@ mod tests {
             );
         }
         assert_eq!(
-            from(&[relative(&["..", "bt-wt"]).as_str()])
+            from(&[relative(&["..", "notes"]).as_str()])
                 .expect("a folder crosses")
                 .cwd,
-            Some(host_path(r"D:\Developer\bt-wt")),
+            Some(host_path(r"D:\Developer\notes")),
             "a positional goes through the same door as the flag"
         );
         assert_eq!(

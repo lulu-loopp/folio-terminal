@@ -32,31 +32,40 @@ pub(crate) mod profiles;
 mod quake;
 pub(crate) mod search;
 mod settings;
+mod storage;
 pub(crate) mod tabs;
 pub(crate) use windows::AfterTheWait;
+// The contrast theme's two readers outside this module: the boot's first reading and the
+// preference notice's (T-HIGH-CONTRAST).
+pub(crate) use diagnostics::{read_high_contrast, theme_in_force};
+// The paste refusal's value and its kind, held by the picture mailbox and the prepared paste
+// at the crate root (plan row 81); why a promise was not pasted, answered by the promise's
+// worker (`clipboard_picture::stage_promise`).
+pub(crate) use clipboard::{PasteRefusal, PromiseWhy, RefusedKind};
 #[cfg(test)]
 pub(crate) use windows::{
     answer_an_exit_over, broker_verdict, dirty_gate_names, dwm_dark_mode_owed, focus_leaf_index,
-    lines_phrase, persisted_window_bounds, preview_source_of_recent, raise_dirty_gate_over,
-    recent_term_leaf_seed, recorded_window_placement, seeded_tab, tear_out_rect,
-    window_minimum_changed,
+    ground_under_contrast, lines_phrase, persisted_window_bounds, preview_source_of_recent,
+    raise_dirty_gate_over, recent_term_leaf_seed, recorded_window_placement, seeded_tab,
+    tear_out_rect, window_minimum_changed,
 };
 // K2 (T-SPLIT-2B): the free functions moved out of `main.rs`, named at the crate root again by
 // its `use runtime::{…}` lines so that no caller changes.
 #[cfg(test)]
 pub(crate) use attention::{
     answer_attention_in, merge_notice_card, next_attention_stop, raise_cancelled_quit_card_on,
+    settle_attention,
 };
 #[cfg(test)]
 pub(crate) use clipboard::{
     clear_copied_selection, clipboard_focus_of, glass_allows_a_text_write,
-    input_line_needs_a_space_first, paste_answer_text, paste_body, paste_card_step,
-    paste_offer_is_kept, paste_target_is_live, paste_text, pending_paste_in,
+    input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_body,
+    paste_card_step, paste_offer_is_kept, paste_target_is_live, paste_text, pending_paste_in,
     prepare_clipboard_paste, prepare_dropped_paste, selection_to_copy, stage_paste,
     take_pending_paste, text_field_holding,
 };
 #[cfg(test)]
-pub(crate) use diagnostics::resolved_theme_change;
+pub(crate) use diagnostics::{resolved_theme_change, theme_under_contrast};
 #[cfg(test)]
 pub(crate) use dpi::{
     apply_tabs_leaf_metrics, resize_worth_solving, take_psreadline_resize_reanchor_input,
@@ -77,9 +86,10 @@ pub(crate) use floats::{
 pub(crate) use frame::{
     a_bare_redraw_still_owes_a_present, advance_periodic_deadline, attention_ledger_deadline,
     chrome_over, chrome_tick_reuses_picture, dispatch_decoration_task, dispatch_pending_math_tasks,
-    dispatch_tab_decoration_tasks, earliest_named_deadline, math_worker_stopped_notice,
-    pty_drain_says_nothing_new, pty_frame_is_unchanged, startup_poll_delay,
-    take_math_worker_notice, verified_target_of, window_is_exposed, window_is_hidden,
+    dispatch_tab_decoration_tasks, earliest_named_deadline, mark_leaf_painted,
+    math_worker_stopped_notice, pty_drain_says_nothing_new, pty_frame_is_unchanged, seen_revision,
+    startup_poll_delay, take_math_worker_notice, verified_target_of, window_is_exposed,
+    window_is_hidden,
 };
 #[cfg(test)]
 pub(crate) use git::{
@@ -114,11 +124,11 @@ pub(crate) use palette::recall_flash;
 #[cfg(test)]
 pub(crate) use panes::{
     aim_card_window, animated_pane_viewports, births_due, card_picture_in, clamp_into_body,
-    column_notch, end_leaves_of, frame_row_of_anchor, gate_title_over, host_screen_after,
-    land_successor, landed_source, leaf_resize_plan, pages_that_move_with_their_panes,
-    pane_fade_veil_layers, panel_opacity, popup_owner, rail_change_strands_its_popups,
-    rail_is_searching, rail_overlay_layer, rail_zone_wants_open, restated_scroll, row_arrival_seat,
-    size_authority_for_rectangle, tear_pane_into_tab,
+    column_notch, deliver_held_input, end_leaves_of, frame_row_of_anchor, gate_title_over,
+    host_screen_after, land_shell_birth, land_successor, landed_source, leaf_resize_plan,
+    pages_that_move_with_their_panes, pane_fade_veil_layers, panel_opacity, popup_owner,
+    rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
+    restated_scroll, row_arrival_seat, size_authority_for_rectangle, tear_pane_into_tab,
 };
 #[cfg(test)]
 pub(crate) use peek::{
@@ -135,20 +145,22 @@ pub(crate) use pointer::{
     is_wheel_event, pointer_in_native_window, station_of,
 };
 #[cfg(test)]
+pub(crate) use preview::video_facts_to_file;
+#[cfg(test)]
 pub(crate) use preview::{
     animation_layer_key, animation_refusal_notice, animation_surface_exists, answer_one_picture,
     ask_to_open, build_preview_diff_body, build_preview_markdown_body, build_preview_table_body,
     build_preview_text_body, crumb_segments, crumb_segments_on, deliver_clipboard_picture,
-    documents_held_in, documents_held_mut_in, file_peek_answer, files_a_tab_stands_on,
-    folded_levels, foot_revealed_label, forget_a_picture, forget_standing_answers,
-    image_clamped_pan, image_destination, image_is_pannable, image_meta_sentence, image_pan_key,
-    image_raster_cap, image_zoom_caption, image_zoom_key, image_zoom_notch, image_zoom_settles,
-    image_zoom_toggled, markdown_chip_ground, markdown_empty_page_offset,
-    markdown_prose_paragraphs, markdown_source_cell, markdown_source_offset_at,
-    owe_sharpened_rasters, page_address_hand_off, page_foot_flash, page_foot_lead,
-    page_source_file, peek_awaits, picture_errand, picture_files_of, pictures_awaited_by,
-    pictures_need_handing_over, preview_block_bar_at, preview_block_wheel, preview_caret_row,
-    preview_copies_on_select, preview_document_height, preview_document_key,
+    documents_held_in, documents_held_mut_in, file_peek_answer, file_peek_video_answer,
+    files_a_tab_stands_on, folded_levels, foot_revealed_label, forget_a_picture,
+    forget_standing_answers, image_clamped_pan, image_destination, image_is_pannable,
+    image_meta_sentence, image_pan_key, image_raster_cap, image_zoom_caption, image_zoom_key,
+    image_zoom_notch, image_zoom_settles, image_zoom_toggled, markdown_chip_ground,
+    markdown_empty_page_offset, markdown_prose_paragraphs, markdown_source_cell,
+    markdown_source_offset_at, owe_sharpened_rasters, page_address_hand_off, page_foot_flash,
+    page_foot_lead, page_source_file, peek_awaits, picture_errand, picture_files_of,
+    pictures_awaited_by, pictures_need_handing_over, preview_block_bar_at, preview_block_wheel,
+    preview_caret_row, preview_copies_on_select, preview_document_height, preview_document_key,
     preview_document_max_scroll, preview_edit_bands, preview_image_placement,
     preview_link_activation, preview_link_answers_a_press, preview_opened_label,
     preview_page_browser_hand_off, preview_page_hand_off, preview_press_opens_its_link,
@@ -169,17 +181,17 @@ pub(crate) use profiles::profile_menu_anchor;
 pub(crate) use search::rescan_leaf_for_search;
 #[cfg(test)]
 pub(crate) use tabs::{
-    absorb_tab_into_layout, absorb_tab_into_strip, blank_page_return,
-    exited_tabs_the_loop_may_close, grabbed_offset, new_tab_cwd, new_tab_leaf_seed,
-    pane_can_become_a_tab, pane_strip_landing, row_strip_landing, stepped_tab, tab_close_action,
-    tab_surface, two_tabs_mut,
+    absorb_tab_into_layout, absorb_tab_into_strip, absorb_tab_sessions, blank_page_return,
+    closing_this_pane_closes_the_tab, exited_tabs_the_loop_may_close, grabbed_offset, new_tab_cwd,
+    new_tab_leaf_seed, pane_can_become_a_tab, pane_into_tab, pane_strip_landing, row_strip_landing,
+    stepped_tab, tab_close_action, tab_surface, two_tabs_mut,
 };
 #[cfg(test)]
 pub(crate) use terminal::{
     apply_leaf_metrics, drain_may_take_another_slice, in_drain_feed_turn, local_image_activation,
-    reference_card, reference_run_rect, restart_seed, seat_holds_the_keyboard,
+    output_revision, reference_card, reference_run_rect, restart_seed, seat_holds_the_keyboard,
     should_copy_on_select_release, step_leaf_text_scale, stepped_command_mark,
-    terminal_link_answers_a_press,
+    synchronized_update_committed, terminal_link_answers_a_press, terminal_palette,
 };
 #[cfg(test)]
 pub(crate) use tooltips::{tab_surface_tip_boxes, tooltip_anchor_for};

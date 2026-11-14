@@ -1149,6 +1149,28 @@ pub fn thread_mouse_capture() -> Option<NativeWindow> {
     None
 }
 
+/// **Whether a hand may still be holding a button** — always yes here (0.4.9 plan row 107).
+///
+/// The question is "the button is up and no release of it can still be on its way", and off
+/// Windows nothing answers its second half. On macOS `NSEvent.pressedMouseButtons` is the
+/// hardware's state, which runs ahead of the event stream: winit's quiet point is the run loop's
+/// before-waiting moment, when an event already in the application's port has not been read
+/// yet, so a quick click's own release would be read as lost and its gesture cancelled under
+/// it. AppKit also has no per-thread capture to lose a release to, and a release that never came
+/// is proved stale by the next press of the same button (T-POINTER-CAPTURE R-5 rule 2), which
+/// is the rule a held gesture keeps here.
+#[must_use]
+pub fn mouse_button_down(_button: crate::PointerButton, _latched: crate::ContactMark) -> bool {
+    true
+}
+
+/// **The mark a gesture takes when it latches** — the empty one here: no contact is written down
+/// off Windows ([`crate::ContactMark`]).
+#[must_use]
+pub fn contacts_seen() -> crate::ContactMark {
+    crate::ContactMark::default()
+}
+
 /// **Let the system translate touch into the mouse** — and off Windows there
 /// is nothing to let (N, a harmless no-op; owner ruling 2026-09-21).
 ///
@@ -1264,6 +1286,16 @@ pub fn set_system_backdrop(window: NativeWindow, acrylic: bool) -> Result<(), St
 pub fn system_backdrop_available(window: NativeWindow) -> bool {
     let _ = window;
     false
+}
+
+/// **The contrast theme in force: none, off Windows** (T-HIGH-CONTRAST).
+///
+/// A contrast theme is Windows' own. A Mac's Increase Contrast is an accessibility display
+/// option of another kind, which no reader asks for yet, so this answers `None` and the
+/// renderer's overlay is never set here.
+#[must_use]
+pub fn system_high_contrast() -> Option<crate::HighContrastColours> {
+    None
 }
 
 /// The window's backing colour before the first present. On Windows this is a
@@ -1916,20 +1948,19 @@ pub fn leave_process(code: i32) -> ! {
 /// it is on the main thread and an application exists, and says exactly this
 /// when it is not, because a panic hook runs on whichever thread panicked and a
 /// refused launch runs before there is any application at all. A controlled
-/// stop's lost configuration change (T-QUIT-DOCUMENTS) is not said here: it asks
-/// [`a_box_would_be_seen`] first, which answers no on this arm, and says its
-/// notice on `bt-app`'s queued `stderr` road (T-STOP-NOTICE-BOX-QUERY-MACOS).
+/// stop's lost configuration change (T-QUIT-DOCUMENTS) and a frame-shape stop's
+/// crash alert are not said here: each asks [`a_box_would_be_seen`] first, which
+/// answers no on this arm, and says its text on `bt-app`'s queued `stderr` road
+/// (T-STOP-NOTICE-BOX-QUERY-MACOS, T-FRAME-SHAPE-STOP-BOX-QUERY).
 #[cfg(not(any(windows, target_os = "macos")))]
 #[expect(
     clippy::print_stderr,
     reason = "the last-resort fault report, written where it is said, for its two callers: \
-              bt-app's announce_panic (the panic hook, after the panic road's fence, where a \
-              queued line would leave with the process; and FolioApp::fail's frame-shape stop on \
-              the window thread, where the synchronous write beside the queue is a known limit, \
-              T-STOP-NOTICE-BOX-QUERY-MACOS report D8) and say_at_the_front_door, before the \
-              resident run has a queue; the stop's lost configuration change asks \
-              a_box_would_be_seen first and says the unseen case through stderr_line \
-              (T-STOP-NOTICE-BOX-QUERY-MACOS)"
+              bt-app's announce_panic through its crash box (the panic hook, after the panic road's fence, where a \
+              queued line would leave with the process) and say_at_the_front_door, before the \
+              resident run has a queue; the stop's lost configuration change and the \
+              frame-shape stop's alert ask a_box_would_be_seen first and say the unseen case \
+              through stderr_line (T-STOP-NOTICE-BOX-QUERY-MACOS, T-FRAME-SHAPE-STOP-BOX-QUERY)"
 )]
 pub fn message_box(title: &str, text: &str) {
     eprintln!("{title}");
@@ -1952,7 +1983,7 @@ pub enum SeenBox {}
 #[cfg(not(any(windows, target_os = "macos")))]
 impl SeenBox {
     /// Never runs: there is no `SeenBox` to call it on.
-    pub fn say(self, _title: &str, _text: &str) {
+    pub fn say(self, _over: Option<crate::NativeWindow>, _title: &str, _text: &str) {
         match self {}
     }
 }

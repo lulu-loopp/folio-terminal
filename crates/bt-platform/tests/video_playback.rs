@@ -321,7 +321,7 @@ fn a_video_plays_and_its_clock_runs_on_either_machine() {
 /// both files.
 fn the_still_and_the_playing_picture_are_the_same_colour() {
     for name in ["folio-video-test.mp4", "folio-video-test.mov"] {
-        let still = first_frame(&fixture(name), NATIVE.0, NATIVE.1);
+        let still = first_frame(&fixture(name), NATIVE.0, NATIVE.1).ok();
         let Some(mut engine) = ready_engine(name) else {
             assert!(still.is_none(), "{name}: a still with no engine to play it");
             return;
@@ -640,11 +640,25 @@ fn nothing_that_is_not_a_video_plays() {
         match Engine::open(&path) {
             Ok(mut engine) => {
                 engine.set_muted(true);
+                // The file's own refusal, not the open budget's: an engine
+                // whose thread has not built its player inside `OPEN_BUDGET`
+                // reads `Unresponsive`, which says nothing about this file, so
+                // the wait goes on past it to the refusal the thread publishes
+                // (plan row 152).
                 let deadline = Instant::now() + PATIENCE;
-                while Instant::now() < deadline && engine.state().error.is_none() {
+                while Instant::now() < deadline
+                    && matches!(engine.state().error, None | Some(EngineError::Unresponsive))
+                {
                     pump(Duration::from_millis(10));
                 }
                 let state = engine.state();
+                assert_ne!(
+                    state.error,
+                    Some(EngineError::Unresponsive),
+                    "{}: the engine did not come up within OPEN_BUDGET, and in {PATIENCE:?} \
+                     the file's own refusal was never read",
+                    path.display()
+                );
                 assert!(
                     state.error.is_some(),
                     "{} loaded: {state:?}",

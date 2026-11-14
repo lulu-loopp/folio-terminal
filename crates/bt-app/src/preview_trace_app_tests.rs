@@ -3,183 +3,145 @@
 //! module's own, with their shared fixtures from [`crate::test_support`].
 
 use super::*;
-use crate::test_support::cell_ink;
+use crate::preview_typing::{EditWork, one_character_edit_work};
 
-/// **One rebuild of a whole document, in three clocks** — the harness both
-/// budget tests measure with, so that the two are measuring one thing.
-///
-/// **What is in the clock and what is not.** The parse is real — and since
-/// ticket T7 that is the *mapped* parse, because
-/// [`preview::parse_markdown_ranged`] is [`preview::parse_markdown_mapped`]
-/// with its maps dropped and the window builds the maps on every parse. The
-/// fence highlighting is real (syntect, the half the research expected to
-/// dominate), and the layout arithmetic is real; the *shaper* is the stub
-/// below, for this legacy arithmetic-only probe. So this is the cost of
-/// everything a rebuild re-derives except the proportional shaping.
-///
-/// The three constructions above the clocks are outside all of them, which is
-/// where they belong: a palette and an empty picture map are a test's setup
-/// and not a document's cost.
-fn rebuild_cost(
-    content: &str,
-    cache: &mut MarkdownIntrinsicCache,
-) -> (
-    usize,
-    std::time::Duration,
-    std::time::Duration,
-    std::time::Duration,
-) {
-    let metrics = seats::preview_markdown_metrics(1.0);
-    let palette = bt_render::chrome_palette();
-    let math = DocumentMath::default();
-    let pictures = DocumentPictures::default();
-    let art = PageArt {
-        math: &math,
-        pictures: &pictures,
-        theme: bt_render::Theme::Dark,
-    };
-    let pass = IntrinsicPass {
-        metrics,
-        math: &math,
-        palette: &palette,
-        scale_ppm: scale_ppm(1.0),
-        math_generation: 0,
-    };
-    let mut width_of = |runs: &[bt_render::PreviewRun], _: f32, _: f32| {
-        runs.iter()
-            .map(|run| run.text.chars().count())
-            .sum::<usize>() as f32
-            * 8.0
-    };
-    let mut shaper = |runs: &[bt_render::PreviewRun], width: f32, _: f32, line: f32| {
-        line * (cell_ink(runs) / width.max(1.0)).ceil().max(1.0)
-    };
+/// **One line of a paragraph written in both scripts**, word for word the
+/// second paragraph of [`preview::MIXED_SCRIPT_PAGE`]: markers pressed against
+/// ideographs on both sides, two code spans a line (the scanner's claims), and a
+/// line that ends in a comma, so that lines of it laid one under another stay
+/// one paragraph joined by spaces — twice as many runs in its join as lines.
+const BOTH_SCRIPTS_LINE: &str =
+    "**中文**english and english**中文**, `代码`中文 and 中文`code`, *斜体*汉字,\n";
 
-    let clock = Instant::now();
-    let (blocks, ranges) = preview::parse_markdown_ranged(content);
-    let parse = clock.elapsed();
-    let clock = Instant::now();
-    let intrinsic = measure_markdown_intrinsics(
-        &blocks,
-        MarkdownSourceBytes {
-            content,
-            ranges: &ranges,
-        },
-        pass,
-        cache,
-        &mut width_of,
-    );
-    let intrinsics = clock.elapsed();
-    let clock = Instant::now();
-    let source = MarkdownCaretBlock::Mono(MarkdownSourceBlock {
-        index: 0,
-        range: ranges[0].clone(),
-        text: preview_live::block_source(content, &ranges[0]).to_owned(),
-        lines: preview_edit::display_lines(preview_live::block_source(content, &ranges[0])),
-        font_size: 14.0,
-        line_height: 20.0,
-        advance: 8.0,
-    });
-    let layout = lay_markdown_out(
-        &blocks,
-        &intrinsic,
-        &SourceBlocks::from(source.clone()),
-        1000.0,
-        metrics,
-        art,
-        &mut shaper,
-    );
-    let laid = clock.elapsed();
-    assert_eq!(layout.len(), blocks.len());
-    (blocks.len(), parse, intrinsics, laid)
+/// `one`, `copies` times, each copy its own run of blocks (a blank line after it).
+fn copies_of(one: &str, copies: usize) -> String {
+    let mut page = String::with_capacity((one.len() + 2) * copies);
+    for _ in 0..copies {
+        page.push_str(one);
+        page.push_str("\n\n");
+    }
+    page
 }
 
-/// **A page written in Chinese costs what a page written in English costs**
+/// How many copies of `one` make a page of at least `bytes`.
+fn copies_reaching(one: &str, bytes: usize) -> usize {
+    bytes.div_ceil(one.len() + 2)
+}
+
+/// **Where the keystroke goes in a page**: one character into the first
+/// paragraph that starts at or past the page's middle — inside a block whose
+/// kind one more letter cannot change, as [`one_character_edit_work`] asks.
+fn into_the_first_paragraph_past_the_middle(page: &str) -> usize {
+    let (blocks, ranges, _) = preview::parse_markdown_mapped(page);
+    let index = blocks
+        .iter()
+        .zip(&ranges)
+        .position(|(block, range)| {
+            range.start >= page.len() / 2 && matches!(block, preview::MarkdownBlock::Paragraph(_))
+        })
+        .expect("every fixture has a paragraph past its middle");
+    let start = ranges[index].start;
+    start + page[start..].chars().next().map_or(0, char::len_utf8)
+}
+
+/// **Twice the text, twice the work**: both walks' counts of the keystroke
+/// over the doubled text against the same counts over the text, for `what`.
+///
+/// A walk whose work is linear in the text doubles, and one that searches its
+/// runs takes a logarithm more (a little over twice at these sizes); one that walks
+/// from the start for every piece quadruples. Three times is the line between
+/// the two, and no machine's speed is in it. Work of `a·n + b·n²` grows to
+/// `2 + 2s` times itself, `s` the quadratic share of the count at the smaller
+/// size, so three catches a quadratic term once it is about half the count at
+/// 64 KiB: the claim is a shape, and a walk that grows as the square comes to
+/// dominate the count as the text grows.
+fn twice_the_text_is_twice_the_work(what: &str, once: &EditWork, twice: &EditWork) {
+    for (walk, once, twice) in [
+        ("inline steps", once.inline_steps, twice.inline_steps),
+        ("origin runs visited", once.origin_runs, twice.origin_runs),
+    ] {
+        assert!(
+            once > 0,
+            "{what}: the keystroke's parse counted no {walk}, so this measures nothing"
+        );
+        assert!(
+            twice < 3 * once,
+            "{what}: twice the text took {twice} {walk} against {once} — linear work \
+             doubles, and a walk from the start for every piece quadruples"
+        );
+    }
+}
+
+/// **A page written in Chinese costs work in proportion to its length**
 /// (user report, 2026-09-10: opening `README.zh-CN.md` froze the window).
 ///
 /// The report's own hypothesis was that the parse or the provenance mapping
-/// walks a document by *byte* where it means *character*, or searches from
-/// the start of a block for every piece — either of which is quadratic, and
-/// Chinese triples the byte count of the same page. This is the measurement
-/// that would say so: the same harness the English budget above uses, over
-/// 64 KiB of this repository's Chinese front page and 64 KiB of a page
-/// written in both scripts, against the same one-frame budget.
+/// walks a document by *byte* where it means *character*, or searches from the
+/// start of a block for every piece — either of which is quadratic, and Chinese
+/// triples the byte count of the same page. The measurement of 2026-09-10 (64 KiB
+/// of Chinese, of the long Chinese half and of both scripts each rebuilt in
+/// under 1.5 ms, against English's 1.48 ms) seemed to disprove it, but it laid
+/// whole pages end to end, and that never makes a paragraph longer: the walk
+/// from a block's start was there, in `TextOrigin::run_at`, until 2026-11-11,
+/// when the second doubling below was written for it. Until then the test asked
+/// with the wall clock — one sample of one rebuild against a 16 ms frame — and a loaded
+/// machine descheduled it past the frame in three landing chains in one week
+/// (0.4.10 plan row 78). The claim was never the frame: it is the *shape*, and a
+/// shape is counted (the English twin moved the same way on 2026-09-13,
+/// `a_one_character_edit_reuses_unmodified_document_work`).
 ///
-/// **The reported document is two documents now** (2026-09-14). The front
-/// page was cut down to a summary and its feature sections moved to
-/// `docs/features.zh-CN.md`, so the Chinese prose the report was about is
-/// mostly in the second file; both are padded to 64 KiB and both are asked.
+/// **Two doublings, because a walk can be quadratic in two things.** The three
+/// pages are each laid end to end to 64 KiB and then to twice as many copies:
+/// a walk from the start of the *file* for every piece is caught there. One
+/// paragraph of [`BOTH_SCRIPTS_LINE`] is then 64 KiB of lines and twice as many:
+/// a walk from the start of the *block* for every piece is caught there, which
+/// the pages alone cannot catch, because repeating a page leaves every one of
+/// its paragraphs as long as it was. Each keystroke owes the reuse
+/// [`one_character_edit_work`] asserts as well: no fence or table cell measured
+/// again, one prose block wrapped again, one mapped parse.
 ///
-/// **Mixed text is here beside pure Chinese because it is not the same
-/// document** to this parser. A run of ideographs never reaches the flanking
-/// rule, the link scanner or the code-span scanner at all; `**中文**english`
-/// and `` `代码`中文 `` put a marker hard against a three-byte character on
-/// both sides, which is where a walk that steps by bytes and a walk that
-/// steps by characters first disagree. See
-/// [`preview::MIXED_SCRIPT_PAGE`].
+/// **What it counts and what it does not.** The inline scanner's steps and its
+/// claim lookups, the delimiter pass's steps (`inline steps`), and the runs
+/// [`preview_provenance::TextOrigin`] looks at to compose each piece through its
+/// block's join (`origin runs visited`) — the walks the report's hypothesis
+/// names. A super-linear walk in a loop that keeps no count is not seen here;
+/// the counts cost nothing outside the tests, because the module that keeps them
+/// is `#[cfg(test)]` and a count outside a `#[cfg(test)]` line does not build.
 ///
-/// **What it said** (2026-09-10, the machine the report came from, beside
-/// the English line above on the same run): 64 KiB of Chinese / 37 897
-/// characters / 293 blocks — parse 0.99 ms, intrinsics 4 µs, layout 0.12 ms,
-/// **total 1.12 ms**; 64 KiB of both scripts / 42 382 characters / 561
-/// blocks — parse 1.27 ms, intrinsics 12 µs, layout 0.12 ms, **total 1.41
-/// ms**; against English's 64 KiB / 200 blocks at **1.48 ms**. So a page of
-/// Chinese costs *less* than the same weight of English and not more — the
-/// parser walks bytes and Chinese spends three of them on a character, so
-/// the same 64 KiB is fewer words, fewer spans and fewer delimiter runs. The
-/// report's hypothesis is disproved by this line, and the line is here so
-/// that it stays disproved.
-///
-/// The budget is one frame, on the English test's own terms and for its
-/// reason: what it catches is a change of *shape* — a walk that became
-/// quadratic on multi-byte text — and not a percentage on whatever machine
-/// happens to run it. The numbers are printed as well as asserted, because a
-/// ratio against the English line above is the reading that matters and a
-/// number nobody can read is not a measurement.
-///
-/// MUTATION: give [`preview::TextOrigin`]'s `run_at` a scan from the start of
-/// the file rather than of its own runs, or count a paragraph's characters to
-/// find a byte, and this goes red while the English one stays green.
+/// MUTATION (one per claim): find the run in `TextOrigin::run_at` by a walk
+/// from the first run, as it was until 2026-11-11, and the paragraph's
+/// `origin runs visited` quadruple; start the scanner's claim lookup in
+/// `preview::scan_line_marked` from the line's first claim at every byte, and
+/// the paragraph's `inline steps` do; bypass the wrap cache in
+/// `preview_wrap::Pass::measure` (the shared lookup and the previous pass's
+/// map both: either alone still finds the block), and the keystroke's reuse
+/// goes red in [`one_character_edit_work`].
 #[test]
-fn a_page_written_in_chinese_rebuilds_inside_the_frame_budget() {
+fn a_chinese_page_costs_work_in_proportion_to_its_length() {
     for (name, one) in [
         ("Chinese", preview::CHINESE_PAGE),
         ("Chinese, the long half", preview::CHINESE_FEATURE_PAGE),
         ("Chinese and English", preview::MIXED_SCRIPT_PAGE),
     ] {
-        let mut document = String::new();
-        while document.len() < 64 * 1024 {
-            document.push_str(one);
-            document.push_str("\n\n");
-        }
-        let mut cache = MarkdownIntrinsicCache::default();
-        rebuild_cost(&document, &mut cache);
-        let mut typed = document.clone();
-        // The midpoint of a page written in Chinese may fall inside a
-        // character; step back to the boundary before slicing.
-        let at = (0..=typed.len() / 2)
-            .rev()
-            .find(|&i| typed.is_char_boundary(i))
-            .unwrap_or(0);
-        let at = typed[..at].rfind('\n').map_or(0, |line| line + 1);
-        typed.insert(at, 'x');
-        let (blocks, parse, intrinsics, laid) = rebuild_cost(&typed, &mut cache);
-        let total = parse + intrinsics + laid;
-        println!(
-            "{name}: {} bytes, {} characters, {blocks} blocks — parse {:?}, \
-                 intrinsics {:?}, layout {:?}, total {:?}",
-            typed.len(),
-            typed.chars().count(),
-            parse,
-            intrinsics,
-            laid,
-            total,
-        );
-        assert!(
-            total < std::time::Duration::from_millis(16),
-            "{name}: a keystroke in a 64 KiB document has to fit in a frame \
-                 whatever script it is written in, and this one took {total:?} \
-                 (parse {parse:?}, intrinsics {intrinsics:?}, layout {laid:?})",
-        );
+        let copies = copies_reaching(one, 64 * 1024);
+        let [once, twice] = [copies, 2 * copies].map(|copies| {
+            let page = copies_of(one, copies);
+            let at = into_the_first_paragraph_past_the_middle(&page);
+            one_character_edit_work(page, at)
+        });
+        twice_the_text_is_twice_the_work(name, &once, &twice);
     }
+
+    let lines = (64 * 1024usize).div_ceil(BOTH_SCRIPTS_LINE.len());
+    let [once, twice] = [lines, 2 * lines].map(|lines| {
+        let paragraph = BOTH_SCRIPTS_LINE.repeat(lines);
+        // Inside the middle line, in front of its `english`: one paragraph
+        // still, whatever the letter does to the emphasis around it.
+        let at = BOTH_SCRIPTS_LINE.len() * (lines / 2)
+            + BOTH_SCRIPTS_LINE
+                .find("english")
+                .expect("the line carries English");
+        one_character_edit_work(paragraph, at)
+    });
+    twice_the_text_is_twice_the_work("one paragraph in both scripts", &once, &twice);
 }

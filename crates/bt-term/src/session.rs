@@ -535,6 +535,10 @@ struct InlineImageRecord {
     failed: bool,
     /// See [`InlineImageRecordView::declined_by_host`].
     declined_by_host: bool,
+    /// **Whether this occurrence's read was asked again by itself** — once, after an answer that
+    /// another program held the file ([`InlineImageDecodeError::HeldElsewhere`]); a second held
+    /// answer is filed as a failure ([`DualPlaneSession::complete_inline_image_result`]).
+    asked_again: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9553,6 +9557,22 @@ impl DualPlaneSession {
                 }
             }
             Ok(_) => return false,
+            // **Held by another program at this moment** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES):
+            // an answer about the moment and not about the file, so the occurrence's first such
+            // answer files nothing — the read is asked once more by itself, and nothing on the glass
+            // changes meanwhile. A second held answer is filed as the failure below (the run-out
+            // bound of row 164: at most two reads per occurrence), and the next look is the next
+            // printing of the path, which is an occurrence of its own and asks anew. A queue at its
+            // cap asks nothing again either: the reads waiting there were printed after this one,
+            // and a re-ask never costs a newer reference its read.
+            Err(InlineImageDecodeError::HeldElsewhere(_))
+                if !record.asked_again
+                    && self.local_image_path_tasks.len() < LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP =>
+            {
+                record.asked_again = true;
+                self.queue_local_image_path_task(task);
+                return false;
+            }
             Err(error) => {
                 record.artifact = None;
                 record.display = None;
@@ -12522,6 +12542,7 @@ impl DualPlaneSession {
                 display_declined: None,
                 failed: false,
                 declined_by_host: false,
+                asked_again: false,
             },
         );
         if self.inline_image_tasks.len() == INLINE_IMAGE_WORKER_QUEUE_CAP {
@@ -12983,19 +13004,30 @@ impl DualPlaneSession {
                 display_declined: None,
                 failed: false,
                 declined_by_host: false,
+                asked_again: false,
             },
         );
+        self.queue_local_image_path_task(InlineImageTask {
+            occurrence_id,
+            source: InlineImageSource::LocalPath(path),
+        });
+        occurrence_id
+    }
+
+    /// **Put one printed path's read in front of the worker** — the one door of the bounded
+    /// queue, for a newly registered occurrence and for the one read a held answer asks again
+    /// ([`Self::complete_inline_image_result`]). At the cap the oldest read waiting is dropped and
+    /// its occurrence filed as failed: what output can queue is bounded, and the newest reference
+    /// is the one the reader is looking at. A held answer's re-ask is never pushed at the cap (it
+    /// is older than every read waiting), so only a newly printed reference evicts.
+    fn queue_local_image_path_task(&mut self, task: InlineImageTask) {
         if self.local_image_path_tasks.len() == LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP
             && let Some(dropped) = self.local_image_path_tasks.pop_front()
             && let Some(record) = self.inline_images.get_mut(&dropped.occurrence_id)
         {
             record.failed = true;
         }
-        self.local_image_path_tasks.push_back(InlineImageTask {
-            occurrence_id,
-            source: InlineImageSource::LocalPath(path),
-        });
-        occurrence_id
+        self.local_image_path_tasks.push_back(task);
     }
 
     /// Prove and re-seat the live decorations a batched top-anchored scroll displaced, then reset
@@ -22337,9 +22369,9 @@ mod tests {
     /// The screen the user's report describes: conda's startup warning, the prompt beneath it, and
     /// a typed, unsubmitted command long enough to wrap once the pane narrows.
     fn divider_drag_screen(session: &mut DualPlaneSession, at: Instant) {
-        const NOISE: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
-        const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
-        const TYPED: &str = "echo D:\\Developer\\folio-terminal\\local-images\\sunset.svg";
+        const NOISE: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
+        const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
+        const TYPED: &str = "echo D:\\Developer\\lunar-workshop\\local-images\\sunset.svg";
         let mut bytes = Vec::new();
         for index in 0..14 {
             bytes.extend_from_slice(
@@ -22353,7 +22385,7 @@ mod tests {
     /// PSReadLine's own redraw: it addresses its prompt row absolutely, erases from there down, and
     /// reprints the prompt and the unsubmitted input.
     const REDRAW: &[u8] =
-        b"\x1b[13;1H\x1b[J(base) PS D:\\Developer\\folio-terminal> echo D:\\Developer\\folio-terminal\\local-images\\sunset.svg";
+        b"\x1b[13;1H\x1b[J(base) PS D:\\Developer\\lunar-workshop> echo D:\\Developer\\lunar-workshop\\local-images\\sunset.svg";
 
     /// A real drag is not one pseudoconsole commit, and the frame is not one plane.
     ///
@@ -22459,11 +22491,11 @@ mod tests {
     }
 
     /// Everything the reporting session's child wrote before the pane was narrowed, byte for byte
-    /// from `.tmp-repaint-capture/s12-rearm-verify.vt` chunks 0..13. Conda's startup line, the
-    /// shell-integration prompt with its OSC 133 `A`/`B` pair, and the line editor's first render of
-    /// the typed command at absolute row 2 column 40. Its own closing `CUP` to row 3 column 3 states
-    /// that the pane was 74 columns wide: 39 prompt cells plus 37 typed cells is 76, and 76 = 74 + 2.
-    const RECORDED_BEFORE_RESIZE: &[u8] = b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001hDid not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\x1b]7;file:///D:/Developer/folio-terminal\x07\x1b]133;A\x07PS D:\\Developer\\folio-terminal> \x1b]133;B\x07\x1b[?25l\x1b[2;40H\x1b[93mWrite-Output\x1b[39;49m \x1b[37m(\x1b[36m'BT_APP_'\x1b[39;49m \x1b[90m+\x1b[39;49m \x1b[36m'INPUT_OK'\x1b[37m)\x1b[39;49m\x1b[0m\x1b[3;3H\x1b[?25h";
+    /// from `.tmp-repaint-capture/s12-rearm-verify.vt` chunks 0..13 (two folders renamed, same
+    /// length): conda's startup line, the OSC 133 `A`/`B` prompt and the line editor's first render
+    /// of the typed command at row 2 column 40. Its own closing `CUP` to row 3 column 3 states that
+    /// the pane was 74 columns wide: 39 prompt cells plus 37 typed cells is 76, and 76 = 74 + 2.
+    const RECORDED_BEFORE_RESIZE: &[u8] = b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001hDid not find path entry D:\\Kit\\Base\\anaconda3\\bin\r\n\x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\x1b]7;file:///D:/Developer/lunar-workshop\x07\x1b]133;A\x07PS D:\\Developer\\lunar-workshop> \x1b]133;B\x07\x1b[?25l\x1b[2;40H\x1b[93mWrite-Output\x1b[39;49m \x1b[37m(\x1b[36m'BT_APP_'\x1b[39;49m \x1b[90m+\x1b[39;49m \x1b[36m'INPUT_OK'\x1b[37m)\x1b[39;49m\x1b[0m\x1b[3;3H\x1b[?25h";
 
     /// The child's own cursor-position request, and its own statement of where the reflow put the
     /// cursor: `CUP` row 3 column 16, which is 76 = 61 + 15 — the truth at the committed width.
@@ -22577,8 +22609,8 @@ mod tests {
         assert_eq!(
             &reflowed[..3],
             [
-                "Did not find path entry D:\\App\\Base\\anaconda3\\bin",
-                "(base) PS D:\\Developer\\folio-terminal> Write-Output ('BT_APP_",
+                "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin",
+                "(base) PS D:\\Developer\\lunar-workshop> Write-Output ('BT_APP_",
                 "' + 'INPUT_OK')",
             ],
             "the committed reflow puts the whole input line on rows 2 and 3"
@@ -22589,8 +22621,8 @@ mod tests {
         assert_eq!(
             &composed[..4],
             [
-                "Did not find path entry D:\\App\\Base\\anaconda3\\bin",
-                "(base) PS D:\\Developer\\folio-terminal> Write-Output ('BT_APP_",
+                "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin",
+                "(base) PS D:\\Developer\\lunar-workshop> Write-Output ('BT_APP_",
                 "' + 'INPUT_OK')                        Write-Output ('BT_APP_",
                 "' + 'INPUT_OK')",
             ],
@@ -26050,6 +26082,154 @@ mod tests {
         }
     }
 
+    /// The next printed path's read the session hands out, answering every name check in front of
+    /// it off the real disk as the app's loop does; `None` when no read is queued.
+    fn next_image_read(session: &mut DualPlaneSession) -> Option<InlineImageTask> {
+        while let Some(task) = session.take_decoration_worker_task() {
+            match task {
+                SessionDecorationTask::InlineImage(task) => return Some(task),
+                SessionDecorationTask::VerifyPath(path) => {
+                    let verdict = verify_path(&path, &no_door);
+                    session.complete_path_verification(path, verdict);
+                }
+                other => panic!("the fixture asks only names and reads: {other:?}"),
+            }
+        }
+        None
+    }
+
+    /// RED — **a printed picture another program holds is asked once more by itself, and then
+    /// filed as failed** (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES): the first held answer files
+    /// nothing and queues exactly one read of the same occurrence; a second held answer files the
+    /// failure and queues nothing, however many more come; and when the second read is answered,
+    /// the reference is verified like any other.
+    ///
+    /// MUTATION: drop the `HeldElsewhere` arm of `complete_inline_image_result` — the first held
+    /// answer fails the record at once; the first assertion goes red. Or leave `asked_again` unset —
+    /// every held answer queues another read; the "once" assertions go red.
+    #[test]
+    fn a_printed_picture_another_program_holds_is_asked_once_more_and_then_failed() {
+        let held = || -> Result<DecodedInlineImage, InlineImageDecodeError> {
+            Err(InlineImageDecodeError::HeldElsewhere(
+                "held 被占用".to_owned(),
+            ))
+        };
+        let (directory, path) = temporary_path_image();
+        let started = Instant::now();
+        let fresh = || {
+            let mut session = DualPlaneSession::new(nz(240), nz(4));
+            enable_path_detection(&mut session);
+            session
+                .feed_at(
+                    format!("[Image: source: \"{}\"]\r\nprompt", path.display()).as_bytes(),
+                    started,
+                )
+                .unwrap();
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+            session
+        };
+
+        let mut session = fresh();
+        let first = next_image_read(&mut session).expect("the printed picture is read");
+        assert!(!session.complete_inline_image_result(first.clone(), held()));
+        assert!(
+            !session.inline_image_records()[0].failed,
+            "a held answer is not a failure of the file"
+        );
+        let again = next_image_read(&mut session).expect("asked once more by itself");
+        assert_eq!(again, first, "the same occurrence's read");
+        assert!(session.complete_inline_image_result(again.clone(), held()));
+        assert!(
+            session.inline_image_records()[0].failed,
+            "a second held answer is filed as the failure"
+        );
+        assert!(next_image_read(&mut session).is_none(), "once");
+        for _ in 0..5 {
+            session.complete_inline_image_result(again.clone(), held());
+        }
+        assert!(
+            next_image_read(&mut session).is_none(),
+            "once, however many answers come"
+        );
+        assert_eq!(session.outstanding_decoration_work(), 0);
+
+        let mut session = fresh();
+        let first = next_image_read(&mut session).expect("the printed picture is read");
+        session.complete_inline_image_result(first, held());
+        let again = next_image_read(&mut session).expect("asked once more by itself");
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let decoded = decoder.decode(again.clone());
+        assert!(session.complete_inline_image_result(again, decoded));
+        assert!(
+            session.image_path_is_verified(&path),
+            "the second read verifies it"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED — **a held picture's re-ask never evicts a read printed after it**
+    /// (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES, review N1): with the queue of printed-path reads
+    /// at its cap, a held first answer asks nothing again and is filed as the failure, and every
+    /// read waiting, all of them printed later, stays queued and unfailed. The next look is the
+    /// path printed again.
+    ///
+    /// MUTATION: drop the cap clause from the `HeldElsewhere` arm's guard — the re-ask is pushed
+    /// at the cap, the oldest waiting read is dropped and its occurrence filed failed; the
+    /// "every read printed later stays queued" assertion goes red.
+    #[test]
+    fn a_held_pictures_re_ask_never_evicts_a_read_printed_after_it() {
+        let (directory, path) = temporary_path_image();
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]\r\n", path.display());
+        let mut session = DualPlaneSession::new(nz(240), nz(120));
+        enable_path_detection(&mut session);
+        session.feed_at(line.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let first = next_image_read(&mut session).expect("the printed picture is read");
+        let later = started + LIVE_MATH_STABLE_INTERVAL;
+        session
+            .feed_at(
+                format!("{}prompt", line.repeat(LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP)).as_bytes(),
+                later,
+            )
+            .unwrap();
+        session.advance_live_stability(later + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            session.local_image_path_tasks.len(),
+            LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP,
+            "the fixture holds the queue at its cap"
+        );
+        let waiting: Vec<u64> = session
+            .local_image_path_tasks
+            .iter()
+            .map(|task| task.occurrence_id)
+            .collect();
+        assert!(waiting.iter().all(|id| *id > first.occurrence_id));
+
+        session.complete_inline_image_result(
+            first.clone(),
+            Err(InlineImageDecodeError::HeldElsewhere("held".to_owned())),
+        );
+        let still_waiting: Vec<u64> = session
+            .local_image_path_tasks
+            .iter()
+            .map(|task| task.occurrence_id)
+            .collect();
+        assert_eq!(
+            still_waiting, waiting,
+            "every read printed later stays queued"
+        );
+        assert!(
+            waiting.iter().all(|id| !session.inline_images[id].failed),
+            "no read printed later is filed failed"
+        );
+        assert!(
+            session.inline_images[&first.occurrence_id].failed,
+            "the held reference asks nothing again at the cap and is filed as the failure"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
     /// RED (S-8 rounds 2 and 3) — **a task whose work failed is held until new input that could
     /// change its answer, and then handed out once more**: idle frames ask nothing, more output
     /// that leaves the printed path as it was asks nothing (a `tail -f` does not retry it), and a
@@ -27748,7 +27928,7 @@ mod tests {
     /// PIN (§7.1.5j, user report 2026-08-20) — **an ordinary file whose path is printed into the
     /// terminal is a link, and the promise is the disk's**.
     ///
-    /// The report was `D:\Developer\folio-terminal\README.md` and three other spellings of the same
+    /// The report was `D:\Developer\lunar-workshop\README.md` and three other spellings of the same
     /// kind of thing, printed by Claude Code, none of which the pointer could reach while the OSC 8
     /// link on the next line could. This walks the whole path of that fix inside one session: the
     /// frame that draws the name asks about it, a worker reads the real disk, and the frame after
@@ -28219,7 +28399,7 @@ mod tests {
     /// PIN (owner report 2026-09-21, on the 0.4.3 candidate) — **a printed path with spaces in it
     /// is a link when the file is there**, walked from the printed row to the real disk.
     ///
-    /// The report was `D:\Developer\trace\验收 next85\中文 说明.md`: no mark, no click, while the
+    /// The report was `D:\Developer\notes\验收 next85\中文 说明.md` (renamed): no mark, no click; the
     /// same tree without the spaces was an ordinary link. The lexer's half of the fix is pinned in
     /// `bt_transcript::paths` by `a_bare_path_is_read_across_the_spaces_a_filename_may_hold` — the
     /// row offers the whole spelling first and one shorter reading per space behind it. **This is
@@ -32694,7 +32874,7 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
-    const OSC133_ACCEPT2_PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
+    const OSC133_ACCEPT2_PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
 
     /// The recorded output line, its picture spelled the way this platform roots one.
     fn osc133_accept2_image() -> String {

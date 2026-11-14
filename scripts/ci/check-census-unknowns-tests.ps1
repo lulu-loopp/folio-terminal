@@ -2,7 +2,10 @@
 # the unchanged list passes; an unknown moved to another module passes, and so does one moved
 # whose `sites` went down; an added unknown, a moved one whose `sites` grew, a move whose old
 # module still lists the function, an ambiguous move and a move with a renamed function are each
-# refused for their own reason. The gate's growth plants on the real tree stay in `gates-can-fail`.
+# refused for their own reason. The re-reasoned rule (plan row 115): an unknown whose reason alone
+# changed passes, and so does one whose `sites` went down; one whose `sites` grew, two added keys at
+# one place, two gone keys at one place and a reason changed together with the module are each
+# refused. The gate's growth plants on the real tree stay in `gates-can-fail`.
 
 $ErrorActionPreference = "Stop"
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) {
@@ -62,11 +65,11 @@ try {
         & git commit -q -m base
         & git update-ref refs/remotes/origin/main (& git rev-parse HEAD).Trim()
 
-        Passes ($header + $settle + $rail) "unchanged" "2 unknowns -> 2, 0 added, 0 grown, 0 shrunk, 0 removed, 0 moved."
+        Passes ($header + $settle + $rail) "unchanged" "2 unknowns -> 2, 0 added, 0 grown, 0 shrunk, 0 removed, 0 moved, 0 re-reasoned."
 
         $moved = $settle.Replace("`tcrate`t", "`tcrate::runtime::attention`t")
-        Passes ($header + $moved + $rail) "a moved unknown" "0 added, 0 grown, 0 shrunk, 0 removed, 1 moved."
-        Passes ($header + $moved.Replace("`t2`n", "`t1`n") + $rail) "a moved unknown whose sites went down" "0 added, 0 grown, 1 shrunk, 0 removed, 1 moved."
+        Passes ($header + $moved + $rail) "a moved unknown" "0 added, 0 grown, 0 shrunk, 0 removed, 1 moved, 0 re-reasoned."
+        Passes ($header + $moved.Replace("`t2`n", "`t1`n") + $rail) "a moved unknown whose sites went down" "0 added, 0 grown, 1 shrunk, 0 removed, 1 moved, 0 re-reasoned."
 
         Refused ($header + $settle + $rail + "?.title`tcrate`tprobe`ta planted row`t1`n") `
             "an added unknown" "?.title in crate::probe (a planted row): 1 site(s), not at the merge base"
@@ -79,6 +82,18 @@ try {
         Refused ($header + $moved + $moved.Replace("::attention`t", "::panes`t") + $rail) `
             "one unknown arriving at two modules" "and arrived at more than one place"
 
+        $reasoned = $settle.Replace("`ta closure parameter without a type`t", "`tsettle, a binding called`t")
+        Passes ($header + $reasoned + $rail) "a re-reasoned unknown" `
+            "0 added, 0 grown, 0 shrunk, 0 removed, 0 moved, 1 re-reasoned."
+        Passes ($header + $reasoned.Replace("`t2`n", "`t1`n") + $rail) "a re-reasoned unknown whose sites went down" `
+            "0 added, 0 grown, 1 shrunk, 0 removed, 0 moved, 1 re-reasoned."
+        Refused ($header + $reasoned.Replace("`t2`n", "`t3`n") + $rail) `
+            "a re-reasoned unknown whose sites grew" "3 site(s), re-reasoned from (a closure parameter without a type), which had 2"
+        Refused ($header + $reasoned + $reasoned.Replace("a binding called", "a binding called twice") + $rail) `
+            "two added keys at one place" "2 added and 1 gone key(s) at this site, module and function, so none is re-reasoned"
+        Refused ($header + $reasoned.Replace("`tcrate`t", "`tcrate::runtime::attention`t") + $rail) `
+            "a reason changed together with the module" "?.attention in crate::runtime::attention::settle (settle, a binding called): 2 site(s), not at the merge base"
+
         # A base whose function has a second unknown under another reason: moving one key while
         # the other stays says the function is still in its old module.
         Write-File $relative ($header + $settle + $other + $rail)
@@ -88,7 +103,9 @@ try {
         Refused ($header + $moved + $other + $rail) `
             "a move whose old module still lists the function" "but crate still lists settle"
         Passes ($header + $moved + $other.Replace("`tcrate`t", "`tcrate::runtime::attention`t") + $rail) `
-            "both unknowns of the function moved" "0 removed, 2 moved."
+            "both unknowns of the function moved" "0 removed, 2 moved, 0 re-reasoned."
+        Refused ($header + $settle.Replace("`ta closure parameter without a type`t", "`tsettle, a binding called`t") + $rail) `
+            "two gone keys at one place" "1 added and 2 gone key(s) at this site, module and function, so none is re-reasoned"
     } finally {
         Pop-Location
     }
@@ -96,5 +113,5 @@ try {
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
 
-Write-Host "check-census-unknowns: unchanged, moved, moved-and-shrunk, added, moved-and-grown, renamed, ambiguous, still-at-its-module and whole-function-moved cases pass"
+Write-Host "check-census-unknowns: unchanged, moved, moved-and-shrunk, added, moved-and-grown, renamed, ambiguous, still-at-its-module, whole-function-moved, re-reasoned, re-reasoned-and-shrunk, re-reasoned-and-grown, two-added, two-gone and re-reasoned-and-moved cases pass"
 exit 0

@@ -6,15 +6,18 @@
 //!
 //! `crate::settings` is the sheet's model (rows, layout, geometry, values, and the trait the window
 //! drives it through); this file reads it, and it never reads this one. Moved out of `main.rs` by
-//! K2 (T-SPLIT-2B) batches 23 and 24. Bodies unchanged.
+//! K2 (T-SPLIT-2B) batches 23, 24 and 27 (batch 27: the scheme verbs and the schemes folder's
+//! watch). Bodies unchanged.
 
+use crate::runtime;
 use crate::window_seam::prelude::*;
 use crate::{
     Announce, ApplicationChange, FilePick, RAIL_TRANSITION, RevealTween, Runtime,
-    attention_copilot, attention_wire, block_max_height_px, cardhint, context_menu, explorer_menu,
-    handoff_lane, hang_watch, i18n, install_minimum_contrast, marks, preview, profiles,
-    programs_lane, psreadline, rail_state_for, resolve_theme_mode, schemes, seats, settings,
-    shell_integration, shortcuts, system_os_theme, text_field, toast, update, update_card,
+    adopt_stored_schemes, agent_hooks_step, attention_copilot, attention_wire, block_max_height_px,
+    cardhint, carry_pass, context_menu, explorer_menu, handoff_lane, hang_watch, i18n,
+    install_minimum_contrast, marks, preview, profiles, programs_lane, psreadline, rail_state_for,
+    schemes, seats, settings, shell_integration, shortcuts, start_at_sign_in, text_field, toast,
+    update, update_card,
 };
 use anyhow::Result;
 use bt_persist::ThemeModeV1;
@@ -23,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta};
 
 impl<B: Backend> Runtime<'_, B> {
     /// **Note whether this window is in Cards, and raise the bubble on the frame
@@ -74,15 +77,13 @@ impl<B: Backend> Runtime<'_, B> {
         // the gate a printing pane would leave the sentence on the glass for as
         // long as it printed.
         let ended = self.window.card_hint.expire(now) != cardhint::CardHint::Unchanged;
-        // The nudge's own frames are the paced half.
-        if !ended && !self.animation_frame_is_due() {
+        // The nudge's own frames are the paced half, asked only while it moves.
+        if !self.paced_frame(ended, |rt| {
+            rt.window.card_hint.nudge_moving(now, rt.app.motion)
+        }) {
             return Ok(());
         }
-        let nudging = self.window.card_hint.nudge_moving(now, self.app.motion);
-        if ended || nudging {
-            self.repaint_card_hint()?;
-        }
-        Ok(())
+        self.repaint_card_hint()
     }
 
     /// **Both surfaces, because this hint is two things on two levels**: the
@@ -282,6 +283,9 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(enabled) = settings::turn_end_notification_requested(target) {
             self.apply_turn_end_notification(enabled);
         }
+        if let Some(enabled) = settings::resume_agents_requested(target) {
+            self.apply_resume_agents(enabled);
+        }
         if let Some(enabled) = settings::shell_integration_requested(target) {
             self.apply_shell_integration(enabled)?;
         }
@@ -296,6 +300,9 @@ impl<B: Backend> Runtime<'_, B> {
             ),
         ) {
             self.apply_explorer_place(place, announce)?;
+        }
+        if let Some(on) = settings::start_at_sign_in_requested(target) {
+            self.apply_start_at_sign_in(on, announce);
         }
         if let Some(install) = settings::claude_hooks_requested(target) {
             self.apply_claude_hooks(install, announce)?;
@@ -673,6 +680,8 @@ impl<B: Backend> Runtime<'_, B> {
             // database, which is not a line in this file and not this verb's to
             // undo. One row asks about both since 2026-09-07.
             | Row::ContextMenu
+            // The sign-in entry (row 22a): an entry for the account, not a line in this file.
+            | Row::StartAtSignIn
             | Row::QuakeHotkey
             | Row::QuakeProfile
             | Row::QuakeCommand
@@ -693,6 +702,7 @@ impl<B: Backend> Runtime<'_, B> {
             | Row::MultilinePaste
             | Row::Notifications
             | Row::TurnEndNotifications
+            | Row::ResumeAgents
             | Row::ShellIntegration
             // And doubly never again, for `ContextMenu`'s reason over a different store: what a
             // reset would be putting back is not a value in this file, it is a block in the user's
@@ -1247,6 +1257,21 @@ impl<B: Backend> Runtime<'_, B> {
                 }
                 self.latch_settings_slider_drag(row);
             }
+            // **A press in a field puts the caret at the seam under it**, once the focus is
+            // there, and a drag from there selects (0.4.9 plan row 180): the field the press
+            // landed in reads the run it was drawn as — from its start, when it did not hold the
+            // focus until now.
+            (
+                target @ (settings::SettingsTarget::Field(_)
+                | settings::SettingsTarget::EnvName(_)
+                | settings::SettingsTarget::EnvValue(_)),
+                _,
+            ) if self.window.settings.text_field(target).is_some() => {
+                self.press_field(
+                    crate::runtime::pointer::FieldDrag::Settings(target),
+                    position,
+                )?;
+            }
             // Turning a page puts the reader at the top of it.
             (settings::SettingsTarget::Nav(_), settings::SettingsKeyVerdict::Moved) => {
                 self.window.settings_scroll = 0.0;
@@ -1292,7 +1317,7 @@ impl<B: Backend> Runtime<'_, B> {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.theme_mode = mode;
         let mode_changed = self.app.settings_store.store(settings);
-        let theme_changed = self.apply_theme(resolve_theme_mode(mode, system_os_theme()))?;
+        let theme_changed = self.apply_theme(super::theme_in_force(mode))?;
         if mode_changed && !theme_changed && self.refresh_overlay() {
             self.present_chrome_change()?;
         }
@@ -1735,7 +1760,7 @@ impl<B: Backend> Runtime<'_, B> {
         if package_job {
             self.request_explorer_package(place, announce);
         }
-        let outcome = context_menu::apply(place.classic());
+        let outcome = context_menu::apply_pressed(place.classic());
         self.app.context_menu_installed = context_menu::installed(context_menu::state());
         match outcome {
             Ok(()) if package_job || announce == Announce::OnlyFailures => Ok(true),
@@ -1760,6 +1785,16 @@ impl<B: Backend> Runtime<'_, B> {
                 Ok(false)
             }
         }
+    }
+
+    /// **Press the sign-in switch** (0.4.10 plan row 22a, R6): the wish handed to its worker,
+    /// `start_at_sign_in::begin_sign_in_press`, which reads, writes and reads back the entry off
+    /// this thread and answers on `AppEvent::SignInPressed`. The row keeps what it said until
+    /// then, because it is drawn from the machine and never from the press; the window that
+    /// pressed is where the card goes, and `announce` says whether a success is said there.
+    fn apply_start_at_sign_in(&mut self, on: bool, announce: Announce) {
+        self.app.sign_in_asked_by = Some((self.window_id(), announce));
+        start_at_sign_in::begin_sign_in_press(on);
     }
 
     /// Store the reader's answer about the update check (§7.51).
@@ -1927,6 +1962,152 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
+    /// **A composition into the settings field that holds the keyboard**
+    /// (T-SETTINGS-FIELDS-IME-POSITION), through the two doors every other field in
+    /// this window uses: a pre-edit is drawn at the caret and is **not** in the text
+    /// ([`text_field::TextField::set_preedit`]), and a commit is an ordinary insert
+    /// that replaces the selection and is written through at once
+    /// ([`Self::write_editor_field`]), exactly as a typed character is.
+    ///
+    /// A pre-edit is taken off every field of the dialog before it is put on this
+    /// one ([`settings::SettingsPanel::clear_preedits`]): a composition that re-homed
+    /// to this field (`Tab`, a press) must not leave its letters drawn in the one it
+    /// left. Whether a commit belongs here at all was decided above the ladder, by
+    /// the field the composition began in ([`crate::CompositionOrigin::Settings`]).
+    pub(in crate::runtime) fn settings_field_ime(&mut self, event: &Ime) -> Result<()> {
+        let Some(target) = self.window.settings.focus() else {
+            return Ok(());
+        };
+        let wrote = match event {
+            Ime::Preedit(text, _) => {
+                self.window.settings.clear_preedits();
+                if let Some(field) = self.window.settings.text_field_mut(target) {
+                    field.set_preedit(text);
+                }
+                false
+            }
+            Ime::Commit(text) => {
+                self.window.settings.clear_preedits();
+                let Some(field) = self.window.settings.text_field_mut(target) else {
+                    return Ok(());
+                };
+                field.insert(text);
+                true
+            }
+            Ime::Enabled | Ime::Disabled => return Ok(()),
+        };
+        if wrote {
+            self.write_editor_field(target)?;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **The caret of the settings field that holds the keyboard**, in window pixels
+    /// (T-SETTINGS-FIELDS-IME-POSITION) — the rectangle `push_field` strikes it in,
+    /// through the one function both read ([`settings::field_caret_line`]), measured
+    /// with the font the painter measures with.
+    ///
+    /// Off the box the layout placed (the page's scroll already in it) and the string
+    /// the field shows, a composition included. **Unclipped** (ruled 2026-10-30): a
+    /// field the wheel has scrolled partly out of the dialog reports its caret where
+    /// it is laid out, as a Win32 edit's caret in a scrolled parent does.
+    pub(in crate::runtime) fn settings_field_caret_line(&mut self) -> Option<[f32; 4]> {
+        let target = self.window.settings.focus()?;
+        let field = self.window.settings.text_field(target)?;
+        let shown = field.composed().into_owned();
+        let caret = field.composed_selection().end.min(shown.len());
+        let layout = self.settings_layout()?;
+        let (rect, mono) = layout.text_field_box(target)?;
+        let scale = layout.scale();
+        let scroll = self.settle_settings_field_scroll(&layout);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        Some(settings::field_caret_line(
+            rect,
+            &shown[..caret],
+            scroll,
+            mono,
+            scale,
+            &mut measure,
+        ))
+    }
+
+    /// **How far the focused field's text is pushed left this frame**, settled from how far it
+    /// was and kept for the next (0.4.9 plan row 180, ruling 2; [`settings::settle_field_scroll`]).
+    /// `0` when no field holds the keyboard. Asked by the painter and by the input method's
+    /// caret, so the two read one scroll.
+    pub(in crate::runtime) fn settle_settings_field_scroll(
+        &mut self,
+        layout: &settings::SettingsLayout,
+    ) -> f32 {
+        let settled = self.settled_settings_field_scroll(layout);
+        // Kept only while a field holds the keyboard: a field drawn without the focus is drawn
+        // from its start, and one the focus comes back to must start from where it was drawn.
+        self.window.settings.keep_field_scroll(settled);
+        settled.map_or(0.0, |(_, scroll)| scroll)
+    }
+
+    /// [`Self::settle_settings_field_scroll`]'s answer before it is kept: the focused field and
+    /// its settled scroll, or `None` when the focus is on no text field this layout places.
+    fn settled_settings_field_scroll(
+        &mut self,
+        layout: &settings::SettingsLayout,
+    ) -> Option<(settings::SettingsTarget, f32)> {
+        let target = self.window.settings.focus()?;
+        let field = self.window.settings.text_field(target)?;
+        let (rect, mono) = layout.text_field_box(target)?;
+        let shown = field.composed().into_owned();
+        let caret = field.composed_selection().end;
+        let held = self.window.settings.field_scroll(target);
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
+        let scroll = settings::settle_field_scroll(
+            rect,
+            &shown,
+            caret,
+            held,
+            mono,
+            layout.scale(),
+            &mut measure,
+        );
+        Some((target, scroll))
+    }
+
+    /// **Every text field the dialog drew, as it drew it**, left for a press to read (0.4.9 plan
+    /// row 180, ruling 3): the focused one pushed left by its settled `scroll`, every other from
+    /// its start, each shaped in the face its field is set in — what the painter laid out.
+    pub(in crate::runtime) fn record_settings_field_runs(
+        &mut self,
+        layout: &settings::SettingsLayout,
+        scroll: f32,
+    ) {
+        let focus = self.window.settings.focus();
+        let scale = layout.scale();
+        let mut runs = Vec::new();
+        for (target, rect, mono) in layout.text_fields() {
+            let Some(field) = self.window.settings.text_field(target) else {
+                continue;
+            };
+            let shown = field.composed().into_owned();
+            let ([left, _], font) = settings::field_text_run(rect, mono, scale);
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            let advances = renderer.chrome_text_advances(gpu, &shown, font);
+            runs.push((
+                target,
+                crate::text_field::DrawnRun {
+                    left,
+                    scroll_px: if focus == Some(target) { scroll } else { 0.0 },
+                    shown,
+                    advances,
+                },
+            ));
+        }
+        self.window.drawn_fields.settings = runs;
+    }
+
     /// **Open the settings dialog on one row.**
     ///
     /// Three bricks that were all already here — open, choose the page, scroll
@@ -2069,7 +2250,8 @@ impl<B: Backend> Runtime<'_, B> {
         // **The agent rows' own edge**, and it is not a convenience: their switches are inert
         // while the file they name is one this build will not edit, so a press cannot be what
         // notices that the reader has unpicked the link or cleared the read-only bit. Opening the
-        // page is (re-review, round 3). One re-read per visit, never per frame and never per turn.
+        // page is (re-review, round 3). One scan per visit, never per frame and never per turn,
+        // and on the carry pass's worker (0.4.10 plan row 67b, R7): its answer redraws the page.
         let agents_opened = self
             .window
             .settings
@@ -2094,18 +2276,16 @@ impl<B: Backend> Runtime<'_, B> {
             // Every row's program, and WSL's distributions, asked again as the page opens.
             self.ask_the_program_walk(programs_lane::Trigger::ProfilesPage);
         }
-        // Use the refreshed fact on this very layout, including its geometry.
-        let refreshed_values = agents_opened.then(|| settings::SettingsValues {
-            claude_hooks: self.app.claude_hooks_installed,
-            codex_notify: self.app.codex_notify_installed,
-            copilot_hooks: self.app.copilot_hooks_installed,
-            agent_config_refusals: self.app.agent_config_refusals,
-            ..values.clone()
-        });
-        let content = settings::SettingsContent {
-            values: refreshed_values.as_ref().unwrap_or(&values),
-            ..content
-        };
+        // **The sign-in row's own edge** (0.4.10 plan row 22a, R11): an entry removed or turned
+        // off in Task Manager while Folio runs is read when the reader looks at General, once per
+        // visit, by the carry pass's member on its worker; the round's answer redraws the page.
+        let general_opened = self.window.settings.take_general_open_edge(
+            self.window.settings.category() == settings::SettingsCategory::General
+                && rows.contains(&settings::SettingsRow::StartAtSignIn),
+        );
+        if general_opened {
+            carry_pass::begin_carry_pass(carry_pass::CarryAsk::START_AT_SIGN_IN);
+        }
         // The second probe on the same door and for the same argument: the page that prints which
         // copilot this machine has is the page that asks. Idempotent, and an atomic load after the
         // first call — see `attention_copilot::begin_probe`.
@@ -2449,6 +2629,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn settings_values(&self) -> settings::SettingsValues {
         settings::SettingsValues {
             theme: self.app.settings_store.loaded().theme_mode,
+            high_contrast: bt_render::high_contrast_in_force().is_some(),
             cursor: current_cursor_style(),
             tab_layout: self.window.rail.layout,
             sidebar: self.window.rail.mode,
@@ -2471,6 +2652,7 @@ impl<B: Backend> Runtime<'_, B> {
             multiline_paste_ask: self.app.settings_store.loaded().multiline_paste_ask,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             turn_end_notification: self.app.settings_store.loaded().turn_end_notification,
+            resume_agents: self.app.settings_store.loaded().resume_agents,
             shell_integration: self.app.settings_store.loaded().shell_integration,
             powershell_profile_line_present: shell_integration::powershell_profile_line_present(),
             git_panel: self.app.settings_store.loaded().git_panel,
@@ -2493,6 +2675,7 @@ impl<B: Backend> Runtime<'_, B> {
             // The machine's own answer, cached at the three moments it can
             // change — see `App::context_menu_installed`.
             context_menu: self.app.context_menu_installed,
+            start_at_sign_in: self.app.start_at_sign_in,
             // **Not cached on `App`**, unlike the row above, and the difference
             // is which thread writes it: this answer is produced on a worker and
             // already lives behind one lock in `explorer_menu`, so a second copy
@@ -2517,6 +2700,23 @@ impl<B: Backend> Runtime<'_, B> {
             // answer is not `Off` at all. Handed in, never asked for here — the three sentences
             // are read off the disk and this runs on every frame the dialog is up.
             agent_config_refusals: self.app.agent_config_refusals,
+            // What each row says of what the start-time scan found (0.4.10 plan row 67b), and
+            // what the resume row says of the hooks resume needs — both said from the scan's
+            // answer, here and in the language in force, never read off the disk.
+            agent_row_lines: self.app.agent_hooks_found.each_ref().map(|found| {
+                found.as_ref().and_then(|(found, unrepaired)| {
+                    agent_hooks_step::hooks_row_line(found, *unrepaired)
+                })
+            }),
+            resume_agents_line: agent_hooks_step::resume_row_line(
+                self.app.settings_store.loaded().resume_agents,
+                self.app.agent_rows_known,
+                [
+                    self.app.claude_hooks_installed,
+                    self.app.codex_notify_installed,
+                    self.app.copilot_hooks_installed,
+                ],
+            ),
             // And over copilot's own hooks directory, with the second fact this one needs beside
             // it: whether the copilot on this machine can carry the signal at all.
             copilot_hooks: self.app.copilot_hooks_installed,
@@ -2678,6 +2878,237 @@ impl<B: Backend> Runtime<'_, B> {
         let catalogue = schemes::catalogue();
         let file = catalogue.user_file_of(&stored, light)?.to_owned();
         Some((stored, file))
+    }
+
+    /// **The settings sheet closes** — a lifecycle door (T-POINTER-CAPTURE R-9, owner gone):
+    /// a slider or the menu bar held on it is let go of, so a hand that pressed `Esc` mid-drag
+    /// leaves nothing latched behind a sheet that is no longer there. Asked by every road that
+    /// shuts the sheet: the gear's toggle, the sheet's own `Esc` and its own close press, and a
+    /// verb that hands the reader a document instead.
+    pub(crate) fn settings_closed(&mut self) {
+        self.end_capture(runtime::OwnerGone(runtime::Gone::SettingsSheet));
+        // The runs of its fields go with it: there is no field left to press in (row 180).
+        self.window.drawn_fields.settings.clear();
+    }
+
+    /// **A colour scheme, changed while the window is up** (§7.1.6c-4a).
+    ///
+    /// One argument per row and both optional, because a press moves exactly one
+    /// of the pair and the other has to keep the name it already had — passing
+    /// both every time would mean the caller reading a value back out of the
+    /// store only to write it in again.
+    ///
+    /// **No restart card.** The whole point of deriving the chrome rather than
+    /// storing it is that a scheme change is the theme-switch path arriving
+    /// through another door: `set_schemes` re-derives both palettes and the ANSI
+    /// sixteen and advances `theme_revision`, which is the revision every
+    /// artefact keyed on a palette is already invalidated by. Nothing here is a
+    /// second invalidation list.
+    pub(crate) fn apply_scheme(
+        &mut self,
+        light: Option<String>,
+        dark: Option<String>,
+    ) -> Result<bool> {
+        let mut settings = self.app.settings_store.loaded().clone();
+        if let Some(light) = light {
+            settings.light_scheme = light;
+        }
+        if let Some(dark) = dark {
+            settings.dark_scheme = dark;
+        }
+        if &settings == self.app.settings_store.loaded() {
+            return Ok(false);
+        }
+        if !self.app.settings_store.store(settings) {
+            return Ok(false);
+        }
+        // **A row that just changed is coming from a different file**, and what
+        // each row is coming from is the whole of what lets a rename be followed
+        // (§7.1.6c-7). `refresh_scheme_sources` has always named "a row pressed"
+        // among the moments it is owed and was never called at one: the memory
+        // stayed on whatever the row had been wearing when the window opened, so
+        // a scheme chosen and then renamed parted from its file unnoticed.
+        //
+        // Before the early return below, because that return is about the
+        // *palette* not having moved and this is about which file answered.
+        self.refresh_scheme_sources();
+        if adopt_stored_schemes(self.app.settings_store.loaded()) == ThemeChange::Unchanged {
+            return Ok(false);
+        }
+        self.adopt_new_palette()?;
+        Ok(true)
+    }
+
+    /// **Copy the scheme in force into the user's own folder, and open the
+    /// copy** (§7.1.6c-4c, user ruling: route B).
+    ///
+    /// This is the whole of "a scheme editor" in this product, and the reason it
+    /// is not a panel of nineteen colour wells is that the file already is one:
+    /// §7.1.6c-4a made a scheme a Windows Terminal JSON object, so an editor of
+    /// our own would be a worse way to edit a format the ecosystem already
+    /// edits. What was missing was never a picker — it was a *copy to edit* and
+    /// a way to see what you are typing, and those are the two things this verb
+    /// and [`crate::hex_peek`] add.
+    ///
+    /// Five steps, in the order a person would do them by hand:
+    ///
+    /// 1. take the scheme **actually painted** — by the canvas's luma, which is
+    ///    the question the chrome asks, and not by the theme setting, because
+    ///    under a `BT_BG` override those two disagree on purpose;
+    /// 2. write it out under a name nothing else holds;
+    /// 3. tick it in the row for that canvas, so the window is already wearing
+    ///    the copy before it is edited and the first save is visible;
+    /// 4. shut the dialog, because what happens next is not in it;
+    /// 5. open the file in a preview pane with the keyboard in it.
+    ///
+    /// **A failure to write stops at step two** and says so. Everything after it
+    /// is about a file that exists.
+    fn add_scheme(&mut self, light: bool) -> Result<()> {
+        // **The canvas comes from the ROW the verb ends** (user ruling
+        // 2026-08-19) and no longer from the window's own background. The verb
+        // used to stand at the foot of a page and had to guess which of the two
+        // rows it was about; it stands at the foot of one of them now, so a
+        // reader on a Dark window who opens the Light picker and presses
+        // `Add scheme…` gets a light scheme copied — which is the row they were
+        // looking at, and the only reading that is not a guess.
+        //
+        // **It always copies**, unlike the verb it replaces. The 2026-08-18
+        // report was that `Customise scheme…` over a file the reader already
+        // owned made a second copy of it; the answer then was to change the
+        // verb's word, and the answer now is that opening a file you own has a
+        // mark of its own on the row that names it. One verb, one meaning.
+        let settings = self.app.settings_store.loaded();
+        let stored = if light {
+            settings.light_scheme.clone()
+        } else {
+            settings.dark_scheme.clone()
+        };
+        let catalogue = schemes::catalogue();
+        // The name the picker is ticking, which is the name of what is on
+        // screen: a stored name this build does not hold shows the default, and
+        // a copy called `<a name nobody has> (custom)` would be a file named
+        // after a scheme it does not contain.
+        let base = if catalogue.file_of(&stored, light).is_some() {
+            stored
+        } else {
+            catalogue.default_name(light).to_owned()
+        };
+        let scheme = catalogue.resolve(&base, light);
+        drop(catalogue);
+        let (path, name) = match schemes::write_custom_copy(&base, &scheme) {
+            Ok((path, name, _)) => (path, name),
+            Err(error) => {
+                return self.toast(
+                    toast::ToastKind::Error,
+                    toast::ToastAnchor::Window,
+                    Some(i18n::Text::AddScheme.text().to_owned()),
+                    i18n::not_saved(&error.to_string()),
+                );
+            }
+        };
+        // The folder exists now whether or not it did a moment ago, which is one
+        // of the two moments `SchemeWatch` can be armed at.
+        self.app.scheme_watch.arm(&self.app.event_proxy);
+        if light {
+            self.apply_scheme(Some(name), None)?;
+        } else {
+            self.apply_scheme(None, Some(name))?;
+        }
+        self.refresh_scheme_sources();
+        self.open_scheme_for_editing(path)
+    }
+
+    /// The schemes folder moved and has gone quiet: read it again
+    /// (§7.1.6c-4c).
+    ///
+    /// Called once per turn of the loop beside every other clock in this window.
+    /// It costs one comparison while nothing is happening — the debounce arms
+    /// only after a notification, which is what keeps an always-on watch from
+    /// being the polling R31 forbids.
+    pub(crate) fn advance_scheme_watch(&mut self, now: Instant) -> Result<()> {
+        if !self.app.scheme_watch.due(now) {
+            return Ok(());
+        }
+        self.reread_schemes()
+    }
+
+    /// Read the folder again, and put in force whatever that changed.
+    ///
+    /// Three outcomes, and the interesting one is the middle:
+    ///
+    /// * **the selected scheme changed** — re-derive and hot-apply, through the
+    ///   very door a settings row goes through, so a file saved and a row
+    ///   pressed cannot produce two different windows;
+    /// * **the selected scheme's file stopped parsing** — the colours on screen
+    ///   do not move, and one card says which file and why. Falling back to the
+    ///   default here would be the worst of both: the window would change colour
+    ///   *because* you made a typo, and you would be reading the error against a
+    ///   palette that is not the one you are editing;
+    /// * **the selected scheme's file is gone** — the row falls to the default,
+    ///   which is `Catalogue::resolve`'s standing answer, and one card says so.
+    ///   The stored name is left alone, so putting the file back puts the scheme
+    ///   back.
+    ///
+    /// A scheme nobody has selected can do any of the three and nothing happens,
+    /// which falls out of the arithmetic rather than being checked: what is
+    /// handed to `set_schemes` is derived from the two stored names, so a file
+    /// neither of them resolves to cannot move it.
+    pub(crate) fn reread_schemes(&mut self) -> Result<()> {
+        let source = self.app.scheme_source.clone();
+        let after = schemes::rescan();
+        let settings = self.app.settings_store.loaded().clone();
+        let verdict = schemes::rescan_verdict(
+            &after,
+            [&settings.light_scheme, &settings.dark_scheme],
+            source,
+            bt_render::schemes_in_force(),
+            self.app.scheme_fault.as_deref(),
+        );
+        if bt_render::set_schemes(verdict.schemes.0, verdict.schemes.1)
+            == bt_render::ThemeChange::Changed
+        {
+            self.adopt_new_palette()?;
+        }
+        self.refresh_scheme_sources();
+        self.app.scheme_fault = verdict.fault;
+        if let Some((file, reason)) = verdict.report {
+            self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::Window,
+                Some(i18n::Text::SchemeInUseBroken.text().to_owned()),
+                i18n::scheme_in_use_broken(&file, &reason),
+            )?;
+        }
+        // **A rename follows the file** (user report 2026-08-18). A scheme's
+        // name lives inside its file and `settings.json` stores the name, so
+        // editing it parts the row from the file it came from: the row stops
+        // resolving, falls to the default, and the reader has to go and pick
+        // their own scheme again — which is the product fighting a change they
+        // made on purpose. The watcher already tracks the *file* each row came
+        // from, so the new name is simply written into the row that was wearing
+        // the old one. Both rows follow when both were pointing at one file.
+        //
+        // No card. The colours did not move (the verdict resolved through the
+        // new name and `set_schemes` above has already put them in force), the
+        // reader is looking at the file they just saved, and a card telling them
+        // what they typed is a card about nothing.
+        for (index, name) in verdict.renamed {
+            if index == 0 {
+                self.apply_scheme(Some(name), None)?;
+            } else {
+                self.apply_scheme(None, Some(name))?;
+            }
+        }
+        self.refresh_scheme_sources();
+        for (name, fallback) in verdict.gone {
+            self.toast(
+                toast::ToastKind::Info,
+                toast::ToastAnchor::Window,
+                Some(i18n::Text::SchemeInUseGone.text().to_owned()),
+                i18n::scheme_in_use_gone(&name, &fallback),
+            )?;
+        }
+        Ok(())
     }
 }
 

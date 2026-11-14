@@ -317,20 +317,23 @@ impl<Job: Send + 'static> ShareOf<Job> {
         drop(abandoned);
     }
 
-    /// **Every terminal below the share's drain mark** ([`Ledger::earliest_owed`], read once,
+    /// **Every terminal below the share's drain mark** ([`Ledger::drain_mark`], read once,
     /// before the requests are looked at), in the order the ledger minted them, each taken once —
-    /// and every `Superseded` terminal past the mark too: it carries no answer, so no answer's
-    /// order depends on it, and taking it at once frees its place in the share's bound while the
-    /// run before it is still out (a divider drag during a long resample).
+    /// and every `Superseded` terminal past the mark too ([`lane::Request::take_superseded_past`]):
+    /// it carries no answer, so no answer's order depends on it, and taking it at once frees its
+    /// place in the share's bound while the run before it is still out (a divider drag during a
+    /// long resample).
     fn ended(&self, into: &mut Vec<Ended>) {
-        let owed = self.queue.ledger().earliest_owed();
+        let mark = self.queue.ledger().drain_mark();
         let mut held = locked(&self.held);
         let taken: Vec<(ComputationId, ComputationTerminal)> = held
             .iter_mut()
             .filter_map(|(id, (request, _, _))| {
-                let below = owed.is_none_or(|owed| *id < owed);
-                let terminal = request
-                    .take_if(|terminal| below || matches!(terminal, Terminal::Superseded { .. }))?;
+                let terminal = if mark.below(*id) {
+                    request.take(&mark)
+                } else {
+                    request.take_superseded_past(&mark)
+                }?;
                 Some((*id, terminal))
             })
             .collect();
@@ -355,27 +358,47 @@ pub(crate) struct ComputationLane {
     scale: ShareOf<ScaleWorkerRequest>,
     path: ShareOf<PathWorkerRequest>,
     executor: Executor,
+    /// What the decoration worker makes its formula engine with: the desktop engine
+    /// ([`MathEngine::new`], which scans the machine's fonts) in the product, and the faces Folio
+    /// ships with nothing of the machine's (`fixtures::engine_without_the_machine`) in the suite.
+    make_engine: fn() -> MathEngine,
+    /// How many engines this lane's factory has made, for a test to read.
+    #[cfg(test)]
+    engines_made: Arc<std::sync::atomic::AtomicUsize>,
     wake: Arc<dyn Fn() + Send + Sync>,
     sink: Sink,
 }
 
 impl ComputationLane {
     /// **The product's lane**: workers started through the thread door, below normal, by the
-    /// first request each share is asked; the ledgers' lines said in `diagnostics.log`; and the
-    /// sink that ignores what a gone asker is owed.
+    /// first request each share is asked; its formula engine the desktop's ([`MathEngine::new`]);
+    /// the ledgers' lines said in `diagnostics.log`; and the sink that ignores what a gone asker
+    /// is owed.
     pub(crate) fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self::making_engines_with(MathEngine::new, wake)
+    }
+
+    /// [`Self::new`], its formula engine made by `make_engine` instead: a headless window's lane
+    /// makes it from the faces Folio ships (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN).
+    pub(crate) fn making_engines_with(
+        make_engine: fn() -> MathEngine,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
         Self::start_with(
             Executor::thread_door(bt_platform::ThreadPriority::BelowNormal),
+            make_engine,
             wake,
             crate::diagnostics::note,
             |_, _| {},
         )
     }
 
-    /// The lane with its workers started by `executor`, waking through `wake`, saying its ledgers'
-    /// lines through `say`, and ending a gone asker's request in `sink`.
+    /// The lane with its workers started by `executor`, its formula engine made by
+    /// `make_engine`, waking through `wake`, saying its ledgers' lines through `say`, and ending a
+    /// gone asker's request in `sink`.
     pub(crate) fn start_with(
         executor: Executor,
+        make_engine: fn() -> MathEngine,
         wake: impl Fn() + Send + Sync + 'static,
         say: impl Fn(&str) + Send + Sync + 'static,
         sink: impl Fn(ComputationId, ComputationTerminal) + Send + Sync + 'static,
@@ -405,9 +428,38 @@ impl ComputationLane {
                 Arc::clone(&wake),
             ),
             executor,
+            make_engine,
+            #[cfg(test)]
+            engines_made: Arc::default(),
             wake,
             sink: Arc::new(sink),
         }
+    }
+
+    /// **What the decoration worker makes its engine factory from**: the lane's `make_engine` (a
+    /// `fn`, copied) and, under test, the lane's count. Taken only when a request starts the
+    /// worker; the factory itself is boxed on the worker's thread ([`EngineMaker::into_factory`]),
+    /// so a request on the window thread allocates nothing for it.
+    fn engine_maker(&self) -> EngineMaker {
+        EngineMaker {
+            make_engine: self.make_engine,
+            #[cfg(test)]
+            engines_made: Arc::clone(&self.engines_made),
+        }
+    }
+
+    /// **The engine this lane's decoration worker would make**, made here, on the caller's thread,
+    /// and counted.
+    #[cfg(test)]
+    pub(crate) fn make_an_engine(&self) -> MathEngine {
+        (self.engine_maker().into_factory())()
+    }
+
+    /// **How many formula engines this lane's factory has made.** Exact once a formula has been
+    /// answered: the arm that answered it waited for the making.
+    #[cfg(test)]
+    pub(crate) fn engines_made(&self) -> usize {
+        self.engines_made.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// **Ask for one formula, decode or glance** (C1): admitted and held for its asker — its
@@ -423,11 +475,12 @@ impl ComputationLane {
     }
 
     /// [`Self::decorate`], the formula share's worker — when this request is the one that starts
-    /// it — answering through the door `make` makes on its thread.
+    /// it — answering through the door `make` makes on its thread, handed the lane's formula
+    /// engine factory.
     pub(crate) fn decorate_through(
         &self,
         request: MathWorkerRequest,
-        make: impl FnOnce(&WorkerCtx) -> Door<MathWorkerRequest> + Send + 'static,
+        make: impl FnOnce(&WorkerCtx, EngineFactory) -> Door<MathWorkerRequest> + Send + 'static,
     ) -> Result<ComputationId, (Refused, MathWorkerRequest)> {
         let owner = request.owner();
         let asked = request.asked();
@@ -447,10 +500,12 @@ impl ComputationLane {
                 // overflow is not a panic and would take the window with it, so the depth that is
                 // refused and the stack it is refused against are chosen together, in `bt-math`,
                 // and this is where the second half of that pair is spent.
+                let maker = self.engine_maker();
                 self.executor
                     .with_stack(bt_math::MATH_WORKER_STACK_BYTES)
                     .start_worker("bt-math-worker", ran, move |ctx| {
-                        ShareOf::serve(&queue, ctx, make(ctx), &*wake);
+                        let make_engine = maker.into_factory();
+                        ShareOf::serve(&queue, ctx, make(ctx, make_engine), &*wake);
                     })
             },
         )
@@ -625,7 +680,9 @@ pub(crate) fn read_video_glance(
         bt_transcript::paths::PathNamer::ThisWindow,
     ) {
         return VideoGlance {
-            frame: None,
+            // Not read, and never will be unasked: the same answer every time, which is a
+            // refusal's.
+            frame: Err(bt_platform::video::NoFrame::Refused),
             facts: preview::VideoFacts::default(),
             mtime: None,
         };
@@ -637,12 +694,18 @@ pub(crate) fn read_video_glance(
         let _ = worker;
         bt_platform::video::first_frame(path, VIDEO_FRAME_FIT_PX.0, VIDEO_FRAME_FIT_PX.1)
     };
+    // What the open learned about the recording, which only a frame carries.
+    let (duration_ms, native) = match &frame {
+        Ok(frame) => (
+            frame.duration_ms,
+            Some((frame.native_width, frame.native_height)),
+        ),
+        Err(_) => (None, None),
+    };
     VideoGlance {
         facts: preview::VideoFacts {
-            duration_ms: frame.as_ref().and_then(|frame| frame.duration_ms),
-            native: frame
-                .as_ref()
-                .map(|frame| (frame.native_width, frame.native_height)),
+            duration_ms,
+            native,
             bytes,
         },
         frame,
@@ -748,15 +811,33 @@ pub(crate) fn run_path_verify_worker(
     }
 }
 
-/// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the engine and the
-/// decoder are made once, on the worker, and the door it returns answers each request — the
-/// production decoration work, also exercised without a window by regression tests.
+/// **The formula and picture worker** (`computation_lane`, `bt-math-worker`): the product's door,
+/// [`run_decoration_worker_with`] with the engine `make_engine` makes made beside it — the lane's
+/// factory, the desktop engine ([`MathEngine::new`]) in the product — the production decoration
+/// work, also exercised without a window by regression tests.
 pub(crate) fn run_decoration_worker(
     worker: &bt_platform::admission::WorkerCtx,
+    make_engine: EngineFactory,
+) -> Door<MathWorkerRequest> {
+    run_decoration_worker_with(worker, FormulaEngine::beside(make_engine))
+}
+
+/// **The decoration worker, its formula engine `formulas`**: the decoder is made once, on the
+/// worker, and the door it returns answers each request.
+///
+/// The engine is made beside the worker, from the moment the door is made ([`FormulaEngine`]),
+/// and only a formula arm waits for it (`Math`, or a `PreviewMath` whose key is drawable;
+/// T-LANE-SUITE-PATIENCE-UNDER-LOAD): the desktop engine scans every font the machine has, which
+/// no answer of a picture, a glance, a video frame, an animation or a page needs or waits for,
+/// and a formula asked once the scan is over waits for nothing. A scan that panicked refuses
+/// every formula (`MathRenderError::Aborted`, the formula drawn as its source text) and nothing
+/// else: the pictures go on being answered.
+pub(crate) fn run_decoration_worker_with(
+    worker: &bt_platform::admission::WorkerCtx,
+    mut formulas: FormulaEngine,
 ) -> Door<MathWorkerRequest> {
     // The door is made on the worker; each request is handed the same capability again.
     let _ = worker;
-    let engine = MathEngine::new();
     let mut image_decoder = InlineImageDecoder::default();
     Box::new(
         move |worker: &bt_platform::admission::WorkerCtx, work: MathWorkerRequest| {
@@ -766,7 +847,9 @@ pub(crate) fn run_decoration_worker(
                     mut task,
                     foreground_rgb,
                 } => {
-                    let result = bt_compose::typeset(&engine, &mut task, foreground_rgb);
+                    let result = formulas
+                        .engine(worker)
+                        .and_then(|engine| bt_compose::typeset(engine, &mut task, foreground_rgb));
                     (leaf, DecorationWorkerCompletion::Math { task, result })
                 }
                 MathWorkerRequest::InlineImage { leaf, task } => {
@@ -783,7 +866,10 @@ pub(crate) fn run_decoration_worker(
                         key.mode,
                     )
                     .ok_or(MathRenderError::InvalidDimensions)
-                    .and_then(|render_key| engine.render(&key.source, render_key));
+                    .and_then(|render_key| {
+                        let engine = formulas.engine(worker)?;
+                        engine.render(&key.source, render_key)
+                    });
                     (
                         leaf,
                         DecorationWorkerCompletion::PreviewMath { key, result },
@@ -851,6 +937,169 @@ pub(crate) fn run_decoration_worker(
     )
 }
 
+/// The factory a [`FormulaEngine`] makes its engine with.
+pub(crate) type EngineFactory = Box<dyn FnOnce() -> MathEngine + Send>;
+
+/// **A lane's formula engine maker, on its way to the decoration worker**: the `fn` the lane was
+/// built with ([`MathEngine::new`] in the product) and, under test, the lane's count of engines
+/// made. [`ComputationLane::engine_maker`] takes it when a request starts the worker; the worker
+/// boxes it into its [`EngineFactory`] on its own thread.
+struct EngineMaker {
+    make_engine: fn() -> MathEngine,
+    #[cfg(test)]
+    engines_made: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl EngineMaker {
+    /// **The factory the decoration worker's door is handed**: `make_engine`, counted under test.
+    fn into_factory(self) -> EngineFactory {
+        Box::new(move || {
+            #[cfg(test)]
+            self.engines_made
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (self.make_engine)()
+        })
+    }
+}
+
+/// **The decoration door's formula engine, made beside the worker.**
+///
+/// The factory runs on a thread of its own, `bt-math-fonts`, from the moment the door is made. The
+/// thread stands in the band of the worker that makes the door: below normal in the product, so
+/// the scan is no more in a frame's way than it was on the worker, and no lower than the worker
+/// where a suite's executor starts it at normal. The worker waits for it only at the first formula
+/// arm that needs the engine ([`Self::engine`]), never at a picture's answer.
+///
+/// - **Nothing joins a scan no formula asked for.** A door dropped before its first formula drops
+///   the thread's handle, and the scan finishes on its own and drops its engine. In the product the
+///   door lives as long as the process; in the suite every door that answered only pictures
+///   leaves its scan running past its test, beside the tests after it.
+/// - **A scan that panics is contained on its own thread** (`contained_panic::contain`), and is
+///   the formulas' failure, not the process's and not the worker's: the failure is said once in
+///   `diagnostics.log`, every formula after it is refused (`MathRenderError::Aborted`, which
+///   draws the formula as its source text), and the worker goes on answering pictures.
+/// - **A thread the door refuses** is said once in `diagnostics.log`, and the first formula makes
+///   the engine on the worker, contained the same way.
+pub(crate) struct FormulaEngine {
+    making: Making,
+    /// How many times a formula arm has waited for the engine (a join, or a making on the worker).
+    #[cfg(test)]
+    waits: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Where a [`FormulaEngine`]'s engine is.
+enum Making {
+    /// Being made on `bt-math-fonts`.
+    Beside(std::thread::JoinHandle<Result<MathEngine, String>>),
+    /// To be made on the worker by the first formula: the thread door refused `bt-math-fonts`.
+    Here(EngineFactory),
+    /// Boxed: the engine is some 400 bytes, and the other states a pointer or two.
+    Made(Box<MathEngine>),
+    /// The factory panicked; every formula is refused.
+    Refused,
+}
+
+impl FormulaEngine {
+    /// **The engine `make_engine` makes, its making begun now on `bt-math-fonts`**, in the band of
+    /// the thread that calls this (the decoration worker, which makes its door). Off Windows a
+    /// thread has no band (`current_thread_priority` answers `None`) and the thread door sets none,
+    /// so the band handed there is `Normal`, which sets nothing either.
+    pub(crate) fn beside(make_engine: impl FnOnce() -> MathEngine + Send + 'static) -> Self {
+        let band =
+            bt_platform::current_thread_priority().unwrap_or(bt_platform::ThreadPriority::Normal);
+        // Held outside the thread's closure: a spawn the door refuses drops its closure, and the
+        // factory with it, without calling it.
+        let factory: Arc<Mutex<Option<EngineFactory>>> =
+            Arc::new(Mutex::new(Some(Box::new(make_engine))));
+        let on_its_thread = Arc::clone(&factory);
+        let making = match bt_platform::spawn_at_priority("bt-math-fonts", band, move |_ctx| {
+            scanned(move || {
+                let make = locked(&on_its_thread)
+                    .take()
+                    .expect("a started thread is the only taker of its factory");
+                make()
+            })
+        }) {
+            Ok(thread) => Making::Beside(thread),
+            Err(error) => {
+                crate::diagnostics::note(&format!(
+                    "computation lane: the formula engine's font scan could not start a thread \
+                     of its own ({error}); the first formula makes the engine on the worker"
+                ));
+                Making::Here(
+                    locked(&factory)
+                        .take()
+                        .expect("a refused spawn drops its closure without calling it"),
+                )
+            }
+        };
+        Self {
+            making,
+            #[cfg(test)]
+            waits: Arc::default(),
+        }
+    }
+
+    /// The count of the formula arms' waits for the engine, kept for a test to read.
+    #[cfg(test)]
+    pub(crate) fn waits(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        Arc::clone(&self.waits)
+    }
+
+    /// **The engine, waited for on the worker** (`worker`, the capability that says this wait is a
+    /// worker's and not the window's; nothing else is read from it): the thread's, joined the first
+    /// time a formula arm asks, or made here when no thread took the factory. A scan that panicked
+    /// answers `MathRenderError::Aborted`, now and for every formula after it.
+    fn engine(
+        &mut self,
+        worker: &bt_platform::admission::WorkerCtx,
+    ) -> Result<&MathEngine, MathRenderError> {
+        let _ = worker;
+        self.making = match std::mem::replace(&mut self.making, Making::Refused) {
+            Making::Beside(thread) => {
+                #[cfg(test)]
+                self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                settled(
+                    thread
+                        .join()
+                        .expect("the scan's panic is contained on its own thread"),
+                )
+            }
+            Making::Here(make) => {
+                #[cfg(test)]
+                self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                settled(scanned(make))
+            }
+            settled @ (Making::Made(_) | Making::Refused) => settled,
+        };
+        match &self.making {
+            Making::Made(engine) => Ok(engine.as_ref()),
+            Making::Beside(_) | Making::Here(_) | Making::Refused => Err(MathRenderError::Aborted),
+        }
+    }
+}
+
+/// **The engine `make` makes, its panic contained** (`contained_panic::contain`): the panic's
+/// message when it panicked.
+fn scanned(make: impl FnOnce() -> MathEngine) -> Result<MathEngine, String> {
+    crate::contained_panic::contain(make)
+        .map_err(|panic| crate::pty_door::panic_message(panic.as_ref()).to_owned())
+}
+
+/// What a scan's end leaves a [`FormulaEngine`] with; a panic is said here, once.
+fn settled(scan: Result<MathEngine, String>) -> Making {
+    match scan {
+        Ok(engine) => Making::Made(Box::new(engine)),
+        Err(cause) => {
+            crate::diagnostics::note(&format!(
+                "computation lane: the formula engine's font scan failed ({cause}); every formula \
+                 is drawn as its source text, and pictures are still answered"
+            ));
+            Making::Refused
+        }
+    }
+}
+
 /// **A lane under a test's eye** — the lane, its wakes, the lines its ledgers said, what its sink
 /// took, and every terminal the test has drained.
 #[cfg(test)]
@@ -871,7 +1120,24 @@ pub(crate) mod fixtures {
         taken: Vec<Ended>,
     }
 
-    /// A lane started by `executor`, watched.
+    /// **The suite's formula engine: the faces Folio ships, and nothing of the machine's**
+    /// (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN).
+    ///
+    /// typst-assets' seventeen faces in that crate's order: the book [`MathEngine::new`] starts
+    /// with, without the scan of every font installed that follows them (bt-math's
+    /// `the_desktop_book_is_the_typst_assets_faces` holds the order, and `with_faces` keeps the
+    /// order it is handed). No lane-suite patience then holds a scan of the machine's font
+    /// folders, and a formula is set the same on every machine. A formula that needs a face the
+    /// machine has and Folio does not ship (an ideograph) is refused by name here, as in a browser
+    /// build; a test about the machine's faces makes `MathEngine::new()` itself, outside any
+    /// patience.
+    pub(crate) fn engine_without_the_machine() -> MathEngine {
+        MathEngine::with_faces(typst_assets::fonts().map(Arc::<[u8]>::from))
+            .expect("typst-assets carries the math face")
+    }
+
+    /// A lane started by `executor`, watched, its formula engine the suite's
+    /// ([`engine_without_the_machine`]).
     pub(crate) fn watched(executor: Executor) -> Watched {
         let (wake, wakes) = lane::wake_channel();
         let said = Arc::new(Mutex::new(Vec::new()));
@@ -880,6 +1146,7 @@ pub(crate) mod fixtures {
         let sink = Arc::clone(&sunk);
         let lane = Arc::new(ComputationLane::start_with(
             executor,
+            engine_without_the_machine,
             wake,
             move |line| locked(&lines).push(line.to_owned()),
             move |id, terminal| locked(&sink).push((id, terminal)),
@@ -967,12 +1234,12 @@ pub(crate) mod fixtures {
     }
 
     /// **The product's formula door, telling `heard` whom each request is for** before it runs
-    /// it — for [`ComputationLane::decorate_through`].
+    /// it — for [`ComputationLane::decorate_through`], with the lane's formula engine.
     pub(crate) fn recording(
         heard: mpsc::Sender<crate::ShellAddress>,
-    ) -> impl FnOnce(&WorkerCtx) -> Door<MathWorkerRequest> + Send + 'static {
-        move |ctx| {
-            let mut real = run_decoration_worker(ctx);
+    ) -> impl FnOnce(&WorkerCtx, EngineFactory) -> Door<MathWorkerRequest> + Send + 'static {
+        move |ctx, make_engine| {
+            let mut real = run_decoration_worker(ctx, make_engine);
             Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
                 let leaf = match &request {
                     MathWorkerRequest::Math { leaf, .. }
@@ -1117,6 +1384,7 @@ pub(crate) mod contract_adapter {
         let sink = Arc::clone(&sunk);
         let lane = ComputationLane::start_with(
             Executor::scripted(Arc::clone(&gate)),
+            super::fixtures::engine_without_the_machine,
             move || heard.woke(),
             move |_| {
                 counted.fetch_add(1, Ordering::SeqCst);
@@ -1163,8 +1431,8 @@ pub(crate) mod contract_adapter {
                             source: bt_term::InlineImageSource::Osc1337(Vec::new()),
                         },
                     };
-                    let door = move |ctx: &WorkerCtx| -> Door<MathWorkerRequest> {
-                        let mut real = run_decoration_worker(ctx);
+                    let door = move |ctx: &WorkerCtx, make_engine| -> Door<MathWorkerRequest> {
+                        let mut real = run_decoration_worker(ctx, make_engine);
                         Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
                             // The suite's file, held while the real work runs.
                             let held = match &request {
@@ -1646,6 +1914,12 @@ mod tests {
         );
         assert!(render("x+1").is_ok(), "the engine goes on");
         assert_eq!(lane.said(), Vec::<String>::new(), "no failure was said");
+        assert_eq!(
+            lane.lane.engines_made(),
+            1,
+            "the fixture's own precondition: the formula was typeset by an engine the lane's factory \
+             made, from the faces Folio ships, and the machine's fonts were never scanned"
+        );
     }
 
     /// RED (S-8; was the scale worker's drag storm) — **A drag runs the size it ends at; every
@@ -1717,9 +1991,10 @@ mod tests {
         );
     }
 
-    /// A formula door — the product's — whose first terminal formula's work panics.
-    fn formula_fails_once(ctx: &WorkerCtx) -> Door<MathWorkerRequest> {
-        let mut real = run_decoration_worker(ctx);
+    /// A formula door — the product's, with the lane's engine — whose first terminal formula's
+    /// work panics.
+    fn formula_fails_once(ctx: &WorkerCtx, make_engine: EngineFactory) -> Door<MathWorkerRequest> {
+        let mut real = run_decoration_worker(ctx, make_engine);
         let mut failed = false;
         Box::new(move |ctx: &WorkerCtx, request: MathWorkerRequest| {
             if !failed && matches!(request, MathWorkerRequest::Math { .. }) {
@@ -1745,9 +2020,14 @@ mod tests {
 
     /// A pane showing one live formula, settled and ready to be handed out.
     fn a_pane_with_a_formula() -> bt_term::DualPlaneSession {
+        a_pane_with_a_formula_in(40)
+    }
+
+    /// [`a_pane_with_a_formula`], `columns` wide.
+    fn a_pane_with_a_formula_in(columns: u32) -> bt_term::DualPlaneSession {
         let start = std::time::Instant::now();
         let mut session = bt_term::DualPlaneSession::new(
-            std::num::NonZeroU32::new(40).unwrap(),
+            std::num::NonZeroU32::new(columns).unwrap(),
             std::num::NonZeroU32::new(4).unwrap(),
         );
         session
@@ -1757,10 +2037,42 @@ mod tests {
         session
     }
 
+    /// **The columns a pane needs to print `path` on one row and stop short of the row's last
+    /// cell**, whatever the machine's temporary folder, process id or the suite's ordinal make it
+    /// spell: twice its characters (no character is wider than two cells) and two more.
+    ///
+    /// A path whose last character lands in the last cell of its physical line is one the
+    /// truncation gate holds back on purpose — it may be the front half of a name the program cut
+    /// in two (`docs/DESIGN.md` §7.1.5k ①; `bt_transcript::paths::touches_line_end`) — so a fixed
+    /// grid width under a machine-made path was a test of the gate on the runner where the two
+    /// happened to meet (row 134: 80 columns on a 40-column grid, CI only), not of the hand-out.
+    fn columns_for(path: &std::path::Path) -> u32 {
+        u32::try_from(2 * path.to_string_lossy().chars().count() + 2).unwrap()
+    }
+
+    /// A pane with a formula on screen and then `path`, printed by the program after it: the
+    /// formula's task and the path's question both queued, nothing handed out yet.
+    fn a_pane_with_a_formula_then_a_path(path: &std::path::Path) -> bt_term::DualPlaneSession {
+        let mut session = a_pane_with_a_formula_in(columns_for(path));
+        session.set_math_layout_options(bt_term::MathLayoutOptions {
+            detect_image_paths: true,
+            ..bt_term::MathLayoutOptions::default()
+        });
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session
+            .feed(format!("\r\n{}\r\n", path.to_string_lossy()).as_bytes())
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        session
+    }
+
     /// A pane that printed one path (a name in Chinese and Latin), its question queued.
     fn a_pane_with_a_printed_path(path: &std::path::Path) -> bt_term::DualPlaneSession {
         let mut session = bt_term::DualPlaneSession::new(
-            std::num::NonZeroU32::new(120).unwrap(),
+            std::num::NonZeroU32::new(columns_for(path)).unwrap(),
             std::num::NonZeroU32::new(6).unwrap(),
         );
         session.set_math_layout_options(bt_term::MathLayoutOptions {
@@ -1855,6 +2167,346 @@ mod tests {
             ),
             "the formula asked again is typeset"
         );
+        assert_eq!(
+            lane.lane.engines_made(),
+            1,
+            "the fixture's own precondition: the formula was typeset by an engine the lane's factory \
+             made, from the faces Folio ships, and the machine's fonts were never scanned"
+        );
+    }
+
+    /// PIN (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN) — **a lane the suite builds
+    /// typesets with the faces Folio ships, and scans no font folder of the machine's.**
+    ///
+    /// A terminal formula is typeset through the lane's own door, and the lane's factory has made
+    /// one engine: the one that set it. An ideograph is then refused by name
+    /// (`MathRenderError::MissingCjkGlyph`), because no face Folio ships draws one and the
+    /// engine's book holds none of the machine's; the desktop engine, which scans them, draws it
+    /// on every machine with a CJK face installed. So every formula test on a suite lane pins the
+    /// typesetting, not the fonts this machine, the Mac or a runner has, and no lane-suite
+    /// patience holds a scan of them.
+    ///
+    /// MUTATIONS: hand the door the desktop engine in `ComputationLane::decorate` instead of the
+    /// lane's factory (`Box::new(MathEngine::new)`) — the formula is typeset by an engine the
+    /// lane never made, and the count is 0 (here and in the seven formula tests' preconditions);
+    /// make `fixtures::engine_without_the_machine` answer `MathEngine::new()` — the ideograph is
+    /// drawn.
+    #[test]
+    fn a_suite_lane_typesets_with_the_faces_folio_ships_and_scans_no_font_folder() {
+        let (mut lane, _gate) = gated();
+        let mut session = a_pane_with_a_formula();
+        hand_out(&mut session, &lane.lane);
+        let (_, _, typeset, _) = lane.next_ended(Share::Decoration, nobody);
+        assert!(
+            matches!(
+                answer(typeset).map(|result| result.completion),
+                Some(DecorationWorkerCompletion::Math { result: Ok(_), .. })
+            ),
+            "the formula is typeset"
+        );
+        assert_eq!(
+            lane.lane.engines_made(),
+            1,
+            "the lane's factory made the engine that set it"
+        );
+        let ideograph = lane
+            .lane
+            .decorate(MathWorkerRequest::PreviewMath {
+                leaf: probe_leaf(),
+                key: Box::new(crate::PreviewMathKey {
+                    source: r"\text{中文}".to_owned(),
+                    mode: crate::MathMode::Display,
+                    em_milli_px: 16_000,
+                    foreground_rgb: [220, 220, 220],
+                }),
+            })
+            .ok()
+            .expect("admitted");
+        let refused = answer(lane.terminal(Share::Decoration, ideograph, nobody))
+            .expect("the formula is answered")
+            .completion;
+        assert!(
+            matches!(
+                refused,
+                DecorationWorkerCompletion::PreviewMath {
+                    result: Err(MathRenderError::MissingCjkGlyph),
+                    ..
+                }
+            ),
+            "no face Folio ships draws an ideograph, and the book holds none of the machine's"
+        );
+        assert_eq!(lane.lane.engines_made(), 1, "and the engine is kept");
+    }
+
+    /// PIN (T-FORMULA-TESTS-TYPESET-WITHOUT-THE-REAL-FONT-SCAN) — **the product's lane makes the
+    /// desktop formula engine**, which scans the machine's fonts behind the faces Folio ships: a
+    /// formula with an ideograph in it is drawn in the faces the reader has. The suite's lanes
+    /// make theirs without the machine (`fixtures::engine_without_the_machine`), so this is the
+    /// one place the product's choice is held; bt-math's own tests hold what the scan finds.
+    ///
+    /// MUTATION: build the product lane in `ComputationLane::new` with
+    /// `fixtures::engine_without_the_machine`'s faces — the source reads no `MathEngine::new`.
+    #[test]
+    fn the_product_lane_makes_the_desktop_formula_engine() {
+        let lane = crate::test_support::squeezed_body("ComputationLane", "new");
+        assert_eq!(
+            lane.matches("Self::making_engines_with(MathEngine::new,wake)")
+                .count(),
+            1,
+            "the product's lane hands its decoration worker the desktop engine:\n{lane}"
+        );
+    }
+
+    /// RED (T-LANE-SUITE-PATIENCE-UNDER-LOAD) — **the decoration worker answers every picture arm
+    /// before its formula engine is made, and waits for the engine once, at the first formula.**
+    ///
+    /// The worker's engine comes from a factory the test holds: it returns only once the test
+    /// lets it go, with an engine the test made on its own thread before the lane was asked
+    /// anything, so no scan of the machine's fonts runs inside the suite's patience. While it is
+    /// held, every picture arm is asked and answered — a still's pixels, a printed picture, a
+    /// recording's glance, a page, an animation's open and its next frames — so an arm that waited
+    /// for the engine would stand on the held factory, and its terminal would never come within
+    /// the patience. Once the factory is let go, a terminal formula is typeset, the worker has
+    /// waited for the engine once, and a second formula waits for nothing more.
+    ///
+    /// MUTATION: wait for the engine where the door is made (`formulas.engine(worker)` at the top
+    /// of `run_decoration_worker_with`) — the worker stands on the held factory before it serves
+    /// anything, and the first picture's terminal never comes within the suite's patience. Wait for
+    /// it in any picture arm instead — that arm's terminal never comes.
+    #[test]
+    fn a_picture_is_answered_before_the_formula_engine_is_made() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let gif = scratch_copy("folio-anim-test.gif", "先答动图 animation first");
+        let (mut lane, _gate) = gated();
+        let engine = MathEngine::new();
+        let (let_go, held) = std::sync::mpsc::channel::<()>();
+        let (hand_waits, waits) = std::sync::mpsc::channel();
+        let made = Arc::new(AtomicUsize::new(0));
+        let making = Arc::clone(&made);
+        let missing = |name: &str| PathBuf::from("不在这里 not here").join(name);
+        let first = lane
+            .lane
+            .decorate_through(
+                MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: missing("先答图片 picture first.png"),
+                },
+                move |ctx: &WorkerCtx, _lanes: EngineFactory| {
+                    let formulas = FormulaEngine::beside(move || {
+                        // Let go by the test's send, or by its end on a red.
+                        let _ = held.recv();
+                        making.fetch_add(1, Ordering::SeqCst);
+                        engine
+                    });
+                    let _ = hand_waits.send(formulas.waits());
+                    run_decoration_worker_with(ctx, formulas)
+                },
+            )
+            .ok()
+            .expect("admitted");
+        let answered = lane.terminal(Share::Decoration, first, nobody);
+        assert!(
+            matches!(
+                answer(answered).map(|result| result.completion),
+                Some(DecorationWorkerCompletion::PeekImage { .. })
+            ),
+            "a still's pixels are answered while the factory is held"
+        );
+        let waits = waits.recv().expect("the door was made");
+        let pictures = [
+            (
+                "a printed picture",
+                MathWorkerRequest::InlineImage {
+                    leaf: probe_leaf(),
+                    task: bt_term::InlineImageTask {
+                        occurrence_id: 1,
+                        source: bt_term::InlineImageSource::LocalPath(missing("印出 printed.png")),
+                    },
+                },
+            ),
+            (
+                "a recording's glance",
+                MathWorkerRequest::PeekVideoFrame {
+                    leaf: probe_leaf(),
+                    path: missing("录像 recording.mp4"),
+                },
+            ),
+            (
+                "a page",
+                MathWorkerRequest::PeekPage {
+                    leaf: probe_leaf(),
+                    path: missing("页 page.pdf"),
+                    page: 0,
+                    fit: (160, 160),
+                    known: None,
+                },
+            ),
+        ];
+        for (what, request) in pictures {
+            let id = lane.lane.decorate(request).ok().expect("admitted");
+            let answered = lane.terminal(Share::Decoration, id, nobody);
+            assert!(
+                answer(answered).is_some(),
+                "{what} is answered while the factory is held"
+            );
+        }
+        let opened = lane
+            .lane
+            .decorate(MathWorkerRequest::PeekAnimation {
+                leaf: probe_leaf(),
+                path: gif.0.clone(),
+            })
+            .ok()
+            .expect("admitted");
+        let opened = answer(lane.terminal(Share::Decoration, opened, nobody))
+            .map(|result| result.completion);
+        let Some(DecorationWorkerCompletion::PeekAnimation {
+            frames: Ok(mut animation),
+            ..
+        }) = opened
+        else {
+            panic!("the shipped GIF opens as an animation while the factory is held");
+        };
+        // Played out on a made-up clock, as the window would after five seconds of drawing it, so
+        // the ring has room and the cursor is handed out.
+        let start = Instant::now();
+        animation.present(start);
+        animation.advance(start + std::time::Duration::from_secs(5));
+        let (cursor, want) = animation.take_cursor().expect("a played-out ring has room");
+        let filled = lane
+            .lane
+            .decorate(MathWorkerRequest::AnimationFill {
+                leaf: probe_leaf(),
+                path: gif.0.clone(),
+                serial: 1,
+                cursor,
+                want,
+            })
+            .ok()
+            .expect("admitted");
+        assert!(
+            matches!(
+                answer(lane.terminal(Share::Decoration, filled, nobody))
+                    .map(|result| result.completion),
+                Some(DecorationWorkerCompletion::AnimationFill { .. })
+            ),
+            "an animation's next frames are answered while the factory is held"
+        );
+        // The shape, said: no picture made an engine, and none waited for one (an arm that had
+        // waited would have stood on the held factory, and its terminal would not have come).
+        assert_eq!(made.load(Ordering::SeqCst), 0, "no engine for a picture");
+        assert_eq!(waits.load(Ordering::SeqCst), 0, "no wait for a picture");
+        let_go
+            .send(())
+            .expect("the held factory is still there to be let go");
+        let mut session = a_pane_with_a_formula();
+        hand_out(&mut session, &lane.lane);
+        let (_, _, typeset, _) = lane.next_ended(Share::Decoration, nobody);
+        assert!(
+            matches!(
+                answer(typeset).map(|result| result.completion),
+                Some(DecorationWorkerCompletion::Math { result: Ok(_), .. })
+            ),
+            "the formula is typeset once the factory is let go"
+        );
+        assert_eq!(made.load(Ordering::SeqCst), 1, "the engine was made once");
+        assert_eq!(
+            waits.load(Ordering::SeqCst),
+            1,
+            "the first formula waited for the engine"
+        );
+        let mut again = a_pane_with_a_formula();
+        hand_out(&mut again, &lane.lane);
+        let (_, _, typeset, _) = lane.next_ended(Share::Decoration, nobody);
+        assert!(
+            matches!(
+                answer(typeset).map(|result| result.completion),
+                Some(DecorationWorkerCompletion::Math { result: Ok(_), .. })
+            ),
+            "a second formula is typeset"
+        );
+        assert_eq!(
+            waits.load(Ordering::SeqCst),
+            1,
+            "and waits for nothing: the engine is kept"
+        );
+    }
+
+    /// RED (T-LANE-SUITE-PATIENCE-UNDER-LOAD review F1) — **a font scan that panics is every
+    /// formula's refusal, and nothing else's: the pictures go on being answered, the worker is not
+    /// faulted, and the process lives.**
+    ///
+    /// The factory panics on `bt-math-fonts`, inside `contained_panic::contain`. A formula is then
+    /// answered `MathRenderError::Aborted` (drawn as its source text) — `Done`, not `Failed`: the
+    /// worker did not end, and no share was faulted — a picture asked after it is answered, and a
+    /// second formula is refused the same way without a second scan.
+    ///
+    /// MUTATION: run the factory on its thread without `contain` — the hook (the suite's, here)
+    /// sees the panic, the join's `expect` carries it onto the worker inside the formula's task,
+    /// and the formula's terminal is `Failed`, not an answer; and under the resident hook the
+    /// process ends.
+    #[test]
+    fn a_font_scan_that_panics_refuses_each_formula_and_answers_pictures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (mut lane, _gate) = gated();
+        let (hand_waits, waits) = std::sync::mpsc::channel();
+        let first = lane
+            .lane
+            .decorate_through(
+                MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: PathBuf::from("不在这里 not here/字体坏了 a bad font.png"),
+                },
+                move |ctx: &WorkerCtx, _lanes: EngineFactory| {
+                    let formulas = FormulaEngine::beside(|| -> MathEngine {
+                        panic!("a font file the scan could not read (planted by the test)")
+                    });
+                    let _ = hand_waits.send(formulas.waits());
+                    run_decoration_worker_with(ctx, formulas)
+                },
+            )
+            .ok()
+            .expect("admitted");
+        assert!(
+            answer(lane.terminal(Share::Decoration, first, nobody)).is_some(),
+            "a picture is answered"
+        );
+        let waits: Arc<AtomicUsize> = waits.recv().expect("the door was made");
+        for which in ["the first formula", "a second formula"] {
+            let mut session = a_pane_with_a_formula();
+            hand_out(&mut session, &lane.lane);
+            let (_, _, refused, _) = lane.next_ended(Share::Decoration, nobody);
+            let completion = answer(refused)
+                .unwrap_or_else(|| panic!("{which} is answered, not failed"))
+                .completion;
+            assert!(
+                matches!(
+                    completion,
+                    DecorationWorkerCompletion::Math {
+                        result: Err(MathRenderError::Aborted),
+                        ..
+                    }
+                ),
+                "{which} is refused"
+            );
+            let after = lane
+                .lane
+                .decorate(MathWorkerRequest::PeekImage {
+                    leaf: probe_leaf(),
+                    path: PathBuf::from("不在这里 not here/之后 after.png"),
+                })
+                .ok()
+                .expect("the share is not faulted: a picture is still admitted");
+            assert!(
+                answer(lane.terminal(Share::Decoration, after, nobody)).is_some(),
+                "a picture after {which} is answered"
+            );
+        }
+        assert_eq!(
+            waits.load(Ordering::SeqCst),
+            1,
+            "the failed scan was waited for once and kept"
+        );
     }
 
     /// RED (S-8 rounds 2 and 3; revision (b)5 rule 1) — **A printed path whose check failed is
@@ -1931,7 +2583,7 @@ mod tests {
                     leaf: probe_leaf(),
                     path: path.clone(),
                 },
-                |ctx: &WorkerCtx| -> Door<MathWorkerRequest> {
+                |ctx: &WorkerCtx, _lanes: EngineFactory| -> Door<MathWorkerRequest> {
                     let _ = ctx;
                     Box::new(|_: &WorkerCtx, _: MathWorkerRequest| -> MathWorkerResult {
                         panic!("the suite fails this glance's decode on purpose")
@@ -2088,21 +2740,9 @@ mod tests {
                 .ok()
                 .expect("within the bound");
         }
-        // A pane with a formula on screen, then the path the program printed after it.
-        let mut session = a_pane_with_a_formula();
-        let path = bt_testpath::temp_path("bt-app-shares-apart").join("笔记-apart.md");
-        session.set_math_layout_options(bt_term::MathLayoutOptions {
-            detect_image_paths: true,
-            ..bt_term::MathLayoutOptions::default()
-        });
-        let mut projection = session.new_projection(session.layout_key());
-        session.viewport_frame(&mut projection).unwrap();
-        session
-            .feed(format!("\r\n{}\r\n", path.to_string_lossy()).as_bytes())
-            .unwrap();
-        session.refresh_projection(&mut projection);
-        session.viewport_frame(&mut projection).unwrap();
-        session.absorb_printed_path_probes(&mut projection);
+        let mut session = a_pane_with_a_formula_then_a_path(
+            &bt_testpath::temp_path("bt-app-shares-apart").join("笔记-apart.md"),
+        );
         let outstanding = session.outstanding_decoration_work();
         assert_eq!(outstanding, 2, "a formula and a path to hand out");
         assert!(!hand_out(&mut session, &lane.lane));
@@ -2122,6 +2762,50 @@ mod tests {
             "the formula waits in the pane, not lost"
         );
         gate.release();
+    }
+
+    /// RED (row 134) — **The pane the share test hands out holds both questions however wide the
+    /// printed path is**: a formula's task and the path's question, for every path width from 60
+    /// to 130 cells.
+    ///
+    /// The share test prints a path under the machine's temporary folder, so its width is the
+    /// machine's: on the Windows runner a 36-character temporary folder, a five-digit process id
+    /// and a three-digit ordinal made it exactly 80 cells, and on the 40-column grid the
+    /// fixture had then its last character sat in the last cell of its second row — where the
+    /// truncation gate holds a name back as maybe cut in two (§7.1.5k ①), so the pane asked
+    /// nothing about it and held one task, not two (CI run 41269258357). Each width here is spelled
+    /// from the file system's root with a padding directory, so the walk is the same on every
+    /// machine.
+    ///
+    /// MUTATION: make `columns_for` answer 40 (the grid the fixture had) — widths 80 and 120 hold
+    /// one task.
+    #[test]
+    fn a_formula_then_a_path_are_both_held_whatever_the_paths_width() {
+        let root = std::env::temp_dir()
+            .ancestors()
+            .last()
+            .expect("a path has a root")
+            .to_path_buf();
+        let name = "笔记-apart.md";
+        let narrowest = bt_unicode::text_width(&root.join("x").join(name).to_string_lossy());
+        let mut short = Vec::new();
+        for width in 60..=130 {
+            let path = root.join("x".repeat(width + 1 - narrowest)).join(name);
+            assert_eq!(
+                bt_unicode::text_width(&path.to_string_lossy()),
+                width,
+                "the padding spells the width"
+            );
+            let held = a_pane_with_a_formula_then_a_path(&path).outstanding_decoration_work();
+            if held != 2 {
+                short.push((width, held));
+            }
+        }
+        assert_eq!(
+            short,
+            Vec::<(usize, usize)>::new(),
+            "every width holds a formula and a path"
+        );
     }
 
     /// RED (S-8 round 2) — **A superseded resample is announced and leaves the share's bound at

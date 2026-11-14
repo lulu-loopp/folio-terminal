@@ -1131,8 +1131,8 @@ impl Occurrence {
     /// **Whether a build of the shipped program contains these bytes.**
     ///
     /// The question nearly every prohibition in this tree really asks — "how
-    /// many times does the *product* do this" — and it is answered at two
-    /// grains, because neither one answers it alone:
+    /// many times does the *product* do this" — and it is answered at four
+    /// grains, because no one of them answers it alone:
     ///
     /// * **The file** ([`FileRecord::permits_product`], §2.3): whether any
     ///   declaration path reaches this file without passing a test gate. It is
@@ -1150,6 +1150,22 @@ impl Occurrence {
     ///   an inline test module that stand in no item — a `use`, a `const`, an
     ///   attribute — which the file grain calls product (the file is) and the
     ///   item grain has no item to ask about.
+    /// * **The gate** ([`Index::test_gates`], plan row 77, 2026-10-29): whether
+    ///   any node holding these bytes carries a `cfg` of its own that no product
+    ///   build compiles. It is the only grain for a gate written on what is
+    ///   neither an item nor a module — a module-level `#[cfg(test)] use`,
+    ///   `const` or `type`, an `impl` header, a `macro_rules!`, a `let`, an
+    ///   expression or a match arm inside a product function — each of which the
+    ///   three grains above called product whatever its `cfg` said. Inside a
+    ///   macro's tokens (plan row 109) it reads the entries of a list of
+    ///   attribute-carrying names and that list's `macro_rules!` items — a
+    ///   definition no `cfg` conditions, pasting the names only as an `enum`'s
+    ///   whole body, with no macro invocation, attribute macro, foreign `derive`
+    ///   or `macro_use` between it and the invocation (`bt-app`'s
+    ///   `text_entries!`); every other `cfg` there refuses the index, so no gate
+    ///   in a macro is counted as product unread. Inside an item that carries an
+    ///   attribute macro (plan row 122), which may rewrite it, every `cfg`
+    ///   refuses the index; the item's own `cfg`s are read as before.
     ///
     /// An item is in the product if **any** of its identities is, which is
     /// §2.3's "any owning path" said one level down: a product file that a test
@@ -1172,7 +1188,11 @@ impl Occurrence {
         });
         let module_permits =
             innermost_inline_module(index, self.span).is_none_or(ModuleRecord::permits_product);
-        file_permits && item_permits && module_permits
+        let gate_permits = !index
+            .test_gates()
+            .iter()
+            .any(|gate| self.span.within(*gate));
+        file_permits && item_permits && module_permits && gate_permits
     }
 }
 

@@ -3,14 +3,15 @@
 
 use super::pointer::CaptureOwner;
 use super::pointer::{Gone, OwnerGone};
+use crate::TerminalPane;
 use crate::computation_lane::Asking;
 use crate::runtime::git::git_document_question;
 use crate::runtime::panes::risen_frame;
 use crate::runtime::preview::documents_held_in;
 use crate::window_seam::prelude::*;
 use crate::{
-    ClickIntent, DECODE_UNSTARTED, PeekCache, PreviewDocument, PreviewOpenLane, TabState,
-    computation_lane, lane, preview_open_lane,
+    ClickIntent, PeekCache, PreviewDocument, PreviewOpenLane, TabState, computation_lane, lane,
+    preview_open_lane,
 };
 use crate::{
     DragLatch, FilePeek, FilePeekPress, FilePeekSubject, FloatDrag, FloatDragKind, FloatGrasp,
@@ -243,7 +244,8 @@ impl<B: Backend> Runtime<'_, B> {
                 // loudest claim of its fleet, and the schematic says which pane
                 // is making it.
                 let session = tab.sessions.get(&seat.id);
-                let status = session.map(|leaf| leaf.session.status());
+                let status =
+                    session.map(|TerminalPane { session: leaf, .. }| leaf.session.status());
                 // No tween: a tab's arc eases toward a new reading because it
                 // has somewhere to ease *from*, and that memory is per tab. The
                 // peek has no per-leaf memory to ease from and, being a snapshot
@@ -254,7 +256,9 @@ impl<B: Backend> Runtime<'_, B> {
                 // and folding the fleet a second time is how the two start
                 // disagreeing (§7.1.6b′: 不新写第二套聚合).
                 let claim = session
-                    .map(|leaf| leaf.session_facts(tab_is_active).claim())
+                    .map(|TerminalPane { session: leaf, .. }| {
+                        leaf.session_facts(tab_is_active).claim()
+                    })
                     .unwrap_or_default();
                 let ring = status.and_then(|status| status.progress).map(|state| {
                     let arc = ring_arc(state, None, elapsed, motion, &palette);
@@ -269,7 +273,9 @@ impl<B: Backend> Runtime<'_, B> {
                     // This leaf's own shell, off the session that is running in
                     // it — the same map every other per-seat fact in this frame
                     // comes from.
-                    profile_mark: session.map(|leaf| profiles::identity_mark(&leaf.launch.profile)),
+                    profile_mark: session.map(|TerminalPane { session: leaf, .. }| {
+                        profiles::identity_mark(&leaf.launch.profile)
+                    }),
                     // The short name, and C28's own two lengths are why. A pane
                     // head has a whole bar and answers "where is this" with the
                     // place entire; this popup is a 210px thumbnail whose names
@@ -393,12 +399,12 @@ impl<B: Backend> Runtime<'_, B> {
     /// file (a tab closed, a pane handed another subject, a page scrolled on) are caught by the
     /// next of these.
     pub(in crate::runtime) fn let_go_unnamed_peek_records(&mut self) {
-        if !self
-            .window
-            .peek_cache
-            .iter()
-            .any(|(_, entry)| matches!(entry, PeekCacheEntry::Failed(_)))
-        {
+        if !self.window.peek_cache.iter().any(|(_, entry)| {
+            matches!(
+                entry,
+                PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { .. }
+            )
+        }) {
             return;
         }
         let named = self.peek_files_named();
@@ -1017,7 +1023,7 @@ impl<B: Backend> Runtime<'_, B> {
         // asks the disk once more whether it is still that file. See
         // [`PeekPageSlot`].
         if let Some(slot) = self.window.peek_page.as_mut() {
-            slot.asked.clear();
+            slot.card_down();
         }
         // (A hand that was on a block inside it was let go of by the ending at the top: the
         // card's surface is the one the sweep deliberately never retires
@@ -1175,7 +1181,9 @@ impl<B: Backend> Runtime<'_, B> {
                 height_px,
                 ..
             } => Some((*width_px, *height_px)),
-            PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
+            PeekCacheEntry::Pending { .. }
+            | PeekCacheEntry::Unanswered { .. }
+            | PeekCacheEntry::Failed(_) => None,
         }
     }
 
@@ -1206,8 +1214,20 @@ impl<B: Backend> Runtime<'_, B> {
                     height_px,
                     ..
                 }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
-                Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_)) => return None,
-                None => {
+                Some(
+                    PeekCacheEntry::Pending { .. }
+                    | PeekCacheEntry::Unanswered {
+                        asked_again: true, ..
+                    }
+                    | PeekCacheEntry::Failed(_),
+                ) => return None,
+                // Nothing filed, or a read not answered (a first frame that ran out, a held
+                // file) and not asked again (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): the card
+                // asks, once.
+                None
+                | Some(PeekCacheEntry::Unanswered {
+                    asked_again: false, ..
+                }) => {
                     // The one door files what it asked: the read under its identity, or the
                     // unstarted record.
                     self.request_peek_pixels(path);
@@ -1276,30 +1296,31 @@ impl<B: Backend> Runtime<'_, B> {
     /// Either one on the thread that draws is a hover over a large document
     /// freezing the window.
     fn file_peek_facts(&mut self, path: &Path, scale: f32) -> file_peek::PeekBody {
-        let pages = match self
+        // A file another program held is asked once more by the first rebuild after its answer
+        // ([`PeekFacts::ask_once_more`]; T-HELD-FILE-IN-THE-PDF-LANE), and then only by a new card.
+        let (pages, ask) = match self
             .window
             .peek_facts
-            .as_ref()
+            .as_mut()
             .filter(|facts| facts.path == path)
         {
-            Some(facts) => facts.answer,
+            Some(facts) => (facts.stated_pages(), facts.ask_once_more()),
             None => {
-                self.window.peek_facts = Some(PeekFacts {
-                    path: path.to_owned(),
-                    answer: None,
-                });
-                let (tab, window) = (self.id, self.window_id());
-                if !self.app.preview_worker.request(preview::PreviewRequest {
-                    window,
-                    tab,
-                    source: preview::PreviewSource::file(path.to_owned()),
-                    want: preview::PreviewWant::PageCount,
-                }) {
-                    self.disable_preview_worker();
-                }
-                None
+                self.window.peek_facts = Some(PeekFacts::asked(path.to_owned()));
+                (None, true)
             }
         };
+        if ask {
+            let (tab, window) = (self.id, self.window_id());
+            if !self.app.preview_worker.request(preview::PreviewRequest {
+                window,
+                tab,
+                source: preview::PreviewSource::file(path.to_owned()),
+                want: preview::PreviewWant::PageCount,
+            }) {
+                self.disable_preview_worker();
+            }
+        }
         // **Clamped here, against the number this very line just read.** The
         // reach grows the frame a page count lands and shrinks the frame a file
         // turns out to be shorter than the one before it; both are answered by
@@ -1355,6 +1376,7 @@ impl<B: Backend> Runtime<'_, B> {
                 fit,
                 mtime: None,
                 asked: BTreeSet::new(),
+                asked_again: BTreeSet::new(),
                 pages: Vec::new(),
             });
         }
@@ -1497,10 +1519,8 @@ impl<B: Backend> Runtime<'_, B> {
                 .is_some_and(|peek| peek.clock.is_shown())
                 && self.file_peek_subject().is_none()
                 && self.hide_file_peek());
-        if !moved && !self.animation_frame_is_due() {
-            return Ok(());
-        }
-        if !moved && !self.file_peek_owes_frame(now) {
+        // Asked only with work: a card that owes no frame asks the gate nothing.
+        if !self.paced_frame(moved, |rt| rt.file_peek_owes_frame(now)) {
             return Ok(());
         }
         if self.refresh_overlay() {
@@ -2638,7 +2658,7 @@ impl<B: Backend> Runtime<'_, B> {
             .as_ref()?
             .anchor_at(hit.row, hit.column, Bias::Before)
             .ok()??;
-        if !leaf.session.peek_admits_at(&anchor) {
+        if !leaf.session.session.peek_admits_at(&anchor) {
             return None;
         }
         leaf.view
@@ -2647,6 +2667,7 @@ impl<B: Backend> Runtime<'_, B> {
             .map(|reference| PeekSubject::from_path(reference.path.clone()))
             .or_else(|| {
                 leaf.session
+                    .session
                     .inline_image_payload_peek_at(&anchor)
                     .map(PeekSubject::from_content_key)
             })
@@ -2868,22 +2889,12 @@ impl<B: Backend> Runtime<'_, B> {
         let PeekPageOutcome::Drawn { mtime, raster } = outcome else {
             return Ok(());
         };
-        // **A file that has been written is a different document, and the pages already drawn are
-        // of the old one** (user ruling 2026-08-26). The single-slot version could not meet this:
-        // it held one page, so replacing it *was* the whole cache. A run of pages can be half a
-        // report from before a save and half from after — a reader scrolling through would watch
-        // the document change under the hand, page by page, as each one happened to be re-asked.
-        // So the stamp is what the cache belongs to, and a new one empties it.
-        if slot.mtime != mtime && !slot.pages.is_empty() {
-            slot.pages.clear();
-            // And every page has to be asked again, including the ones a question is already out
-            // about — those answers are about the file this is no longer.
-            slot.asked.clear();
-            slot.asked.insert(page);
-        }
-        slot.mtime = mtime;
-        if let Some(raster) = raster {
-            slot.keep(
+        // **A file that has been written is a different document** ([`PeekPageSlot::stamped`]).
+        // The single-slot version could not meet this: it held one page, so replacing it *was*
+        // the whole cache.
+        slot.stamped(mtime, page);
+        match raster {
+            Ok(Some(raster)) => slot.keep(
                 page,
                 PeekPageRaster {
                     key: peek_page_texture_key(path, mtime, page, raster.width, raster.height),
@@ -2891,7 +2902,11 @@ impl<B: Backend> Runtime<'_, B> {
                     width_px: raster.width,
                     height_px: raster.height,
                 },
-            );
+            ),
+            Ok(None) => {}
+            // Another program held the file: asked once more by the rebuild just below, and then
+            // only by a new card (T-HELD-FILE-IN-THE-PDF-LANE).
+            Err(crate::pdf::Held) => slot.hear_held(page),
         }
         // The card is chrome, and a page that lands while it is up owes the frame that shows it —
         // nothing else is going to move the pointer.
@@ -2972,15 +2987,6 @@ impl<B: Backend> Runtime<'_, B> {
         let head = peek.head.filter(|_| peek.clock.is_shown())?;
         file_peek::contains(head, [at.x as f32, at.y as f32]).then_some(FloatGrasp::Head)
     }
-}
-
-/// **What a file's pixels are filed as when the lane's thread could not be started**: a failed
-/// decode, in the decoder error's words, so every surface reading the window's cache agrees and
-/// asks again only on its own new input.
-pub(crate) fn unstarted_pixels() -> PeekCacheEntry {
-    PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
-        DECODE_UNSTARTED.to_owned(),
-    ))
 }
 
 /// The `peek_cache` identity a decoration-worker decode must be remembered under, so that the
@@ -3196,6 +3202,11 @@ pub(crate) fn peek_body_kind(
 /// verified again at the next command's end; a hover that settles on it again reads it again. The
 /// re-entries of one peek (its decode or its resample landing) never re-read, and one read is out
 /// at a time (`Pending`). A subject with no file behind it (`readable` false) is never read.
+///
+/// **A first frame that ran out is not a failure** (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): one
+/// not yet asked again is read now, on a re-entry too — the one automatic ask
+/// [`PeekCacheEntry::Unanswered`] allows; one asked again already is read on a new peek only,
+/// as a failure is.
 pub(crate) fn peek_reads_the_file(
     entry: Option<&PeekCacheEntry>,
     readable: bool,
@@ -3203,8 +3214,16 @@ pub(crate) fn peek_reads_the_file(
 ) -> bool {
     readable
         && match entry {
-            None => true,
-            Some(PeekCacheEntry::Failed(_)) => settled,
+            None
+            | Some(PeekCacheEntry::Unanswered {
+                asked_again: false, ..
+            }) => true,
+            Some(
+                PeekCacheEntry::Failed(_)
+                | PeekCacheEntry::Unanswered {
+                    asked_again: true, ..
+                },
+            ) => settled,
             Some(PeekCacheEntry::Pending { .. } | PeekCacheEntry::Ready { .. }) => false,
         }
 }
@@ -3249,7 +3268,9 @@ pub(crate) fn peek_files_named(
 /// **A failed peek no surface names any more is let go of** (T-PEEK-CACHE-QUESTION-RECORDS) —
 /// [`crate::AnimationCache::let_go_unnamed`]'s rule, for the peek cache.
 ///
-/// A `Failed` record is kept exactly as long as some surface names its file (`named`, from
+/// A `Failed` record — or an `Unanswered` one, a read not answered (a first frame that ran out,
+/// a held file, a read that never started) — is kept exactly as long as some surface names its
+/// file (`named`, from
 /// [`peek_files_named`]): while one does, its redraws read the failure and ask nothing; when the
 /// last one has gone, the file's next showing is new input and asks. A decode in flight is kept
 /// until its answer, which [`super::preview::file_peek_answer`] files nowhere if the file is
@@ -3258,7 +3279,10 @@ pub(crate) fn let_go_unnamed_peek_records(peek_cache: &mut PeekCache, named: &BT
     let unnamed: Vec<String> = peek_cache
         .iter()
         .filter(|(key, entry)| {
-            matches!(entry, PeekCacheEntry::Failed(_)) && !named.contains(key.as_str())
+            matches!(
+                entry,
+                PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { .. }
+            ) && !named.contains(key.as_str())
         })
         .map(|(key, _)| key.clone())
         .collect();
@@ -3314,7 +3338,14 @@ pub(crate) fn remember_decode(
 ///
 /// **And it files what it asked**: a read admitted is `Pending` under the identity the lane
 /// minted, which its answer is filed by ([`super::preview::file_peek_answer`]); a thread that could
-/// not be started is the unstarted record. A full lane or a refusal files nothing.
+/// not be started is an [`PeekCacheEntry::Unanswered`] already asked again
+/// (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) — not a failure of the file, which it used to be
+/// filed as, and asked again only by a new look, because no answer will come back to ask again
+/// on. A full lane or a refusal files nothing.
+///
+/// **A read that replaces a first frame not yet asked again is the one more ask**
+/// (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL): its `Pending` says so (`once_more`), which is how
+/// its answer knows that a second run-out has been asked again already.
 pub(crate) fn ask_for_peek_pixels(
     peek_cache: &mut PeekCache,
     computation: &computation_lane::ComputationLane,
@@ -3342,9 +3373,24 @@ pub(crate) fn ask_for_peek_pixels(
         Err(_) => PeekAsk::Refused,
     };
     let key = bt_term::normalized_local_image_path_key(path);
+    let once_more = matches!(
+        peek_cache.peek(&key),
+        Some(PeekCacheEntry::Unanswered {
+            asked_again: false,
+            ..
+        })
+    );
     match asked {
-        PeekAsk::Asked(asked) => peek_cache.insert(key, PeekCacheEntry::Pending { asked }),
-        PeekAsk::Unstarted => peek_cache.insert(key, unstarted_pixels()),
+        PeekAsk::Asked(asked) => {
+            peek_cache.insert(key, PeekCacheEntry::Pending { asked, once_more });
+        }
+        PeekAsk::Unstarted => peek_cache.insert(
+            key,
+            PeekCacheEntry::Unanswered {
+                asked_again: true,
+                said: None,
+            },
+        ),
         PeekAsk::NotNow | PeekAsk::Refused => {}
     }
     asked
@@ -3352,12 +3398,16 @@ pub(crate) fn ask_for_peek_pixels(
 
 /// **A glance card opening over a file** (T-PEEK-CACHE-QUESTION-RECORDS round 2): a new card is
 /// the card's own new input, so a failure filed for its file is let go of and the card's body
-/// asks again — [`peek_reads_the_file`]'s rule for a hover that settles, said for the card. The
+/// asks again — [`peek_reads_the_file`]'s rule for a hover that settles, said for the card, and
+/// the same for a first frame that ran out (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL). The
 /// moment is the opening and not the teardown: a card coming down is a surface leaving, which
 /// lets a failure go only when no other surface names the file ([`let_go_unnamed_peek_records`]).
 pub(crate) fn peek_card_opened(peek_cache: &mut PeekCache, card_file: &Path) {
     let key = bt_term::normalized_local_image_path_key(card_file);
-    if matches!(peek_cache.peek(&key), Some(PeekCacheEntry::Failed(_))) {
+    if matches!(
+        peek_cache.peek(&key),
+        Some(PeekCacheEntry::Failed(_) | PeekCacheEntry::Unanswered { .. })
+    ) {
         peek_cache.remove(&key);
     }
 }

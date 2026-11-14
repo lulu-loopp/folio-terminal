@@ -69,6 +69,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -198,13 +199,37 @@ pub struct Answers {
     /// Every request the application made that has ended since the last drain, by its number, in
     /// the order the requests were made: each one's terminal, taken once.
     pub(crate) ends: Vec<(u64, ProgramsTerminal)>,
+    /// **A request the door refused with no walk standing for it** since the last drain: the
+    /// thread door would not start the worker (`Refused::NotStarted`), or the worker has ended
+    /// (`Refused::Faulted`). A request refused while walks are owed (`Full`, `TwinEnded`) is
+    /// answered by those walks, and is not this.
+    pub(crate) refused: bool,
 }
 
 impl Answers {
     /// Whether the drain found nothing at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.verdicts.is_empty() && self.facts.is_none() && self.ends.is_empty()
+        self.verdicts.is_empty() && self.facts.is_none() && self.ends.is_empty() && !self.refused
+    }
+
+    /// **No walk answered since the last drain, and one that was asked for never will**: a request
+    /// ended with no answer (its walk failed, it was cancelled, or the worker ended — through the
+    /// request it joined too), or the door refused one with no walk standing ([`Self::refused`]).
+    /// A request a newer one displaced (`Superseded`) is answered by that one, and is not this.
+    /// What the window settles the agents' folders on (`AgentHomesCell::settle_on_the_launch_homes`,
+    /// 0.4.10 plan row 68c's N1): no timer, the lane's own word.
+    #[must_use]
+    pub fn ended_with_no_walk_to_answer(&self) -> bool {
+        fn unanswered(terminal: &ProgramsTerminal) -> bool {
+            match terminal {
+                Terminal::Done(_) | Terminal::Superseded { .. } => false,
+                Terminal::Failed(_) | Terminal::Cancelled | Terminal::WorkerGone => true,
+                Terminal::Joined { outcome, .. } => unanswered(outcome),
+            }
+        }
+        self.facts.is_none()
+            && (self.refused || self.ends.iter().any(|(_, terminal)| unanswered(terminal)))
     }
 
     /// **The newest walk that ran to its end since the last drain** — the number a request's
@@ -454,11 +479,9 @@ fn ordered<'a>(rows: &'a [Profile], first: &[String]) -> Vec<&'a Profile> {
     ordered
 }
 
-/// What the lane counts beside its requests: the panes waiting on a walk, and the walk out.
+/// What the lane counts beside its requests: the panes waiting on a walk.
 #[derive(Default)]
 struct Asks {
-    /// The walk out now: its number and why.
-    out: Option<(u64, Trigger)>,
     /// How many panes are in birth, each waiting on a walk's answer ([`PaneWaits`]).
     panes_waiting: usize,
 }
@@ -539,6 +562,10 @@ pub struct ProgramsLane {
     machine: Box<dyn Machine>,
     asks: Mutex<Asks>,
     mailbox: Mutex<Mailbox>,
+    /// [`Answers::refused`], until the window drains it: a flag and not a mailbox entry, so the
+    /// admission that sets it takes no lock the worker holds (C1, the window thread's request
+    /// returns at once).
+    refused: AtomicBool,
     /// How the lane brings the event loop round once [`Self::install_wake`] has taught it; shared
     /// with the ledger, which wakes it after the worker's end.
     wake: Arc<OnceLock<Box<dyn Fn() + Send + Sync>>>,
@@ -585,6 +612,7 @@ impl ProgramsLane {
             machine: Box::new(machine),
             asks: Mutex::new(Asks::default()),
             mailbox: Mutex::new(Mailbox::default()),
+            refused: AtomicBool::new(false),
             wake,
             note,
             executor,
@@ -603,9 +631,14 @@ impl ProgramsLane {
     /// it already owes [`BOUND`], or the worker ran and has ended; or the thread door refused to
     /// start the worker for this request (`Refused::NotStarted`, said once per streak), which
     /// leaves the lane as it was, so the next request starts the worker again.
+    ///
+    /// The lane's lock is kept only for the urgency read, never across the ask: the worker takes
+    /// it on its own as a walk begins, publishes and ends, so an admission that kept it would turn
+    /// any wait in the ask into a deadlock (row 160). A pane that starts waiting after the read is
+    /// the worker's to raise ([`Self::a_pane_waits`]), as one that starts just after the
+    /// admission is; the ids, the joins and the order are the coalescing's, under its own lock.
     pub(crate) fn request(&'static self, request: WalkRequest) -> Result<u64, Refused> {
-        let asks = self.lock();
-        let urgent = request.trigger.urgent() || asks.panes_waiting > 0;
+        let urgent = request.trigger.urgent() || self.lock().panes_waiting > 0;
         self.requests
             .ask(
                 Walk { request, urgent },
@@ -618,6 +651,14 @@ impl ProgramsLane {
                 },
             )
             .map(|admitted| admitted.id.0)
+            .inspect_err(|refused| {
+                // No walk stands for it: the window is told, as a walk's end tells it, so what
+                // waits for a walk's answer is not left waiting (row 68c's N1).
+                if matches!(refused, Refused::NotStarted(_) | Refused::Faulted(_)) {
+                    self.refused.store(true, Ordering::SeqCst);
+                    self.wake();
+                }
+            })
     }
 
     /// **Count a pane in birth until the answer is dropped.** One lock; never waits for the worker.
@@ -642,6 +683,7 @@ impl ProgramsLane {
             verdicts: mailbox.verdicts.into_values().collect(),
             facts: mailbox.facts,
             ends,
+            refused: self.refused.swap(false, Ordering::SeqCst),
         }
     }
 
@@ -717,7 +759,6 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
             ..
         } = lane.requests.next(ctx);
         let generation = newest.0;
-        lane.lock().out = Some((generation, request.trigger));
         // The walk's band is its request's. Off Windows a band is requested, not enforced
         // (RULES 53), and the answer is not consulted.
         let _ = bt_platform::set_current_thread_priority(band(urgent));
@@ -745,7 +786,6 @@ fn run_program_walk(ctx: &WorkerCtx, lane: &ProgramsLane) {
         // coalescing under the lock every admission and the worker's take hold: those the waiting
         // run stands for — the next walk answers them, its operation `Done` and the rest `Joined`
         // to it — and those a newer table displaced, whenever that happened (S-4 round 4).
-        lane.lock().out = None;
         let lane::Arrivals {
             waiting,
             superseded,
@@ -1657,6 +1697,53 @@ pub(crate) mod tests {
         );
     }
 
+    /// RED (0.4.10 plan row 68c, the review's N1) — **what tells the window no walk will answer**:
+    /// an end with no answer, through the request it joined too, or a refusal with no walk
+    /// standing; never a walk's answer, or a request a newer one displaced.
+    ///
+    /// MUTATION: a displaced request counts as unanswered (`plant-68c-superseded-gives-up.py`).
+    #[test]
+    fn only_a_request_no_walk_will_answer_is_one_with_no_walk_to_answer() {
+        let ended = |terminal: ProgramsTerminal| Answers {
+            ends: vec![(1, terminal)],
+            ..Answers::default()
+        };
+        let joined = |outcome: ProgramsTerminal| Terminal::Joined {
+            with: ProgramsId(0),
+            outcome: Box::new(outcome),
+        };
+        for answered in [
+            Terminal::Done(1),
+            Terminal::Superseded { by: ProgramsId(2) },
+            joined(Terminal::Done(0)),
+            joined(Terminal::Superseded { by: ProgramsId(2) }),
+        ] {
+            assert!(
+                !ended(answered.clone()).ended_with_no_walk_to_answer(),
+                "{answered:?}"
+            );
+        }
+        for unanswered in [
+            Terminal::Failed(lane::TaskFailure::Panicked("walk".to_owned())),
+            Terminal::Cancelled,
+            Terminal::WorkerGone,
+            joined(Terminal::WorkerGone),
+        ] {
+            assert!(
+                ended(unanswered.clone()).ended_with_no_walk_to_answer(),
+                "{unanswered:?}"
+            );
+        }
+        assert!(
+            Answers {
+                refused: true,
+                ..Answers::default()
+            }
+            .ended_with_no_walk_to_answer()
+        );
+        assert!(!Answers::default().ended_with_no_walk_to_answer());
+    }
+
     /// RED (S-4 round 2) — **A start the thread door refuses refuses that request at the door,
     /// says so once, and the next request starts the worker** (revision (b)5, rule 1: a new
     /// request tries again; the lane is not in fault, because its worker never ran). In round 1
@@ -1669,6 +1756,8 @@ pub(crate) mod tests {
     /// lines, observed red at "said once"), and the next request would be refused `Faulted`.
     /// MUTATION: say every refused start (`Ledger::say_not_started` ignoring the streak) — the two
     /// refusals are two lines.
+    /// MUTATION: the refusal is not told to the window, flagged and woken for (row 68c's N1;
+    /// `plant-68c-refusal-not-told.py`) — the window waits for a walk that will not come.
     #[test]
     fn a_refused_spawn_refuses_this_request_and_the_next_request_starts_the_worker() {
         let gate = Arc::new(Gate::default());
@@ -1693,6 +1782,11 @@ pub(crate) mod tests {
         let said: Vec<String> = notes.try_iter().collect();
         assert_eq!(said.len(), 1, "said once: {said:?}");
         assert!(said[0].contains(crate::lane::REFUSED_START), "{said:?}");
+        // Row 68c's N1: the window is woken and told no walk stands for them, once.
+        wait_for_a_wake(&wakes, "the refusal");
+        let drained = lane.take();
+        assert!(drained.refused && drained.ended_with_no_walk_to_answer());
+        assert!(lane.take().is_empty(), "taken once");
         let next = lane
             .request(request(&rows, Trigger::ProgramMenu))
             .expect("the next request starts the worker");
@@ -1704,6 +1798,53 @@ pub(crate) mod tests {
         );
     }
 
+    /// RED (T-PROGRAMS-LANE-ASKS-HOLD-SHRUNK, plan row 160) — **the admission keeps the lane's
+    /// lock only for its urgency read, never across the ask.** The walk worker takes that lock on
+    /// its own as a walk begins, publishes and ends, so an admission that kept it across
+    /// `Coalescing::ask` turned any wait there into a deadlock the suite's caps cannot free (row
+    /// 111's plant C hung). Read from inside the ask: a start the thread door refuses is said by
+    /// the ledger there (`Ledger::say_not_started`, called from `Coalescing::ask`), and the
+    /// ledger's `say` looks at the lane's lock as it says it. The request's trigger is not urgent
+    /// (a menu's), so the urgency read takes the lock and lets it go before the ask, on the road
+    /// this test names.
+    ///
+    /// MUTATION (observed red): `request` keeping its guard across the ask (the shape before row
+    /// 160) — the lock is held when the refusal is said.
+    #[test]
+    fn the_admission_keeps_the_lanes_lock_only_for_its_urgency_read() {
+        let gate = Arc::new(Gate::default());
+        let seen: Arc<OnceLock<&'static ProgramsLane>> = Arc::new(OnceLock::new());
+        let (looked, looks) = mpsc::channel();
+        let looked = Mutex::new(looked);
+        let probe = Arc::clone(&seen);
+        let lane: &'static ProgramsLane = Box::leak(Box::new(ProgramsLane::start_with(
+            Executor::scripted(Arc::clone(&gate)),
+            FakeMachine::with_path(&[bin_dir()]),
+            Arc::new(|_: &str| {}),
+            move |line: &str| {
+                let free = probe.get().map(|lane| lane.asks.try_lock().is_ok());
+                let _ = looked.lock().unwrap().send((line.to_owned(), free));
+            },
+        )));
+        let _ = seen.set(lane);
+        gate.refuse_next_start();
+        assert!(
+            matches!(
+                lane.request(request(&[row("rg", "rg.exe")], Trigger::ProgramMenu)),
+                Err(Refused::NotStarted(_))
+            ),
+            "the request whose start was refused is refused at the door"
+        );
+        let said: Vec<(String, Option<bool>)> = looks.try_iter().collect();
+        assert_eq!(said.len(), 1, "the refusal said once: {said:?}");
+        assert!(said[0].0.contains(crate::lane::REFUSED_START), "{said:?}");
+        assert_eq!(
+            said[0].1,
+            Some(true),
+            "the refusal is said inside the ask with the program lane's lock let go: {said:?}"
+        );
+    }
+
     /// RED (S-4; D-85) — **A worker that dies ends every request it owes `WorkerGone`, wakes the
     /// loop, says so once, and the next request is refused at the door.**
     ///
@@ -1711,8 +1852,9 @@ pub(crate) mod tests {
     /// started another: the death was a lane state, not a terminal of the requests it owed. The
     /// suite's gate ends the worker while it holds one walk out and two requests stand behind it.
     ///
-    /// MUTATION: leave `Asks::worker` set — `Ledger::worker_ended` returning at once (the death
-    /// leaves the lane as it was) — no wake comes, and the wait for it runs out of patience.
+    /// MUTATION: `Ledger::worker_ended` returning at once — the ledger never in fault and its
+    /// owed requests left owed (the death leaves the lane as it was) — no wake comes, and the
+    /// wait for it runs out of patience.
     #[test]
     fn a_dead_walk_ends_every_owed_request_worker_gone_and_the_next_request_is_refused() {
         let gate = Arc::new(Gate::default());
@@ -1732,8 +1874,13 @@ pub(crate) mod tests {
         gate.kill();
         gate.release();
         wait_for_a_wake(&wakes, "the worker's end");
+        let drained = lane.take();
+        assert!(
+            drained.ended_with_no_walk_to_answer(),
+            "no walk answers them (row 68c's N1)"
+        );
         assert_eq!(
-            lane.take().ends,
+            drained.ends,
             [
                 (out, Terminal::WorkerGone),
                 (waiting, Terminal::WorkerGone),
@@ -1754,6 +1901,10 @@ pub(crate) mod tests {
                 ))
             ),
             "a request after the worker's end is refused at the door, minting nothing"
+        );
+        assert!(
+            lane.take().ended_with_no_walk_to_answer(),
+            "and no walk stands for it (row 68c's N1)"
         );
         let said: Vec<String> = notes.try_iter().collect();
         assert_eq!(said.len(), 1, "the end is said once: {said:?}");

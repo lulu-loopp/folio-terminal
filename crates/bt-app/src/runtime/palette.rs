@@ -1,6 +1,7 @@
 //! `palette` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::TerminalPane;
 use crate::input::Keystroke;
 use crate::window_seam::prelude::*;
 use crate::{
@@ -207,6 +208,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn palette_layer(&mut self) -> MenuPaint {
         let Some(layout) = self.palette_layout() else {
             self.window.palette_layout = None;
+            self.window.drawn_fields.palette = None;
             return MenuPaint::none();
         };
         let selected = self
@@ -214,7 +216,31 @@ impl<B: Backend> Runtime<'_, B> {
             .palette
             .as_ref()
             .map_or(0, palette::PaletteState::selected);
-        let layers = palette::build(&layout, &bt_render::chrome_palette(), selected);
+        // **The input's run, left for a press to read** (0.4.9 plan row 180), and the selection's
+        // wash read off the same table. A placeholder is no text a caret can stand in.
+        let (shown, selected_text) = self
+            .window
+            .palette
+            .as_ref()
+            .map(|state| {
+                let field = state.field();
+                (field.composed().into_owned(), field.composed_selection())
+            })
+            .unwrap_or_default();
+        let [left, right] = layout.text_run();
+        let advances = {
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            renderer.chrome_text_advances(gpu, &shown, layout.field_font_px())
+        };
+        let run = crate::text_field::DrawnRun {
+            left,
+            scroll_px: 0.0,
+            shown,
+            advances,
+        };
+        let selection = run.selection_span(selected_text, right);
+        self.window.drawn_fields.palette = Some(run);
+        let layers = palette::build(&layout, &bt_render::chrome_palette(), selected, selection);
         // The very box that was drawn, kept for the `&self` press router.
         self.window.palette_layout = Some(layout);
         // It travels down, because it arrives from above the reader's line of
@@ -512,7 +538,9 @@ impl<B: Backend> Runtime<'_, B> {
                 // it takes the pane's ring: the reader was still moved to a
                 // pane, and saying nothing at all after a keypress is the one
                 // answer this whole slice exists to stop giving.
-                let Some(leaf) = self.window.tabs[index].sessions.get(&seat) else {
+                let Some(TerminalPane { session: leaf, .. }) =
+                    self.window.tabs[index].sessions.get(&seat)
+                else {
                     return Ok(());
                 };
                 let running = leaf
@@ -600,7 +628,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// front of them.
     fn push_place_candidates(&self, into: &mut Vec<palette::Candidate>) {
         for tab in &self.window.tabs {
-            for (seat, leaf) in &tab.sessions {
+            for (seat, TerminalPane { session: leaf, .. }) in &tab.sessions {
                 let label = tab
                     .terminal_name(*seat)
                     .unwrap_or_else(|| tab.display_title());
@@ -645,7 +673,7 @@ impl<B: Backend> Runtime<'_, B> {
     fn push_command_candidates(&self, into: &mut Vec<palette::Candidate>) {
         let mut found: Vec<(Option<Instant>, palette::Candidate)> = Vec::new();
         for tab in &self.window.tabs {
-            for (seat, leaf) in &tab.sessions {
+            for (seat, TerminalPane { session: leaf, .. }) in &tab.sessions {
                 let pane = tab
                     .terminal_name(*seat)
                     .unwrap_or_else(|| tab.display_title());

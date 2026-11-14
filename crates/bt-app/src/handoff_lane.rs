@@ -23,7 +23,7 @@
 //!   platform handle starts with an empty one.
 //! * **Ordering.** One thread, one FIFO queue: hand-offs are executed in press order, across
 //!   every window, and answered in that order across every window — the application reads the
-//!   earliest request still owed ([`HandoffLane::earliest_owed`]) once, each window takes the
+//!   earliest request still owed ([`HandoffLane::drain_mark`]) once, each window takes the
 //!   answers its requests hold below it, and they are put back in the order the ledger minted
 //!   them before any is answered ([`in_press_order`]). A request that ends while the windows are
 //!   being read waits for the next drain, so no later answer is ever taken before it.
@@ -255,11 +255,12 @@ impl HandoffLane {
         })
     }
 
-    /// **The earliest request still owed an answer** — every request below it has ended, because
-    /// the one worker ends them in the order they were minted (and its end ends the rest). The
-    /// drain reads it once, before any window takes its answers ([`Pending::answered`]).
-    pub(crate) fn earliest_owed(&self) -> Option<HandoffId> {
-        self.ledger.earliest_owed()
+    /// **The drain's mark** ([`lane::Mark`]): the earliest request still owed an answer — every
+    /// request below it has ended, because the one worker ends them in the order they were minted
+    /// (and its end ends the rest). The drain reads it once, before any window takes its answers
+    /// ([`Pending::answered`]).
+    pub(crate) fn drain_mark(&self) -> lane::Mark<HandoffId> {
+        self.ledger.drain_mark()
     }
 
     /// **Put one hand-off on the lane and return at once** with its request, or refuse it at the
@@ -344,17 +345,17 @@ impl<D> Pending<D> {
         self.owed.insert(request.id(), (request, duty));
     }
 
-    /// **Take every answer below `owed`** — the lane's [`HandoffLane::earliest_owed`], read once
+    /// **Take every answer below `mark`** — the lane's [`HandoffLane::drain_mark`], read once
     /// for every window of one drain — in the order the lane minted the requests, without waiting
-    /// for one; each request's terminal taken once, with its duty. A request at or past `owed` is
+    /// for one; each request's terminal taken once, with its duty. A request at or past `mark` is
     /// left for the next drain even when it has ended since, so that no window takes an answer
     /// before an earlier one another window has not been asked for yet.
-    pub(crate) fn answered(&mut self, owed: Option<HandoffId>) -> Vec<(HandoffId, Answer, D)> {
+    pub(crate) fn answered(&mut self, mark: &lane::Mark<HandoffId>) -> Vec<(HandoffId, Answer, D)> {
         let ended: Vec<(HandoffId, HandoffTerminal)> = self
             .owed
             .iter_mut()
-            .take_while(|(id, _)| owed.is_none_or(|owed| **id < owed))
-            .filter_map(|(id, (request, _))| Some((*id, request.take()?)))
+            .take_while(|(id, _)| mark.below(**id))
+            .filter_map(|(id, (request, _))| Some((*id, request.take(mark)?)))
             .collect();
         ended
             .into_iter()
@@ -368,23 +369,26 @@ impl<D> Pending<D> {
 
 /// **Every window's answers, in press order across the windows** — what each window `K` took from
 /// its own [`Pending`], merged by the id the ledger minted, which is the order the presses were
-/// made in and the one worker ran them in. The application answers them in this order, each in
-/// the window that asked.
+/// made in and the one worker ran them in (the seam's [`lane::in_admission_order`]). The
+/// application answers them in this order, each in the window that asked.
 pub(crate) fn in_press_order<K, D>(
     per_window: impl IntoIterator<Item = (K, Vec<(HandoffId, Answer, D)>)>,
 ) -> Vec<(K, HandoffId, Answer, D)>
 where
     K: Copy,
 {
-    let mut all: Vec<(K, HandoffId, Answer, D)> = per_window
-        .into_iter()
-        .flat_map(|(window, answers)| {
-            answers
-                .into_iter()
-                .map(move |(id, answer, duty)| (window, id, answer, duty))
-        })
-        .collect();
-    all.sort_by_key(|(_, id, _, _)| *id);
+    let mut keyed = Vec::new();
+    for (window, answers) in per_window {
+        let mut owed = Vec::new();
+        for (id, answer, duty) in answers {
+            owed.push((id, (answer, duty)));
+        }
+        keyed.push((window, owed));
+    }
+    let mut all = Vec::new();
+    for (window, id, (answer, duty)) in lane::in_admission_order(keyed) {
+        all.push((window, id, answer, duty));
+    }
     all
 }
 
@@ -591,8 +595,8 @@ pub(crate) fn files_program_refused_notice() -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
-    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::lane::Gate;
@@ -641,10 +645,10 @@ mod tests {
         wakes: &mpsc::Receiver<()>,
         count: usize,
     ) -> Vec<(HandoffId, Answer, D)> {
-        let mut all = pending.answered(lane.earliest_owed());
+        let mut all = pending.answered(&lane.drain_mark());
         while all.len() < count {
             crate::lane::wait_for_a_wake(wakes, &format!("answer {} of {count}", all.len() + 1));
-            all.extend(pending.answered(lane.earliest_owed()));
+            all.extend(pending.answered(&lane.drain_mark()));
         }
         all
     }
@@ -662,8 +666,9 @@ mod tests {
     /// the windows' answers are taken the way `FolioApp::answer_handoffs` takes them, and come
     /// out in press order — not one window's and then the other's.
     ///
-    /// MUTATION: drop the sort in [`in_press_order`] (each window's answers then follow the
-    /// other's), and the answers come out by window.
+    /// MUTATION: drop the sort in [`lane::in_admission_order`], which [`in_press_order`] merges
+    /// through (each window's answers then follow the other's), and the answers come out by
+    /// window.
     #[test]
     fn handoffs_complete_in_press_order() {
         let gate = Arc::new(Gate::default());
@@ -688,9 +693,9 @@ mod tests {
             crate::lane::wait_for_a_wake(&wakes, &format!("answer {} of {}", at + 1, ids.len()));
         }
         let [first, second] = &mut windows;
-        let owed = lane.earliest_owed();
+        let owed = lane.drain_mark();
         let answered: Vec<HandoffId> =
-            in_press_order([(0, first.answered(owed)), (1, second.answered(owed))])
+            in_press_order([(0, first.answered(&owed)), (1, second.answered(&owed))])
                 .into_iter()
                 .map(|(_, id, answer, ())| {
                     assert_eq!(answer, Answer::HandedOver);
@@ -716,8 +721,9 @@ mod tests {
     /// would come after 6. (This race is what made `OrderIsAsDeclared` fail now and then on a
     /// machine whose worker ran between the two windows' reads.)
     ///
-    /// MUTATION: take every ended answer whatever the mark (`owed` ignored in
-    /// [`Pending::answered`]), and 6 is answered before 5.
+    /// MUTATION: take every ended answer whatever the mark (drop the `mark.below` bound in
+    /// [`Pending::answered`] and `lane::Request::take_if`'s refusal at or past the mark, the second layer since T-LANE-DRAIN-MARK-GUARD; both
+    /// dropped, observed red 2026-10-31), and 6 is answered before 5.
     #[test]
     fn an_answer_that_ends_while_the_windows_are_read_waits_for_the_next_drain() {
         let gate = Arc::new(Gate::default());
@@ -747,23 +753,28 @@ mod tests {
         ids.push(press(true));
         ids.push(press(false));
 
-        let owed = lane.earliest_owed();
-        assert_eq!(owed, Some(ids[3]), "the fourth is the earliest still owed");
-        let first_a = a.answered(owed);
+        let owed = lane.drain_mark();
+        assert_eq!(
+            owed.owed(),
+            Some(ids[3]),
+            "the fourth is the earliest still owed"
+        );
+        let first_a = a.answered(&owed);
         gate.release();
         for at in 3..6 {
             crate::lane::wait_for_a_wake(&wakes, &format!("answer {} of 6", at + 1));
         }
-        let first_b = b.answered(owed);
+        let first_b = b.answered(&owed);
         let first: Vec<HandoffId> = in_press_order([(0, first_a), (1, first_b)])
             .into_iter()
             .map(|(_, id, _, ())| id)
             .collect();
-        let owed = lane.earliest_owed();
-        let second: Vec<HandoffId> = in_press_order([(0, a.answered(owed)), (1, b.answered(owed))])
-            .into_iter()
-            .map(|(_, id, _, ())| id)
-            .collect();
+        let owed = lane.drain_mark();
+        let second: Vec<HandoffId> =
+            in_press_order([(0, a.answered(&owed)), (1, b.answered(&owed))])
+                .into_iter()
+                .map(|(_, id, _, ())| id)
+                .collect();
         assert_eq!(
             first,
             ids[..3],
@@ -938,7 +949,7 @@ mod tests {
             "the window that asked still hears its own, and only its own"
         );
         assert_eq!(
-            third.answered(lane.earliest_owed()),
+            third.answered(&lane.drain_mark()),
             Vec::new(),
             "nor one opened since"
         );
@@ -1282,10 +1293,13 @@ mod tests {
     /// The window thread may not block on the lane. With the door held, the ledger fills to
     /// [`BOUND`] — the one running and [`CAPACITY`] behind it — and every press past that is
     /// refused at once, with [`LANE_FULL`] as its terminal; each admitted press is its own request
-    /// with its own id, so nothing is merged to make room.
+    /// with its own id, so nothing is merged to make room. "At once" is the flood coming back while
+    /// the door is still held, awaited within the lane suite's patience — not a measured time.
     ///
     /// MUTATION: build the lane's ledger with no bound (`None` for `Some(BOUND)` in
-    /// `HandoffLane::start`), and no press is refused.
+    /// `HandoffLane::start`), and no press is refused. Or make the lane's queue a rendezvous
+    /// (`mpsc::sync_channel(0)` for `mpsc::channel()` in `HandoffLane::start`), and the second
+    /// press waits for the held worker.
     #[test]
     fn a_flood_of_presses_is_refused_rather_than_waited_on() {
         let gate = Arc::new(Mutex::new(()));
@@ -1298,14 +1312,27 @@ mod tests {
                 Ok(())
             },
         );
-        let started = Instant::now();
-        let presses: Vec<Result<HandoffRequest, Declined>> = (0..BOUND + 3)
-            .map(|at| lane.submit(window(), Handoff::Open(PathBuf::from(format!("{at}")))))
-            .collect();
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the press never waits"
-        );
+        // The flood runs on its own thread so that this one can ask whether it came back while the
+        // door was still held. The door is let go and the verdict asserted before the flood is
+        // joined, so a press that waits for the worker is red here and never a hang: a failed
+        // verdict leaves the thread detached, and a flood that came back has only returned left.
+        let lane = Arc::new(lane);
+        let returned = Arc::new(AtomicBool::new(false));
+        let flood = {
+            let lane = Arc::clone(&lane);
+            let returned = Arc::clone(&returned);
+            std::thread::spawn(move || {
+                let presses: Vec<Result<HandoffRequest, Declined>> = (0..BOUND + 3)
+                    .map(|at| lane.submit(window(), Handoff::Open(PathBuf::from(format!("{at}")))))
+                    .collect();
+                returned.store(true, Ordering::SeqCst);
+                presses
+            })
+        };
+        let while_held = lane::within_patience(|| returned.load(Ordering::SeqCst));
+        drop(held);
+        assert!(while_held, "the press never waits");
+        let presses = flood.join().expect("the flood's thread");
         let ids: Vec<HandoffId> = presses
             .iter()
             .filter_map(|press| press.as_ref().ok().map(lane::Request::id))
@@ -1323,7 +1350,6 @@ mod tests {
             vec![&Declined::LaneFull; 3],
             "the presses past the bound are refused at the door"
         );
-        drop(held);
     }
 
     /// RED (S-5; D-71) — **the hand-off lane refuses synchronously above its bound**, and its
@@ -1374,7 +1400,7 @@ mod tests {
             "an answer not yet taken holds its place"
         );
         assert_eq!(
-            pending.answered(lane.earliest_owed()).len(),
+            pending.answered(&lane.drain_mark()).len(),
             BOUND,
             "every press answered"
         );
@@ -1690,11 +1716,11 @@ pub(crate) mod contract_adapter {
 
         /// `FolioApp::answer_handoffs`: every open window takes the answers it holds.
         fn drain(&mut self) -> Vec<Delivered> {
-            let owed = self.lane.earliest_owed();
+            let owed = self.lane.drain_mark();
             let held: Vec<(u32, _)> = self
                 .windows
                 .iter_mut()
-                .map(|(window, pending)| (*window, pending.answered(owed)))
+                .map(|(window, pending)| (*window, pending.answered(&owed)))
                 .collect();
             in_press_order(held)
                 .into_iter()

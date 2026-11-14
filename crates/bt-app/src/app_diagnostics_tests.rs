@@ -20,6 +20,285 @@ fn theme_changed_is_ignored_by_explicit_modes_and_resolved_by_system() {
     assert_eq!(resolved_theme_change(Dark, OsLight), None);
 }
 
+/// RED (T-HIGH-CONTRAST, owner rulings 2026-10-28, row 90 ⑥ and ⑦) — **while a Windows
+/// contrast theme is on, its Background decides the canvas whatever the Theme row says, and
+/// the window's ground holds no picture and lets nothing through; off, both are what the row
+/// and the file say again.**
+///
+/// The two decisions a theme makes outside the palette, each a pure function of the row's
+/// own answer and the reading. Night sky is dark and Desert light, so each overrides the row
+/// that names the other canvas.
+///
+/// MUTATION (observed red): return `resolved` from `theme_under_contrast` whatever the reading
+/// — a Light window under Night sky draws Night sky's black under a light canvas's readers; or
+/// return `ground` from `ground_under_contrast` — a background picture stays under a contrast
+/// theme's text.
+#[test]
+fn a_contrast_theme_decides_the_canvas_and_clears_the_ground_while_it_is_on() {
+    use crate::runtime::{ground_under_contrast, theme_under_contrast};
+    let night_sky = bt_render::SystemContrast {
+        window: [0x00, 0x00, 0x00],
+        window_text: [0xff, 0xff, 0xff],
+        highlight: [0xd6, 0xb4, 0xfd],
+        highlight_text: [0x2b, 0x2b, 0x2b],
+        gray_text: [0xa6, 0xa6, 0xa6],
+    };
+    let desert = bt_render::SystemContrast {
+        window: [0xff, 0xfa, 0xef],
+        window_text: [0x3d, 0x3d, 0x3d],
+        highlight: [0x90, 0x39, 0x09],
+        highlight_text: [0xff, 0xf5, 0xe3],
+        gray_text: [0x67, 0x67, 0x67],
+    };
+    assert_eq!(
+        theme_under_contrast(Theme::Light, Some(night_sky)),
+        Theme::Dark
+    );
+    assert_eq!(
+        theme_under_contrast(Theme::Dark, Some(desert)),
+        Theme::Light
+    );
+    assert_eq!(theme_under_contrast(Theme::Light, None), Theme::Light);
+    assert_eq!(theme_under_contrast(Theme::Dark, None), Theme::Dark);
+
+    let picture = std::sync::Arc::new(bt_render::BackgroundImage {
+        key: "wallpaper".to_owned(),
+        rgba: std::sync::Arc::from(vec![0_u8; 4]),
+        width_px: 1,
+        height_px: 1,
+    });
+    let stored = bt_render::WindowGround {
+        image: Some(picture),
+        fit: bt_render::BackgroundFit::Tile,
+        image_opacity: 0.4,
+        alpha: 0.6,
+    };
+    let under = ground_under_contrast(stored.clone(), true);
+    assert_eq!(
+        under.image, None,
+        "no picture under a contrast theme's text"
+    );
+    assert_eq!(under.alpha, 1.0, "and nothing showing through it");
+    assert_eq!(
+        under.fit, stored.fit,
+        "the rest is the file's, for when it goes off"
+    );
+    assert_eq!(under.image_opacity, stored.image_opacity);
+    assert_eq!(ground_under_contrast(stored.clone(), false), stored);
+}
+
+/// Windows' **Night sky** contrast theme, as `GetSysColor` answers it (a dark canvas).
+const NIGHT_SKY: bt_render::SystemContrast = bt_render::SystemContrast {
+    window: [0x00, 0x00, 0x00],
+    window_text: [0xff, 0xff, 0xff],
+    highlight: [0xd6, 0xb4, 0xfd],
+    highlight_text: [0x2b, 0x2b, 0x2b],
+    gray_text: [0xa6, 0xa6, 0xa6],
+};
+
+/// Night sky after its owner edited Background in Windows' contrast-theme editor.
+const NIGHT_SKY_EDITED: bt_render::SystemContrast = bt_render::SystemContrast {
+    window: [0x10, 0x18, 0x28],
+    ..NIGHT_SKY
+};
+
+/// The window's questions to the system answering `contrast` for the contrast theme.
+fn contrast_answered(
+    window: &crate::headless::HeadlessWindow,
+    contrast: Option<bt_render::SystemContrast>,
+) {
+    window.answers.set(crate::headless::PlatformAnswers {
+        high_contrast: contrast,
+        ..crate::headless::PlatformAnswers::default()
+    });
+}
+
+/// RED (T-HIGH-CONTRAST, review F1, 2026-10-29) — **a contrast theme read through the window
+/// is put in force on the window: on, the ground holds no picture and is opaque, a Light row
+/// draws on Night sky's dark canvas, and the Settings page knows; off, the picture, the Light
+/// canvas and the page's own sentences come back.**
+///
+/// Run alone in a process of its own: the overlay, the ground and the theme are the process's,
+/// and the other tests of this binary read them.
+///
+/// MUTATION (observed red): drop `apply_window_ground` from `Runtime::adopt_high_contrast` —
+/// the picture stays under the theme's text; or drop its `apply_theme` — a Light row keeps the
+/// light canvas under Night sky.
+#[test]
+fn a_contrast_theme_read_through_the_window_is_put_in_force_on_it_and_taken_off_again() {
+    if !crate::test_support::alone_in_a_process(
+        "app_diagnostics_tests::a_contrast_theme_read_through_the_window_is_put_in_force_on_it_and_taken_off_again",
+        b"",
+    ) {
+        return;
+    }
+    let mut folio = crate::headless::HeadlessFolio::with_tabs(
+        "contrast-window",
+        vec![crate::test_support::tab_holding(
+            crate::test_support::leaf_saying("contrast"),
+        )],
+        0,
+    );
+    let mut settings = folio.app.settings_store.loaded().clone();
+    settings.theme_mode = bt_persist::ThemeModeV1::Light;
+    assert!(folio.app.settings_store.store(settings));
+    folio.window.background_picture = Some(Arc::new(bt_render::BackgroundImage {
+        key: "wallpaper".to_owned(),
+        rgba: Arc::from(vec![0_u8; 4]),
+        width_px: 1,
+        height_px: 1,
+    }));
+    folio
+        .runtime()
+        .apply_theme(Theme::Light)
+        .expect("the row's canvas");
+    folio
+        .runtime()
+        .apply_window_ground()
+        .expect("the file's ground");
+    assert!(
+        bt_render::window_ground().image.is_some(),
+        "the picture is up"
+    );
+
+    contrast_answered(&folio.window.window, Some(NIGHT_SKY));
+    assert!(
+        folio.runtime().adopt_high_contrast().expect("on"),
+        "the reading moved the overlay"
+    );
+    assert_eq!(bt_render::high_contrast_in_force(), Some(NIGHT_SKY));
+    let ground = bt_render::window_ground();
+    assert_eq!(
+        ground.image, None,
+        "no picture under a contrast theme's text"
+    );
+    assert_eq!(ground.alpha, 1.0, "and nothing showing through it");
+    assert_eq!(
+        bt_render::current_theme(),
+        Theme::Dark,
+        "Night sky's canvas, whatever the row says"
+    );
+    assert!(
+        folio.runtime().settings_values().high_contrast,
+        "the Settings page says the theme's colours are in force"
+    );
+
+    contrast_answered(&folio.window.window, None);
+    assert!(
+        folio.runtime().adopt_high_contrast().expect("off"),
+        "turning it off moves the overlay"
+    );
+    assert_eq!(bt_render::high_contrast_in_force(), None);
+    assert!(
+        bt_render::window_ground().image.is_some(),
+        "the file's picture is back"
+    );
+    assert_eq!(
+        bt_render::current_theme(),
+        Theme::Light,
+        "the row's canvas is back"
+    );
+    assert!(!folio.runtime().settings_values().high_contrast);
+}
+
+/// RED (T-HIGH-CONTRAST, review F1, 2026-10-29) — **the preference notice puts the contrast
+/// theme the window reads in force, every time it moves: on, edited in place, and off.**
+///
+/// `AppEvent::SystemPreferencesChanged` runs `FolioApp::adopt_system_canvas` (held by
+/// `the_system_preference_event_re_reads_the_desktops_canvas`); this drives that function over
+/// a headless application whose window answers what the test scripts. Run alone in a process of
+/// its own, for the process overlay.
+///
+/// MUTATION (observed red): drop `adopt_high_contrast` from `FolioApp::adopt_system_canvas` —
+/// the notice is heard and the theme Windows put on is never worn.
+#[test]
+fn the_preference_notice_puts_the_contrast_theme_in_force_each_time_it_moves() {
+    if !crate::test_support::alone_in_a_process(
+        "app_diagnostics_tests::the_preference_notice_puts_the_contrast_theme_in_force_each_time_it_moves",
+        b"",
+    ) {
+        return;
+    }
+    let folio = crate::headless::HeadlessFolio::with_tabs(
+        "contrast-notice",
+        vec![crate::test_support::tab_holding(
+            crate::test_support::leaf_saying("notice"),
+        )],
+        0,
+    );
+    let mut application = crate::headless::HeadlessApplication::of(folio);
+    for (reading, what) in [
+        (Some(NIGHT_SKY), "turned on"),
+        (Some(NIGHT_SKY_EDITED), "its Background edited in place"),
+        (None, "turned off"),
+    ] {
+        contrast_answered(&application.runtime().window.window, reading);
+        application
+            .folio
+            .adopt_system_canvas()
+            .expect("the notice is adopted");
+        assert_eq!(
+            bt_render::high_contrast_in_force(),
+            reading,
+            "the contrast theme {what} is the one in force"
+        );
+    }
+}
+
+/// RED (T-HIGH-CONTRAST, review F1, 2026-10-29) — **the first window's canvas is settled from
+/// the contrast theme before the stored pair and the theme: under Night sky a Light row opens
+/// on Night sky's ground, and with no theme on it opens on the stored light scheme's.**
+///
+/// [`settle_the_first_canvas`] is what `Runtime::create` runs before it creates the window
+/// (`the_canvas_is_in_force_before_the_window_is_made`), so what it leaves in force is what the
+/// first frame is painted on. The reader is injected; the boot hands it
+/// `runtime::read_high_contrast`. Run alone in a process of its own, for the process theme.
+///
+/// MUTATION (observed red): drop the contrast read from `settle_the_first_canvas`, or move it
+/// below `set_theme` — the first frame opens on the row's light canvas under Night sky.
+/// (Moving `adopt_stored_schemes` below `set_theme` stays green, observed 2026-10-29:
+/// `set_schemes` refreshes the theme's cached background, so that order is not a hazard.)
+#[test]
+fn the_first_canvas_is_settled_from_the_contrast_theme_and_the_stored_pair() {
+    if !crate::test_support::alone_in_a_process(
+        "app_diagnostics_tests::the_first_canvas_is_settled_from_the_contrast_theme_and_the_stored_pair",
+        b"",
+    ) {
+        return;
+    }
+    let settings = bt_persist::SettingsV1 {
+        light_scheme: "Solarized Light".to_owned(),
+        ..bt_persist::SettingsV1::default()
+    };
+    let mut asked = 0;
+    let theme = settle_the_first_canvas(
+        || {
+            asked += 1;
+            Some(NIGHT_SKY)
+        },
+        &settings,
+        bt_persist::ThemeModeV1::Light,
+    );
+    assert_eq!(asked, 1, "the boot asks the system once");
+    assert_eq!(theme, Theme::Dark, "Night sky decides a Light row's canvas");
+    assert_eq!(bt_render::current_theme(), Theme::Dark);
+    assert_eq!(
+        bt_render::background_rgb(),
+        NIGHT_SKY.window,
+        "the first frame stands on the theme's Background"
+    );
+
+    let theme = settle_the_first_canvas(|| None, &settings, bt_persist::ThemeModeV1::Light);
+    assert_eq!(theme, Theme::Light);
+    assert_eq!(
+        bt_render::background_rgb(),
+        schemes::catalogue()
+            .resolve("Solarized Light", true)
+            .background,
+        "with no theme on, the first frame stands on the stored light scheme"
+    );
+}
+
 /// RED (49) — **A title that did not change is never written to the OS again.**
 ///
 /// A shell that sets the title on every prompt (OSC 0/2) makes the drain say
@@ -275,6 +554,336 @@ fn a_stop_notice_a_box_would_show_is_raised_and_not_queued() {
     assert_eq!(boxes.lines, Vec::<String>::new(), "nothing is queued");
 }
 
+/// RED (T-FRAME-SHAPE-STOP-BOX-QUERY, 0.4.9 plan row 79) — **a frame-shape stop's alert that no
+/// box would show is one queued `stderr` line, and no box is called**: the name and the alert,
+/// handed to the run's `stderr` road as one entry, where the panic hook's box fell back to two
+/// lines written synchronously on the window thread.
+///
+/// MUTATION: the owed arm of `say_the_stop_alert` drops the alert (`if let … {}`) — no line.
+/// (`FolioApp::fail` handing the old `announce_panic` back its closure is the static walk's
+/// RED: `every_request_door_returns_at_once` against the committed `REQUEST-DOOR-SITES.tsv`.)
+#[test]
+fn a_frame_shape_stop_no_box_would_show_queues_its_alert_on_stderr() {
+    let alert = panic_alert_text(&std::env::temp_dir().join(PANIC_LOG_FILENAME));
+    let mut boxes = ToldBoxes::answering(false);
+    say_the_stop_alert(Some(PanicAlert::Owed(alert.clone())), &mut boxes);
+    assert_eq!(boxes.raised, Vec::<String>::new(), "no box is called");
+    assert_eq!(boxes.lines, [format!("{APP_NAME}\n{alert}")]);
+}
+
+/// RED (T-FRAME-SHAPE-STOP-BOX-QUERY) — **a frame-shape stop's alert a box would show is raised
+/// in the box, and nothing goes to `stderr`.**
+///
+/// MUTATION: the owed arm hands the alert to `boxes.line` whatever the answer — no box.
+#[test]
+fn a_frame_shape_stop_a_box_would_show_raises_its_alert() {
+    let alert = panic_alert_text(&std::env::temp_dir().join(PANIC_LOG_FILENAME));
+    let mut boxes = ToldBoxes::answering(true);
+    say_the_stop_alert(Some(PanicAlert::Owed(alert.clone())), &mut boxes);
+    assert_eq!(boxes.raised, [alert]);
+    assert_eq!(boxes.lines, Vec::<String>::new(), "nothing is queued");
+}
+
+/// RED (T-FRAME-SHAPE-STOP-BOX-QUERY) — **the one alert stays one**: a stop whose alert was
+/// already written to a watching console, or whose claim another caller (a panic) already
+/// made, says nothing more — neither a box nor a line.
+///
+/// MUTATION: `say_the_stop_alert` says something for every claim (`Some(_)` / `None` →
+/// `say_in_a_box_or_on_stderr(boxes, "")`) — a box or a line appears.
+#[test]
+fn a_frame_shape_stop_whose_alert_was_said_says_nothing_more() {
+    let claims: [fn() -> Option<PanicAlert>; 2] = [|| Some(PanicAlert::Spoken), || None];
+    for claim in claims {
+        for seen in [false, true] {
+            let mut boxes = ToldBoxes::answering(seen);
+            say_the_stop_alert(claim(), &mut boxes);
+            assert_eq!(boxes.raised, Vec::<String>::new(), "no box (seen: {seen})");
+            assert_eq!(boxes.lines, Vec::<String>::new(), "no line (seen: {seen})");
+        }
+    }
+}
+
+// ── a panic after a frame-shape stop (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW, 0.4.9 plan row 102)
+
+/// The second fault each process of its own plants, by name, so the log can be counted for it.
+const THE_SECOND_PANIC: &str = "scripted: the second panic after a stop";
+
+/// What a child says on its standard output when the planted panic did not end it.
+const OUTLIVED: &str = "the process outlived the panic";
+
+/// What a child says, through the stop's box, when the stop's alert is owed to a box.
+const THE_STOPS_ALERT: &str = "the stop's alert was said in its box";
+
+/// **The stop's box in a process of its own**: never seen, so the alert is a line; the child
+/// says so on its standard output, then runs `while_up` — the moment the stop's box is up.
+struct AStopsBox {
+    while_up: fn(),
+}
+
+impl SystemBoxes for AStopsBox {
+    type Seen = ();
+
+    fn would_be_seen(&mut self) -> Option<()> {
+        None
+    }
+
+    fn raise(&mut self, (): (), _text: &str) {
+        // Only an answer of `would_be_seen` can raise a box, and it answers that none would be
+        // seen; the arm is the trait's.
+        println!("\n{THE_STOPS_ALERT}");
+        (self.while_up)();
+    }
+
+    fn line(&mut self, _text: String) {
+        println!("\n{THE_STOPS_ALERT}");
+        (self.while_up)();
+    }
+}
+
+/// What a child says if the panic hook raised a crash box: in a test, its own (review N2).
+const A_CRASH_BOX: &str = "the panic hook raised a crash box";
+
+/// **The panic hook's box in a process of its own** (review N2): the hook's end is installed
+/// with this box, never the system's, so a regression of the alert's table (a panic that finds
+/// the stop's claim and speaks anyway) says a line here instead of raising a real message box.
+struct NoCrashBox;
+
+impl CrashBox for NoCrashBox {
+    fn say_the_crash(&mut self, _text: &str) {
+        println!("\n{A_CRASH_BOX}");
+    }
+}
+
+/// An uncontained panic on a worker, and the worker joined: with the hook's end installed,
+/// the panic is the process's end, or its thread's only.
+fn a_worker_panics() {
+    let joined = std::thread::Builder::new()
+        .name("row-102-worker".to_owned())
+        .spawn(|| panic!("{THE_SECOND_PANIC}"))
+        .expect("the worker starts")
+        .join();
+    assert!(joined.is_err(), "the worker panicked");
+}
+
+/// **The child's half**: the production hook (its report and its end, [`the_panic_hooks_end`])
+/// installed over a log of the test's own; a frame-shape stop reported and announced through
+/// [`announce_frame_shape_stop`] with the stop's box above; then `after`, which plants the
+/// second panic. Nothing here raises a real box, whatever the tables answer: a watching
+/// console (the child's piped standard output) takes the alert, or, in a run nobody watches,
+/// the box above does; and the hook's own box is [`NoCrashBox`].
+fn a_stop_then_a_panic(case: &str, while_up: fn(), after: impl FnOnce()) {
+    let log = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target")
+        .join(bt_testpath::unique_name(case))
+        .with_extension("log");
+    std::fs::write(&log, "").unwrap();
+    // The log's name on the child's first line, so the parent reads the very file.
+    println!("\nthe log: {}", log.display());
+    install_panic_log_hook_at(log.clone(), |path| {
+        the_panic_hooks_end(path, &mut NoCrashBox);
+    });
+    let error = anyhow::Error::new(bt_viewport::FrameProjectionError::FrameShape(
+        bt_viewport::FrameShapeError::MathBlockBandTop {
+            expected: 643_072,
+            actual: 688_128,
+        },
+    ))
+    .context("project terminal grid into viewport frame");
+    report_frame_shape_stop(&error, &log, |path| {
+        announce_frame_shape_stop(path, &mut AStopsBox { while_up });
+    });
+    after();
+    println!("\n{OUTLIVED}");
+}
+
+/// **The parent's half**: the child's way out, read. It left by the panic road — exit 101, the
+/// run's footer once on its standard error and no summary of the harness's (which a panic the
+/// harness caught would have printed) — and its log has the stop's report and the second
+/// panic's, each once. `alerts` reads, in the child's standard output, how many times the
+/// alert was said.
+fn the_child_left_by_the_panic_road(output: &std::process::Output, alerts: impl Fn(&str) -> usize) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let said = format!("({})\n{stdout}\n{stderr}", output.status);
+    assert!(
+        !stdout.lines().any(|line| line == OUTLIVED),
+        "the planted panic did not end the process {said}"
+    );
+    assert_eq!(output.status.code(), Some(PANIC_EXIT_CODE), "{said}");
+    assert!(
+        !stdout.contains("test result:"),
+        "the harness caught the panic, so the process did not leave from the hook {said}"
+    );
+    let footers = stderr
+        .lines()
+        .filter(|line| {
+            line.contains("run ended") && line.contains(&format!("exit {PANIC_EXIT_CODE},"))
+        })
+        .count();
+    assert_eq!(footers, 1, "the panic road's footer, once {said}");
+    let log = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("the log: "))
+        .unwrap_or_else(|| panic!("the child named no log {said}"));
+    let report = std::fs::read_to_string(log).unwrap();
+    assert_eq!(
+        report.matches("\nstopped: ").count(),
+        1,
+        "the stop's report, once:\n{report}"
+    );
+    assert_eq!(
+        report.matches(THE_SECOND_PANIC).count(),
+        1,
+        "the second panic's report, once:\n{report}"
+    );
+    assert_eq!(alerts(&stdout), 1, "the one alert, said once {said}");
+    assert!(
+        !stdout.lines().any(|line| line == A_CRASH_BOX),
+        "the panic hook raised a second alert {said}"
+    );
+    std::fs::remove_file(log).unwrap();
+}
+
+/// How many times the alert was said on the child's console (its piped standard output): the
+/// alert names the log.
+fn alerts_on_the_console(stdout: &str) -> usize {
+    let log = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("the log: "))
+        .expect("the child named its log");
+    stdout.lines().filter(|line| line.contains(log)).count() - 1
+}
+
+/// RED (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW, 0.4.9 plan row 102) — **a worker's panic after a
+/// frame-shape stop has said its alert ends the process, by the panic road, with no second
+/// alert.**
+///
+/// Until row 102 the stop and the panic hook shared one bit, "said", which the hook read as
+/// "another panic is leaving": the hook wrote the report and returned, the worker's thread
+/// ended, and the process went on.
+///
+/// MUTATION (observed red): `a_panics_turn` answers `Return` for `StopSpoken` (the shared bit) —
+/// the child prints that it outlived the panic and exits 0.
+#[test]
+fn a_workers_panic_after_a_stop_ends_the_process_once() {
+    const SELECTOR: &str =
+        "app_diagnostics_tests::a_workers_panic_after_a_stop_ends_the_process_once";
+    match crate::test_support::a_process_of_its_own(SELECTOR, b"") {
+        None => a_stop_then_a_panic("panic-after-stop-worker", || {}, a_worker_panics),
+        Some(output) => the_child_left_by_the_panic_road(&output, alerts_on_the_console),
+    }
+}
+
+/// RED (row 102) — **a panic after a frame-shape stop on the stop's own thread ends the
+/// process from the hook**, the window thread's case: there winit catches the panic and
+/// resumes it past `main`'s way out, into the loader's teardown (§7.35); here the harness
+/// catches it, and a process the hook did not end prints the harness's summary.
+///
+/// MUTATION (observed red): `a_panics_turn` answers `Return` for `StopSpoken` — the harness
+/// reports the test failed, and no footer is written.
+#[test]
+fn a_panic_after_a_stop_on_its_own_thread_ends_the_process_once() {
+    const SELECTOR: &str =
+        "app_diagnostics_tests::a_panic_after_a_stop_on_its_own_thread_ends_the_process_once";
+    match crate::test_support::a_process_of_its_own(SELECTOR, b"") {
+        None => a_stop_then_a_panic(
+            "panic-after-stop-same-thread",
+            || {},
+            || panic!("{THE_SECOND_PANIC}"),
+        ),
+        Some(output) => the_child_left_by_the_panic_road(&output, alerts_on_the_console),
+    }
+}
+
+/// RED (row 102, and review F1) — **a panic while the stop's box is up does not take the box
+/// off the screen, and the process ends by the panic road once the box is left, whichever
+/// thread panicked.**
+///
+/// Each child is a run nobody watches, so the stop's alert is owed to its box; the box, while
+/// up, has the panic planted. The hook owes its leave to the stop's thread and returns; the
+/// stop, its alert left, takes the panic road from its said step's guard.
+/// - **On a worker**: the box returns, and the guard drops on the return.
+/// - **On the stop's own thread** (review F1), the window thread's form of a panic during the
+///   alert: one in the alert's own code (winit buffers every other event while a box pumps).
+///   The thread unwinds out of the alert, and the guard drops on the unwind; a said step taken
+///   only on a return never ran, and the panic left by the harness here — by winit and the
+///   loader's teardown in the product.
+///
+/// The two children are one test's, the resident channel's one writer (TEST-GLOBALS); each
+/// reads on its standard input which thread panics.
+///
+/// MUTATIONS (observed red): `a_stops_alert_said` answers `false` for `LeaveOwed` — the stop
+/// goes on to its orderly way out, and the worker's child outlives the panic; take the said
+/// step after the alert instead of in the guard — the own-thread child's harness catches the
+/// panic and prints its summary, and no footer is written.
+#[test]
+fn a_panic_while_a_stops_box_is_up_ends_the_process_when_it_closes() {
+    const SELECTOR: &str =
+        "app_diagnostics_tests::a_panic_while_a_stops_box_is_up_ends_the_process_when_it_closes";
+    const ON_A_WORKER: &str = "on a worker";
+    const ON_THE_STOPS_OWN_THREAD: &str = "on the stop's own thread";
+    for panics in [ON_A_WORKER, ON_THE_STOPS_OWN_THREAD] {
+        match crate::test_support::a_process_of_its_own(SELECTOR, panics.as_bytes()) {
+            None => {
+                let mut panics = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut panics)
+                    .expect("the child reads which thread panics");
+                diagnostics::as_a_resident_run_nobody_watches();
+                match panics.as_str() {
+                    ON_A_WORKER => {
+                        a_stop_then_a_panic("panic-during-stop-box", a_worker_panics, || {});
+                    }
+                    ON_THE_STOPS_OWN_THREAD => a_stop_then_a_panic(
+                        "panic-in-stop-box-own-thread",
+                        || panic!("{THE_SECOND_PANIC}"),
+                        || {},
+                    ),
+                    other => panic!("no such thread to panic on: {other:?}"),
+                }
+                return;
+            }
+            Some(output) => the_child_left_by_the_panic_road(&output, |stdout| {
+                stdout
+                    .lines()
+                    .filter(|line| *line == THE_STOPS_ALERT)
+                    .count()
+            }),
+        }
+    }
+}
+
+/// PIN (row 102) — **the alert's table**: a panic speaks only when nobody has, leaves after a
+/// stop's alert, owes its leave while the stop's alert is up, and returns behind another
+/// panic; a stop claims only an unclaimed alert, and takes the panic road after its alert
+/// only when a leave was owed.
+#[test]
+fn the_alerts_table_leaves_once_and_never_under_an_alert() {
+    use AlertState::{LeaveOwed, PanicLeaving, StopSpeaking, StopSpoken, Unclaimed};
+    assert_eq!(
+        a_panics_turn(Unclaimed),
+        (PanicLeaving, PanicTurn::SpeakAndLeave)
+    );
+    assert_eq!(a_panics_turn(StopSpeaking), (LeaveOwed, PanicTurn::Owe));
+    assert_eq!(a_panics_turn(StopSpoken), (PanicLeaving, PanicTurn::Leave));
+    assert_eq!(a_panics_turn(LeaveOwed), (LeaveOwed, PanicTurn::Return));
+    assert_eq!(
+        a_panics_turn(PanicLeaving),
+        (PanicLeaving, PanicTurn::Return)
+    );
+    assert_eq!(a_stops_claim(Unclaimed), (StopSpeaking, true));
+    for state in [StopSpeaking, StopSpoken, LeaveOwed, PanicLeaving] {
+        assert_eq!(a_stops_claim(state), (state, false));
+    }
+    assert_eq!(a_stops_alert_said(StopSpeaking), (StopSpoken, false));
+    assert_eq!(a_stops_alert_said(LeaveOwed), (PanicLeaving, true));
+    for state in [Unclaimed, StopSpoken, PanicLeaving] {
+        assert_eq!(a_stops_alert_said(state), (state, false));
+    }
+    for state in [Unclaimed, StopSpeaking, StopSpoken, LeaveOwed, PanicLeaving] {
+        assert_eq!(AlertState::stored(state as u8), state);
+    }
+}
+
 /// A folder for one test, and a settings store in it owing a change of the terminal face
 /// whose write is on a worker that never answers — the stop comes before it does.
 fn a_stop_with_an_owed_settings_change(
@@ -481,4 +1090,176 @@ fn a_forced_stop_during_the_documents_phase_disposes_of_the_held_release() {
     );
     assert!(!quit.release_on_a_stop(), "and nothing is held any more");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// RED (0.4.10 plan row 72, T-MESSAGE-BOX-WEARS-THE-ICON; review N2) — **a stop's box is owned
+/// by the window the keyboard is on, else by the first window still standing on the screen, and
+/// by none when no window stands there**: a window on its way out owns nothing, focused or not,
+/// and neither does a window the reader cannot see — hidden (iconic or cloaked as sampled), never
+/// shown, put away, or minimised.
+///
+/// MUTATION (`plant-72-b-the-first-window-owns-every-box.py`): ask the first standing window
+/// before the focused one, and the focused second window is passed over.
+/// MUTATION (`plant-72-f-a-window-off-the-screen-owns-the-box.py`): stop passing over the windows
+/// off the screen, and the hidden first window owns the box.
+#[test]
+fn a_stops_box_is_owned_by_the_focused_window_else_the_first_standing() {
+    /// One window as a stop finds it.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Found {
+        Standing,
+        Focused,
+        Leaving,
+        FocusedLeaving,
+        /// Iconic or cloaked, as last sampled.
+        Hidden,
+        NeverShown,
+        /// Not visible: a quake window put away.
+        PutAway,
+        Minimised,
+    }
+    use Found::{
+        Focused, FocusedLeaving, Hidden, Leaving, Minimised, NeverShown, PutAway, Standing,
+    };
+    /// The window `id` set as `found`, every other reading as a standing window's.
+    fn stand(
+        windows: &mut Windows<WindowId, WindowRuntime<crate::headless::Headless>>,
+        id: WindowId,
+        found: Found,
+    ) {
+        let runtime = windows.get_mut(id).expect("an open window");
+        runtime.window_focused = matches!(found, Found::Focused | Found::FocusedLeaving);
+        runtime.leaving =
+            matches!(found, Found::Leaving | Found::FocusedLeaving).then(Instant::now);
+        runtime.window_hidden = matches!(found, Found::Hidden);
+        runtime.window_shown = !matches!(found, Found::NeverShown);
+        runtime
+            .window
+            .answers
+            .set(crate::headless::PlatformAnswers {
+                visible: Some(!matches!(found, Found::PutAway)),
+                minimized: Some(matches!(found, Found::Minimised)),
+                ..crate::headless::PlatformAnswers::default()
+            });
+    }
+    let window = |tag: &str| {
+        crate::headless::HeadlessFolio::with_tabs(
+            tag,
+            vec![crate::test_support::tab_holding(
+                crate::test_support::leaf_saying("盒子 a box"),
+            )],
+            0,
+        )
+    };
+    let first = window("box-owner-first");
+    let second = window("box-owner-second");
+    let (one, two) = (WindowId::from(1), WindowId::from(2));
+    let mut windows = Windows::new();
+    windows.insert(one, first.window);
+    windows.insert(two, second.window);
+    let owner = |windows: &Windows<WindowId, WindowRuntime<crate::headless::Headless>>| {
+        let owner = the_box_owner(windows)?;
+        windows
+            .in_order()
+            .find(|(_, runtime)| std::ptr::eq(&runtime.window, owner))
+            .map(|(id, _)| id)
+    };
+    let cases = [
+        ((Standing, Focused), Some(two)),
+        ((Standing, Standing), Some(one)),
+        ((Leaving, Standing), Some(two)),
+        ((Standing, FocusedLeaving), Some(one)),
+        ((FocusedLeaving, FocusedLeaving), None),
+        ((Hidden, Standing), Some(two)),
+        ((NeverShown, Standing), Some(two)),
+        ((PutAway, Standing), Some(two)),
+        ((Minimised, Standing), Some(two)),
+        ((Hidden, Minimised), None),
+        ((NeverShown, PutAway), None),
+    ];
+    let found: Vec<_> = cases
+        .iter()
+        .map(|&((first, second), _)| {
+            stand(&mut windows, one, first);
+            stand(&mut windows, two, second);
+            ((first, second), owner(&windows))
+        })
+        .collect();
+    assert_eq!(
+        found,
+        cases.to_vec(),
+        "the focused window on the screen, else the first one on the screen, else none"
+    );
+}
+
+/// RED (0.4.10 plan row 72) — **every box a stop raises while its windows stand is owned by one
+/// of them**: the product builds the box over a window at exactly two sites — `FolioApp::fail`
+/// (a frame-shape stop's alert) and `FolioApp::stop_every_window_keeping_in` (the lost-change
+/// notice) — each over `the_box_owner(&self.windows)`, asked after every window's place has been
+/// read fresh (re-review R2: a window left on another virtual desktop takes no turn, so its last
+/// reading can say it is on the screen); the box raises itself over the window it was handed;
+/// and winit's window hands the system its own handle as the box's owner. The panic hook's box
+/// is the one ownerless box raised with windows standing (R1), and it is not built here
+/// (`SystemBox`).
+///
+/// MUTATION (`plant-72-a-a-stop-box-owned-by-nobody.py`): build the stop's notice over no window
+/// (`BoxOver(over.filter(|_| false))`), and its site is refused.
+#[test]
+fn every_box_a_stop_raises_while_a_window_stands_is_owned_by_one() {
+    let index = crate::test_support::source();
+    let built = crate::test_support::found(
+        bt_source::needle!(bt_source::Pattern::call("BoxOver")),
+        bt_source::View::Identifiers,
+    )
+    .in_the_product(index);
+    let sites: std::collections::BTreeSet<String> = built
+        .owners(index)
+        .into_keys()
+        .map(|identity| match identity.type_owner {
+            Some(owner) => format!("{owner}::{}", identity.name),
+            None => identity.name,
+        })
+        .collect();
+    assert_eq!(
+        (
+            built.len(),
+            sites.iter().map(String::as_str).collect::<Vec<_>>()
+        ),
+        (
+            2,
+            vec!["FolioApp::fail", "FolioApp::stop_every_window_keeping_in"]
+        ),
+        "a box over a standing window is built at these two stops, once each; a new one is owned \
+         by a window too, and joins this list"
+    );
+    for site in ["fail", "stop_every_window_keeping_in"] {
+        let body = crate::test_support::method_body("FolioApp", site);
+        let observed = body
+            .find("runtime.observe_window_place();")
+            .unwrap_or_else(|| panic!("`FolioApp::{site}` reads every window's place fresh"));
+        let lent = body
+            .find("let over = the_box_owner(&self.windows);")
+            .unwrap_or_else(|| panic!("`FolioApp::{site}` asks which window owns its box"));
+        let raised = body
+            .find("BoxOver(over)")
+            .unwrap_or_else(|| panic!("`FolioApp::{site}` raises its box over that window"));
+        assert!(
+            observed < lent && lent < raised,
+            "`FolioApp::{site}`: the places are read, then the owner is chosen, then the box is built"
+        );
+    }
+    let raise = crate::test_support::item_body(
+        &bt_source::ItemQuery::method("BoxOver", "raise").of_trait("SystemBoxes"),
+    );
+    assert!(
+        raise.contains("Some(window) => window.say_in_a_box(seen, text),"),
+        "the box is said over the window it was handed:\n{raise}"
+    );
+    let over_winit = crate::test_support::item_body(
+        &bt_source::ItemQuery::method("Arc", "say_in_a_box").of_trait("WindowHost"),
+    );
+    assert!(
+        over_winit.contains("seen.say(crate::native_window_of(self).ok(), crate::APP_NAME, text);"),
+        "winit's window is the box's owner:\n{over_winit}"
+    );
 }

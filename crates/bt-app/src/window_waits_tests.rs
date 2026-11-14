@@ -1515,6 +1515,24 @@ impl Src {
             certainty: Certainty::Resolved,
         }
         .in_the_product(self.index)
+            && self.enclosing_items_permit(at)
+    }
+
+    /// Whether every item holding `at` is written for a build of the shipped program, by the
+    /// features that build sets: an item gated on a feature only a dev-dependency names
+    /// (`#[cfg(any(test, feature = "trust-harness"))]`) is not, though
+    /// [`Occurrence::in_the_product`], which reads `test` alone, keeps it (plan row 176: three
+    /// `wait_timeout_while` test helpers of bt-platform read as bare sites).
+    fn enclosing_items_permit(&self, at: usize) -> bool {
+        self.index
+            .items()
+            .iter()
+            .filter(|record| record.whole().holds(at))
+            .all(|record| {
+                record.identities().any(|identity| {
+                    product_build_permits(identity.variant.predicates(), self.features)
+                })
+            })
     }
 
     /// The smallest callable holding `at`.
@@ -3370,33 +3388,143 @@ fn vocabulary() -> Vec<Word> {
 /// whether it waits. A method call matches a line whose parent is a type; a path matches by its
 /// last qualifier; a bare call matches only a system call's capitalised name; `write!` and
 /// `writeln!` are `Write::write_fmt`.
+///
+/// A site reads untyped, so it answers **every** line it matches, not the first: the name is the
+/// matches' names, sorted and joined by ` | ` (`Barrier::wait | Child::wait | Condvar::wait` for
+/// a `.wait()`), and it waits when any of them does. Neither the name nor the verdict hangs on
+/// the registry's order, and a line that does not wait cannot silence one that does by sharing
+/// its name (T-BARE-SITE-VOCABULARY-LAST-NAME-TAKEOVER, plan row 185). A pinned body's effect
+/// key is that whole name, so a new line of the same name changes it. The inventory
+/// (`Reader::sites`) types its receivers and needs no such reading.
 fn effect_of(words: &[Word], site: &Site) -> Option<(String, bool)> {
-    let typed = |word: &&Word| word.parent.starts_with(|c: char| c.is_ascii_uppercase());
-    let named = |word: &Word| (format!("{}::{}", word.parent, word.last), word.waits);
-    match &site.form {
+    let capitalised = |name: &str| name.starts_with(|c: char| c.is_ascii_uppercase());
+    let lines: Vec<&Word> = match &site.form {
         Form::Macro if ["write", "writeln"].contains(&site.name) => {
-            Some(("Write::write_fmt".to_owned(), true))
+            return Some(("Write::write_fmt".to_owned(), true));
         }
-        Form::Macro | Form::Value => None,
+        Form::Macro | Form::Value => return None,
         Form::Method(_) => words
             .iter()
-            .filter(typed)
-            .find(|word| word.last == site.name)
-            .map(named),
+            .filter(|word| capitalised(word.parent.as_str()) && word.last == site.name)
+            .collect(),
         Form::Path(quals) => {
             let qualifier = quals.last().copied().unwrap_or_default();
             words
                 .iter()
-                .find(|word| word.last == site.name && word.parent == qualifier)
-                .map(named)
+                .filter(|word| word.last == site.name && word.parent == qualifier)
+                .collect()
         }
         Form::Bare => words
             .iter()
-            .find(|word| {
-                word.last == site.name && site.name.starts_with(|c: char| c.is_ascii_uppercase())
-            })
-            .map(|word| (word.last.clone(), word.waits)),
+            .filter(|word| word.last == site.name && capitalised(site.name))
+            .collect(),
+    };
+    let mut names: Vec<String> = lines
+        .iter()
+        .map(|word| {
+            if matches!(site.form, Form::Bare) {
+                word.last.clone()
+            } else {
+                format!("{}::{}", word.parent, word.last)
+            }
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    (!lines.is_empty()).then(|| (names.join(" | "), lines.iter().any(|word| word.waits)))
+}
+
+/// RED (row 185) — **a site that matches several vocabulary lines answers all of them, the same
+/// in any order: it waits when one of them waits, and its name is theirs, sorted.** A method
+/// `.wait()` matches every typed `wait` line, a path `Child::wait(..)` every `Child::wait`, a bare
+/// `CloseHandle(..)` every `CloseHandle`; a line that does not wait, listed first, used to name
+/// the site alone and read it as not waiting, so the `Drop` guard passed a `Drop` that waits.
+///
+/// MUTATION: take the first match again (`.find(..)` in the method arm) and the first case reads
+/// `Foo::wait`, not waiting.
+#[test]
+fn a_site_matching_several_vocabulary_lines_answers_all_of_them_in_any_order() {
+    let word = |parent: &str, last: &str, waits: bool| Word {
+        parent: parent.to_owned(),
+        last: last.to_owned(),
+        waits,
+    };
+    let site = |name: &'static str, form: Form| Site { at: 0, name, form };
+    let cases = [
+        (
+            site("wait", Form::Method(None)),
+            [word("Foo", "wait", false), word("Condvar", "wait", true)],
+            "Condvar::wait | Foo::wait",
+        ),
+        (
+            site("wait", Form::Path(vec!["process", "Child"])),
+            [word("Child", "wait", false), word("Child", "wait", true)],
+            "Child::wait",
+        ),
+        (
+            site("CloseHandle", Form::Bare),
+            [
+                word("Foundation", "CloseHandle", false),
+                word("Planted", "CloseHandle", true),
+            ],
+            "CloseHandle",
+        ),
+    ];
+    for (site, words, named) in cases {
+        let reversed: Vec<Word> = words
+            .iter()
+            .rev()
+            .map(|w| word(&w.parent, &w.last, w.waits))
+            .collect();
+        let answer = effect_of(&words, &site);
+        assert_eq!(
+            answer,
+            Some((named.to_owned(), true)),
+            "`{}` ({:?}) against two lines of its name",
+            site.name,
+            site.form
+        );
+        assert_eq!(
+            effect_of(&reversed, &site),
+            answer,
+            "`{}` ({:?}) answers the same whatever the lines' order",
+            site.name,
+            site.form
+        );
     }
+    let alone = [
+        word("Foo", "wait", false),
+        word("Condvar", "wait_timeout", true),
+    ];
+    assert_eq!(
+        effect_of(&alone, &site("wait", Form::Method(None))),
+        Some(("Foo::wait".to_owned(), false)),
+        "a site matching one line that does not wait is that line, counted"
+    );
+}
+
+/// RED (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11, ruling R5) — **`effect_of`
+/// reads a `.poll()` untyped, as the GPU wait**: against the live vocabulary a method `poll`, on
+/// any receiver, is `Device::poll` and waits, so a first-party `.poll()` in a product `Drop`, a
+/// counted-only `Drop` or an exported macro (`HangWatch::poll` written in one) would be red there,
+/// loudly — row 185's rule, kept; telling it apart there would be typed matching in `effect_of`,
+/// which this row does not do. No such body holds a `.poll(` today: the `Drop`, counted-only and
+/// owners guards are green with the entry.
+///
+/// MUTATION: delete the registry's `wgpu::Device::poll` line and the method `poll` matches no
+/// line.
+#[test]
+fn a_poll_reads_untyped_as_the_gpu_wait() {
+    let words = vocabulary();
+    let site = Site {
+        at: 0,
+        name: "poll",
+        form: Form::Method(Some(vec!["watch"])),
+    };
+    assert_eq!(
+        effect_of(&words, &site),
+        Some(("Device::poll".to_owned(), true))
+    );
 }
 
 // ── assertion 0: the declared universe ──────────────────────────────────────────────────────
@@ -3885,8 +4013,10 @@ const LANDMARKS: [(&str, &[Landmark]); 4] = [
 /// the recovery door, which rolls a macOS bundle back on a worker since U-29 and recovers a
 /// Windows transaction since U-23. B-ENDSESSION adds the system's end's write step, `exiting`
 /// then `quit_abandoned` around the one admitted wait in `session_end::settle` (the quit's `Write`
-/// on the held document; nothing is torn down).
-const PINS: [Pin; 23] = [
+/// on the held document; nothing is torn down). Plan row 201 adds `exiting` in
+/// `session_end::fence_the_log`, ahead of `diagnostics.log`'s fence at `WM_ENDSESSION(TRUE)` —
+/// after which the system may end the process, so it does not go back.
+const PINS: [Pin; 25] = [
     Pin {
         module: "admission",
         writer: "enter_standalone_main",
@@ -3921,6 +4051,14 @@ const PINS: [Pin; 23] = [
     Pin {
         module: "explorer_menu",
         writer: "settle_package",
+        owner: "bt-app crate::main",
+        after: Some("hand_over"),
+    },
+    // T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD (C1): whether the notices file is beside the
+    // running image, settled on the line after the package fact; `FolioApp::new` takes the witness.
+    Pin {
+        module: "settings",
+        writer: "settle_notices",
         owner: "bt-app crate::main",
         after: Some("hand_over"),
     },
@@ -3989,6 +4127,12 @@ const PINS: [Pin; 23] = [
     },
     Pin {
         module: "admission",
+        writer: "exiting",
+        owner: "bt-app crate::session_end::fence_the_log",
+        after: None,
+    },
+    Pin {
+        module: "admission",
         writer: "enter_standalone_main",
         owner: "bt-app crate::elevated_host::serve",
         after: None,
@@ -4038,14 +4182,18 @@ const PINS: [Pin; 23] = [
 ];
 
 /// The two remover helpers whose raw effects became worker doors are reached only from the worker
-/// roads that own them: `schedule` for the durable private copy, and the copied remover's
-/// `run_from_environment` for its refusal line. This is the call-site half of their `# effects`
-/// rows; the registry guard separately proves that each helper itself takes `WorkerCtx`.
+/// roads that own them: `schedule_by` (`schedule`'s body) for the durable private copy, and the
+/// copied remover's `run_from_environment` for its refusal line. This is the call-site half of
+/// their `# effects` rows; the registry guard separately proves that each helper itself takes
+/// `WorkerCtx`.
 fn the_remover_effect_doors_are_called_only_from_their_worker_roads(world: &World) -> Vec<String> {
     remover_door_failures(
         world.src("bt-platform"),
         &[
-            ("copy_new", "bt-platform crate::deferred_removal::schedule"),
+            (
+                "copy_new",
+                "bt-platform crate::deferred_removal::schedule_by",
+            ),
             (
                 "failure_without_plan",
                 "bt-platform crate::deferred_removal::run_from_environment",
@@ -5306,9 +5454,12 @@ const ADMISSIONS: [&[&str]; 2] = [&["bt_platform", "admission"], &["bt_effects",
 
 /// **The doors whose every call is pinned**, row for row: `diagnostics.log`'s settle (row 30) is
 /// admitted twice in `fn main`, in the build-error arm (after `build`) and at the tail (after
-/// `run_app`); the trace's flush (row 17) is admitted once, inside its one road
-/// `Shutdown::flush_through_its_door`, and `main` takes that road on the same two ways out.
-const DOOR_PINS: [DoorPin; 5] = [
+/// `run_app`), and once in `session_end::fence_the_log`, at `WM_ENDSESSION(TRUE)` and, on macOS,
+/// before AppKit's quit is answered `NSTerminateNow` — a process the system ends never reaches
+/// `fn main`'s way out (ruled 2026-11-03, plan row 201; 2026-11-04, 0.4.10 plan row 17); the trace's
+/// flush (row 17) is admitted once, inside its one road `Shutdown::flush_through_its_door`, and
+/// `main` takes that road on the same two ways out.
+const DOOR_PINS: [DoorPin; 6] = [
     DoorPin {
         door: "DiagnosticsSettle",
         road: Road::Admitted,
@@ -5320,6 +5471,12 @@ const DOOR_PINS: [DoorPin; 5] = [
         road: Road::Admitted,
         owner: "bt-app crate::main",
         after: Some("run_app"),
+    },
+    DoorPin {
+        door: "DiagnosticsSettle",
+        road: Road::Admitted,
+        owner: "bt-app crate::session_end::fence_the_log",
+        after: None,
     },
     DoorPin {
         door: "TraceFlush",
@@ -7114,12 +7271,31 @@ fn every_door_is_where_the_registry_says() {
 // site when it names the entry. A method call `receiver.name(…)` is a site of `Type::name` when the
 // receiver's **written type** includes `Type`: the type written on `self`, on a parameter, a field,
 // a `static`, a `let` annotation, or on the declared return of the first-party function or method
-// the receiver was made by, carried through `let`, `if let`, `while let`, `for`, `match` arms and
-// the parameters of a closure handed to a method of the value. Where no type is written anywhere on
-// that road the receiver is untyped and the call is not a site: this is a reading of what the
-// source says, not the compiler's resolution, and what it cannot see (an untyped receiver) is the
-// gap A2e's lint closes. `write!`/`writeln!` are `std::io::Write::write_fmt` when their first
-// argument is an `io` writer by the same reading.
+// the receiver was made by (or, for `std::mem::replace`/`take`, on their first argument), carried
+// through `let` and `let … else`, `if let`, `while let`, `for`, `match` arms, a parameter's pattern
+// and the parameters of a closure handed to a method of the value. A pattern gives each name it
+// binds the type of the part it binds, by a closed grammar (`Scope::bind_by_pattern`, row 19): a
+// name (`mut`, `ref`, `box`), `name @ sub`, a tuple, a slice, a reference, parentheses and each
+// case of an or-pattern over the value's types; `Some`, `Ok` and `Err` (also through `Option::` and
+// `Result::`) over the value's types; a first-party struct, tuple struct or enum variant over the
+// declared type of each member it binds; a path alone, a literal, a range and `_` binding nothing;
+// and a pattern it cannot place (a foreign struct or variant, a member nothing declares, a macro's
+// pattern, a qualified-self path, an unclosed turbofish) with no type for each name it may bind,
+// never the outer value's, and never letting an outer binding of the name show through. A binding
+// is read only where it is in scope (`Scope::bound_at`): two match arms that bind one name to two
+// types are two bindings, a `let` holds from its statement's end to its block's, and a conditional
+// `let` from the end of its scrutinee over its condition and block. Where no type is written
+// anywhere on that road the receiver is untyped and the call is not a site: this is a reading of
+// what the source says, not the compiler's resolution.
+// What it cannot read is listed, not passed over: a method call whose name and argument count are a
+// vocabulary entry's (`METHOD_ARITIES`) on an untyped receiver, or on one that is not one chain, is a
+// row of `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv` (`Reader::read`, `UnreadCall`), which grows
+// only with a dated reason, until A2e's lint closes the gap. A `.poll(` is held further
+// (`ACCOUNTED_RECEIVERS`, 0.4.10 plan row 11): one whose receiver's types hold neither
+// `wgpu::Device` nor a first-party type declaring its own `poll` is a row of that list too, for a
+// receiver typed as the wrong value is read as no site as silently as an untyped one.
+// `write!`/`writeln!` are `std::io::Write::write_fmt` when their first argument is an `io` writer
+// by the same reading, and a row of that list when it has no type.
 //
 // The few standard-library signatures the vocabulary's receivers are made through are written out
 // below (`FOREIGN_FUNCTIONS`, `FOREIGN_METHODS`, `BUILDERS`, `PASSING_THROUGH`, `WRAPPERS`,
@@ -7270,6 +7446,85 @@ const IO_WRITERS: [&str; 10] = [
 ];
 
 const WRITE_FMT: &str = "std::io::Write::write_fmt";
+
+/// **How many arguments each method-shaped vocabulary entry takes when it is called as a method**
+/// (`receiver.name(…)`, the receiver not counted), from its signature — `std`'s, a foreign crate's,
+/// or the first-party declaration's — or `None` when it takes no receiver and is never written as a
+/// method call (an associated function, a system call whose module path is capitalised). A call of
+/// another count cannot be that method, so the inventory's diagnostic ([`Reader::read`]) asks only
+/// about a call of the entry's own count. Held to the vocabulary, and the first-party lines to their
+/// declarations, by `every_method_shaped_vocabulary_entry_states_how_many_arguments_it_takes`
+/// (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19, ruling R6).
+const METHOD_ARITIES: &[(&str, Option<usize>)] = &[
+    ("std::thread::JoinHandle::join", Some(0)),
+    ("std::sync::mpsc::Receiver::recv", Some(0)),
+    ("std::sync::mpsc::Receiver::recv_timeout", Some(1)),
+    ("std::sync::Condvar::wait", Some(1)),
+    ("std::sync::Condvar::wait_timeout", Some(2)),
+    ("std::sync::Condvar::wait_while", Some(2)),
+    ("std::sync::Condvar::wait_timeout_while", Some(3)),
+    ("std::sync::mpsc::SyncSender::send", Some(1)),
+    ("std::sync::Barrier::wait", Some(0)),
+    ("std::thread::ScopedJoinHandle::join", Some(0)),
+    ("std::sync::Once::call_once", Some(1)),
+    ("std::sync::Once::call_once_force", Some(1)),
+    ("std::fs::File::create", None),
+    ("std::fs::File::sync_data", Some(0)),
+    ("std::fs::File::sync_all", Some(0)),
+    ("std::io::Write::write_fmt", Some(1)),
+    ("std::process::Command::output", Some(0)),
+    ("std::process::Command::status", Some(0)),
+    ("std::process::Child::wait", Some(0)),
+    ("portable_pty::Child::try_wait", Some(0)),
+    ("wgpu::Queue::submit", Some(1)),
+    ("wgpu::Queue::present", Some(0)),
+    ("wgpu::Device::poll", Some(1)),
+    ("bt_render::GpuContext::open", None),
+    ("bt_pty::PtySession::spawn_shell_in", None),
+    ("bt_pty::PtySession::spawn_refreshed", None),
+    ("bt_pty::PtySession::resize", Some(1)),
+    ("windows::Win32::UI::Shell::ShellExecuteW", None),
+    ("windows::Win32::UI::Shell::ShellExecuteExW", None),
+    (
+        "windows::Win32::System::Threading::WaitForSingleObject",
+        None,
+    ),
+    (
+        "windows::Win32::System::Threading::WaitForSingleObjectEx",
+        None,
+    ),
+    (
+        "windows::Win32::System::Threading::WaitForMultipleObjects",
+        None,
+    ),
+    (
+        "windows::Win32::System::Threading::WaitForMultipleObjectsEx",
+        None,
+    ),
+    (
+        "windows::Win32::System::Threading::SignalObjectAndWait",
+        None,
+    ),
+    ("windows::Win32::System::Threading::SleepEx", None),
+    (
+        "windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx",
+        None,
+    ),
+    ("windows::Win32::System::IO::GetOverlappedResult", None),
+    (
+        "windows::Win32::System::IO::GetQueuedCompletionStatus",
+        None,
+    ),
+    ("windows::Win32::System::Pipes::WaitNamedPipeW", None),
+    ("windows::Win32::System::Threading::SetEvent", None),
+    ("windows::Win32::Foundation::CloseHandle", None),
+    ("windows::Win32::Storage::FileSystem::GetDriveTypeW", None),
+];
+
+/// `std` functions whose result is their first argument's value, so a binding of the result takes
+/// that argument's types: `fn replace<T>(dest: &mut T, src: T) -> T` and `fn take<T: Default>(dest:
+/// &mut T) -> T` (row 19, §2.2: `match std::mem::replace(&mut self.making, …)`).
+const CARRYING_FUNCTIONS: [&str; 2] = ["std::mem::replace", "std::mem::take"];
 
 /// Names a pattern holds that bind nothing.
 const NOT_A_BINDING: [&str; 14] = [
@@ -7619,6 +7874,12 @@ struct Reader<'w> {
     names: Vec<Names>,
     entries: Vec<Entry>,
     io_writers: BTreeSet<String>,
+    /// The product's enum variants, by `(enum, variant)`: where each is declared. A variant's
+    /// record spans its own fields (`( … )` or `{ … }`), which [`Reader::payload_types`] reads.
+    variants: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>>,
+    /// The product's structs, enums and unions, by name: where each is declared, for the generic
+    /// parameters a member's written type may name ([`Reader::type_generics`]).
+    types: HashMap<String, Vec<(usize, &'static ItemRecord)>>,
 }
 
 impl<'w> Reader<'w> {
@@ -7673,11 +7934,36 @@ impl<'w> Reader<'w> {
                 }
             }
         }
+        let mut variants: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>> =
+            HashMap::new();
+        let mut types: HashMap<String, Vec<(usize, &'static ItemRecord)>> = HashMap::new();
+        for (at, src) in world.srcs.iter().enumerate() {
+            for record in src.index.items() {
+                if !src.product_item(record) {
+                    continue;
+                }
+                if record.kind() == ItemKind::Variant
+                    && let Some(owner) = record.type_owner()
+                {
+                    variants
+                        .entry((owner.to_owned(), record.name().to_owned()))
+                        .or_default()
+                        .push((at, record));
+                } else if record.kind().is_type() {
+                    types
+                        .entry(record.name().to_owned())
+                        .or_default()
+                        .push((at, record));
+                }
+            }
+        }
         Self {
             world,
             names,
             entries,
             io_writers,
+            variants,
+            types,
         }
     }
 
@@ -7890,10 +8176,264 @@ impl<'w> Reader<'w> {
         }
         out
     }
+
+    /// **The types a pattern binds to member `member` of the first-party struct `owner`, or of its
+    /// variant `variant`** (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19):
+    /// what the member's declaration writes, with each generic parameter of the declaring type
+    /// standing for `value`, the whole value's types (a [`Ty`] already holds what is inside a
+    /// wrapper). `member` is a field's name or a tuple member's position (`0`, `1`). `None` when
+    /// `owner` is not first-party or declares no such member: the pattern is then not placed.
+    fn payload_types(
+        &self,
+        owner: &str,
+        variant: Option<&str>,
+        member: &str,
+        value: &Ty,
+    ) -> Option<Ty> {
+        let (package, type_name) = self.first_party(owner)?;
+        let mut declared: Vec<(usize, &'static ItemRecord, Vec<Tok>)> = Vec::new();
+        match variant {
+            None => {
+                let fields = self
+                    .world
+                    .fields
+                    .get(&(type_name.to_owned(), member.to_owned()));
+                for (src, record) in fields.into_iter().flatten() {
+                    if self.names[*src].crate_ident != package {
+                        continue;
+                    }
+                    let s = &self.world.srcs[*src];
+                    let toks =
+                        without_attributes(s, &s.lex(record.whole().start(), record.whole().end()));
+                    let written = if member.parse::<usize>().is_ok() {
+                        // A tuple field is its visibility and its type: `pub(crate) Child`.
+                        let mut at = 0;
+                        if s.is(toks.first(), "pub") {
+                            at = 1;
+                            if s.is(toks.get(1), "(") {
+                                at = closing(s, &toks, 1).map_or(1, |close| close + 1);
+                            }
+                        }
+                        toks[at.min(toks.len())..].to_vec()
+                    } else {
+                        match toks.iter().position(|t| s.is(Some(t), ":")) {
+                            Some(colon) => toks[colon + 1..].to_vec(),
+                            None => continue,
+                        }
+                    };
+                    declared.push((*src, record, written));
+                }
+            }
+            Some(variant) => {
+                let records = self
+                    .variants
+                    .get(&(type_name.to_owned(), variant.to_owned()));
+                for (src, record) in records.into_iter().flatten() {
+                    if self.names[*src].crate_ident != package {
+                        continue;
+                    }
+                    let Some(body) = record.body() else {
+                        continue;
+                    };
+                    let s = &self.world.srcs[*src];
+                    let toks = s.lex(body.start(), body.end());
+                    if toks.len() < 2 {
+                        continue;
+                    }
+                    let parts = split_commas(s, &toks[1..toks.len() - 1]);
+                    if s.is(toks.first(), "(") {
+                        if let Ok(position) = member.parse::<usize>()
+                            && let Some(part) = parts.get(position)
+                        {
+                            declared.push((*src, record, without_attributes(s, part)));
+                        }
+                    } else if s.is(toks.first(), "{") {
+                        for part in &parts {
+                            let part = without_attributes(s, part);
+                            if let Some(colon) = top_level_token(s, &part, ":")
+                                && part[..colon]
+                                    .last()
+                                    .is_some_and(|name| s.text(*name) == member)
+                            {
+                                declared.push((*src, record, part[colon + 1..].to_vec()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if declared.is_empty() {
+            return None;
+        }
+        let mut out = Ty::new();
+        for (src, record, written) in declared {
+            let generics: HashMap<&'static str, Ty> = self
+                .type_generics(src, type_name, record)
+                .into_iter()
+                .map(|name| (name, value.clone()))
+                .collect();
+            out.extend(self.types_written(
+                src,
+                record.whole().start(),
+                record.module_paths()[0],
+                Some(owner),
+                &generics,
+                &written,
+            ));
+        }
+        Some(out)
+    }
+
+    /// How many members the first-party tuple struct `owner`, or its tuple variant `variant`,
+    /// declares — for the parts of a pattern written after `..`, which count from the end; `None`
+    /// when no declaration says, or the declarations differ.
+    fn tuple_members(&self, owner: &str, variant: Option<&str>) -> Option<usize> {
+        let (package, type_name) = self.first_party(owner)?;
+        let mut counts: BTreeSet<usize> = BTreeSet::new();
+        match variant {
+            None => {
+                // Each declaration of the name, with the positional fields inside its span.
+                for (src, declaration) in self.types.get(type_name).into_iter().flatten() {
+                    if self.names[*src].crate_ident != package {
+                        continue;
+                    }
+                    let members = self
+                        .world
+                        .fields
+                        .iter()
+                        .filter(|((ty, field), _)| {
+                            ty == type_name && field.bytes().all(|b| b.is_ascii_digit())
+                        })
+                        .flat_map(|(_, found)| found)
+                        .filter(|(at, record)| {
+                            at == src && record.whole().within(declaration.whole())
+                        })
+                        .count();
+                    counts.insert(members);
+                }
+            }
+            Some(variant) => {
+                let records = self
+                    .variants
+                    .get(&(type_name.to_owned(), variant.to_owned()));
+                for (src, record) in records.into_iter().flatten() {
+                    if self.names[*src].crate_ident != package {
+                        continue;
+                    }
+                    let s = &self.world.srcs[*src];
+                    let Some(body) = record.body() else {
+                        continue;
+                    };
+                    let toks = s.lex(body.start(), body.end());
+                    if s.is(toks.first(), "(") && toks.len() >= 2 {
+                        counts.insert(split_commas(s, &toks[1..toks.len() - 1]).len());
+                    }
+                }
+            }
+        }
+        match counts.len() {
+            1 => counts.pop_first(),
+            _ => None,
+        }
+    }
+
+    /// The generic type and `const` parameters of the type `type_name` that declares `member` (a
+    /// field or a variant of it), by name; lifetimes are no types and are left out.
+    fn type_generics(&self, src: usize, type_name: &str, member: &ItemRecord) -> Vec<&'static str> {
+        let s = &self.world.srcs[src];
+        let Some((_, declaration)) = self
+            .types
+            .get(type_name)
+            .into_iter()
+            .flatten()
+            .filter(|(at, record)| *at == src && record.whole().holds(member.whole().start()))
+            .min_by_key(|(_, record)| record.whole().len())
+        else {
+            return Vec::new();
+        };
+        let end = declaration
+            .body()
+            .map_or(declaration.whole().end(), |body| body.start());
+        let toks = s.lex(declaration.whole().start(), end);
+        let Some(name) = toks.iter().position(|tok| {
+            tok.kind == Kind::Ident
+                && s.text(*tok) == type_name
+                && toks.iter().any(|keyword| {
+                    keyword.start < tok.start
+                        && ["struct", "enum", "union"].contains(&s.text(*keyword))
+                })
+        }) else {
+            return Vec::new();
+        };
+        if !s.is(toks.get(name + 1), "<") {
+            return Vec::new();
+        }
+        let Some(close) = closing_angle(s, &toks, name + 1) else {
+            return Vec::new();
+        };
+        split_commas(s, &toks[name + 2..close])
+            .iter()
+            .filter_map(|part| {
+                let first = part.first()?;
+                let named = if s.is(Some(first), "const") {
+                    part.get(1)?
+                } else {
+                    first
+                };
+                (named.kind == Kind::Ident).then(|| s.text(*named))
+            })
+            .collect()
+    }
+}
+
+/// `toks` without the outer attributes written in front of it (`#[cfg(windows)] Child`).
+fn without_attributes(s: &Src, toks: &[Tok]) -> Vec<Tok> {
+    let mut at = 0;
+    while s.is(toks.get(at), "#") && s.is(toks.get(at + 1), "[") {
+        match closing(s, toks, at + 1) {
+            Some(close) => at = close + 1,
+            None => break,
+        }
+    }
+    toks[at.min(toks.len())..].to_vec()
+}
+
+/// What a struct or variant pattern's path names ([`Scope::place_pattern`]).
+enum PatternPlace {
+    /// `Some`, `Ok`, `Err`: the parts are the value's own contents.
+    Contents,
+    /// The first-party types it can be, each with the variant it names (`None` for a struct).
+    Members(BTreeSet<(String, Option<String>)>),
+    /// Nothing the reader can place: the parts are bound with no type.
+    Nowhere,
+}
+
+/// `toks` cut at every `separator` outside brackets, the empty pieces (a leading `|`) dropped.
+fn split_at_depth_zero<'t>(s: &Src, toks: &'t [Tok], separator: &str) -> Vec<&'t [Tok]> {
+    let mut pieces = Vec::new();
+    let mut depth = 0usize;
+    let mut from = 0;
+    for (at, tok) in toks.iter().enumerate() {
+        if tok.kind != Kind::Punct {
+            continue;
+        }
+        match s.text(*tok) {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => depth = depth.saturating_sub(1),
+            text if depth == 0 && text == separator => {
+                pieces.push(&toks[from..at]);
+                from = at + 1;
+            }
+            _ => {}
+        }
+    }
+    pieces.push(&toks[from..]);
+    pieces.retain(|piece| !piece.is_empty());
+    pieces
 }
 
 /// One body's types: its parameters, its generics' bounds, and its bindings, each name with the
-/// union of every type written on it in the body.
+/// types written on it where it is in scope.
 struct Scope<'r> {
     reader: &'r Reader<'r>,
     src: usize,
@@ -7901,7 +8441,12 @@ struct Scope<'r> {
     at: usize,
     own: Option<String>,
     generics: HashMap<&'static str, Ty>,
-    bindings: HashMap<&'static str, Ty>,
+    /// Each name's bindings, each with the `[from, to)` union offsets it is in scope over and its
+    /// types (row 19): a parameter over the body, a `let` from its statement's end to its block's,
+    /// an `if let`/`while let` pattern over its condition and block, a `for` pattern over the loop
+    /// body, a match arm's pattern over the arm, a closure's parameters over the closure. Two arms
+    /// that bind one name to two types are two bindings, so neither arm's call reads the other's.
+    bindings: HashMap<&'static str, Vec<(usize, usize, Ty)>>,
 }
 
 impl<'r> Scope<'r> {
@@ -7922,17 +8467,14 @@ impl<'r> Scope<'r> {
         let declaration = s.lex(record.declaration().start(), record.declaration().end());
         if let Some((_, open, close)) = signature(s, &declaration) {
             for param in split_commas(s, &declaration[open + 1..close]) {
-                let Some(colon) = param.iter().position(|t| s.is(Some(t), ":")) else {
+                let Some(colon) = top_level_token(s, &param, ":") else {
                     continue;
                 };
                 let types = scope.written(&param[colon + 1..]);
-                for name in pattern_names(s, &param[..colon]) {
-                    scope
-                        .bindings
-                        .entry(name)
-                        .or_default()
-                        .extend(types.iter().cloned());
-                }
+                let body = record
+                    .body()
+                    .map_or((0, 0), |body| (body.start(), body.end()));
+                scope.bind_by_pattern(&param[..colon], &types, body);
             }
         }
         if let Some(body) = record.body() {
@@ -7957,12 +8499,290 @@ impl<'r> Scope<'r> {
         )
     }
 
-    fn add(&mut self, names: Vec<&'static str>, types: &Ty) {
-        for name in names {
-            self.bindings
-                .entry(name)
-                .or_default()
-                .extend(types.iter().cloned());
+    /// Binds `name` to `types` over the union offsets `[within.0, within.1)`.
+    fn add(&mut self, name: &'static str, types: &Ty, within: (usize, usize)) {
+        self.bindings
+            .entry(name)
+            .or_default()
+            .push((within.0, within.1, types.clone()));
+    }
+
+    /// The types of the binding of `name` in scope at union offset `at` — of those whose scope
+    /// holds `at`, the one that begins last, which shadows the others (the cases of an
+    /// or-pattern begin together, and are one binding) — or `None` when no binding of it is.
+    fn bound_at(&self, name: &str, at: usize) -> Option<Ty> {
+        let holding: Vec<&(usize, usize, Ty)> = self
+            .bindings
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|(from, to, _)| *from <= at && at < *to)
+            .collect();
+        let latest = holding.iter().map(|(from, ..)| *from).max()?;
+        Some(
+            holding
+                .iter()
+                .filter(|(from, ..)| *from == latest)
+                .flat_map(|(.., types)| types.iter().cloned())
+                .collect(),
+        )
+    }
+
+    /// Adds `types` to the binding of `name` in scope at `at` (an assignment to it there).
+    fn assign(&mut self, name: &str, at: usize, types: &Ty) {
+        let Some(bindings) = self.bindings.get_mut(name) else {
+            return;
+        };
+        let latest = bindings
+            .iter()
+            .filter(|(from, to, _)| *from <= at && at < *to)
+            .map(|(from, ..)| *from)
+            .max();
+        for (from, to, held) in bindings.iter_mut() {
+            if Some(*from) == latest && at < *to {
+                held.extend(types.iter().cloned());
+            }
+        }
+    }
+
+    /// **A pattern whose shape [`Scope::bind_by_pattern`] cannot read** — a macro's (`m!(h)`), a
+    /// qualified-self path's (`<T as Tr>::V(h)`), an unclosed turbofish: any lowercase name in it
+    /// may be one it binds, so each is bound over `within` with **no type**, and an outer binding
+    /// of that name does not show through (bt-source's call graph binds a macro's pattern the same
+    /// way). A path segment (a name before `::`), a macro's name (before `!`), `as` and the words
+    /// of [`NOT_A_BINDING`] bind nothing.
+    fn bind_unplaced_names(&mut self, toks: &[Tok], within: (usize, usize)) {
+        let s = self.s();
+        for (index, tok) in toks.iter().enumerate() {
+            let name = s.text(*tok);
+            if tok.kind == Kind::Ident
+                && name != "as"
+                && !NOT_A_BINDING.contains(&name)
+                && !name.starts_with(|c: char| c.is_ascii_uppercase())
+                && !s.is(toks.get(index + 1), "::")
+                && !s.is(toks.get(index + 1), "!")
+            {
+                self.add(name, &Ty::new(), within);
+            }
+        }
+    }
+
+    /// **The names the pattern `toks` binds, each typed by the part of `value` it binds**
+    /// (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19). Every place a pattern
+    /// binds goes through here: a parameter, `let` and `let … else`, `if let`, `while let` and
+    /// let-chains, `for`, a `match` arm, a closure's parameter. The shapes it reads, and nothing
+    /// else:
+    ///
+    /// * **a name** (`h`, `mut h`, `ref h`, `box h`; `name @ sub`, then `sub`): `value`'s types;
+    /// * **a tuple, a slice, a reference, parentheses, each case of an or-pattern, and
+    ///   `Some`/`Ok`/`Err` (also as `Option::Some`, `Result::Ok`, `Result::Err`)**: each part over
+    ///   `value`'s types — a [`Ty`] holds every type written inside the value's type, so the
+    ///   part's is among them;
+    /// * **a first-party struct, tuple struct or enum variant** (`S { h, .. }`, `S { f: h }`,
+    ///   `S(h)`, `E::V(h)`, `Self::V { h }`, `V(h)` through a `use`): each part over the declared
+    ///   type of the member it binds ([`Reader::payload_types`]) — by name in braces, the shorthand
+    ///   `{ h }` binding the member `h`, by position in parentheses; `..` binds nothing;
+    /// * a path alone, a literal, a range, `_`: nothing.
+    ///
+    /// **A pattern it cannot place** — a foreign struct or variant other than those three, a
+    /// member no declaration has, a macro's pattern, a qualified-self path, an unclosed turbofish
+    /// ([`Scope::bind_unplaced_names`]) — binds its names with **no type**, never with the outer
+    /// value's: a vocabulary call on such a name is then an unread receiver, which the
+    /// inventory lists ([`Reader::read`]) instead of passing over it. Until row 19 every name of a
+    /// pattern took the outer value's types, so `Self::HooksMayOutlive(child) => child.wait()`
+    /// read `child` as the enum and the wait was no site.
+    fn bind_by_pattern(&mut self, toks: &[Tok], value: &Ty, within: (usize, usize)) {
+        let s = self.s();
+        let cases = split_at_depth_zero(s, toks, "|");
+        if cases.len() > 1 {
+            for case in cases {
+                self.bind_by_pattern(case, value, within);
+            }
+            return;
+        }
+        let mut from = 0;
+        while from < toks.len()
+            && ["&", "&&", "mut", "ref", "box"]
+                .iter()
+                .any(|word| s.is(toks.get(from), word))
+        {
+            from += 1;
+        }
+        let toks = &toks[from..];
+        let Some(first) = toks.first() else {
+            return;
+        };
+        let last = toks.len() - 1;
+        if first.kind == Kind::Ident && s.is(toks.get(1), "@") {
+            self.add(s.text(*first), value, within);
+            self.bind_by_pattern(&toks[2..], value, within);
+            return;
+        }
+        if (s.is(Some(first), "(") || s.is(Some(first), "[")) && closing(s, toks, 0) == Some(last) {
+            for part in split_commas(s, &toks[1..last]) {
+                self.bind_by_pattern(&part, value, within);
+            }
+            return;
+        }
+        // A path: names joined by `::`, a leading `::` and turbofishes allowed.
+        let mut path: Vec<&'static str> = Vec::new();
+        let mut at = usize::from(s.is(Some(first), "::"));
+        while let Some(tok) = toks.get(at) {
+            if tok.kind != Kind::Ident {
+                break;
+            }
+            path.push(s.text(*tok));
+            at += 1;
+            if s.is(toks.get(at), "::") && s.is(toks.get(at + 1), "<") {
+                match closing_angle(s, toks, at + 1) {
+                    Some(close) => at = close + 1,
+                    None => return self.bind_unplaced_names(toks, within),
+                }
+            }
+            if s.is(toks.get(at), "::") && toks.get(at + 1).is_some_and(|t| t.kind == Kind::Ident) {
+                at += 1;
+                continue;
+            }
+            break;
+        }
+        if path.is_empty() {
+            return self.bind_unplaced_names(toks, within);
+        }
+        if at == toks.len() {
+            if let [name] = path.as_slice()
+                && !NOT_A_BINDING.contains(name)
+                && !name.starts_with(|c: char| c.is_ascii_uppercase())
+            {
+                self.add(name, value, within);
+            }
+            return;
+        }
+        let braces = s.is(toks.get(at), "{");
+        if !(braces || s.is(toks.get(at), "(")) || closing(s, toks, at) != Some(last) {
+            return self.bind_unplaced_names(toks, within);
+        }
+        let placed = self.place_pattern(&path);
+        let member_types = |member: &str| -> Ty {
+            match &placed {
+                PatternPlace::Contents => value.clone(),
+                PatternPlace::Members(owners) => owners
+                    .iter()
+                    .filter_map(|(owner, variant)| {
+                        self.reader
+                            .payload_types(owner, variant.as_deref(), member, value)
+                    })
+                    .flatten()
+                    .collect(),
+                PatternPlace::Nowhere => Ty::new(),
+            }
+        };
+        let parts = split_commas(s, &toks[at + 1..last]);
+        // In parentheses, a `..` binds nothing and the parts after it count from the end.
+        let rest = (!braces)
+            .then(|| parts.iter().position(|part| s.is(part.first(), "..")))
+            .flatten();
+        let count = parts.len();
+        let mut bound: Vec<(Vec<Tok>, Ty)> = Vec::new();
+        for (position, part) in parts.into_iter().enumerate() {
+            if !braces {
+                let types = match rest {
+                    Some(rest) if position == rest => continue,
+                    Some(rest) if position > rest => {
+                        let from_end = count - position;
+                        match &placed {
+                            PatternPlace::Contents => value.clone(),
+                            PatternPlace::Members(owners) => owners
+                                .iter()
+                                .filter_map(|(owner, variant)| {
+                                    let members =
+                                        self.reader.tuple_members(owner, variant.as_deref())?;
+                                    let at = members.checked_sub(from_end)?;
+                                    self.reader.payload_types(
+                                        owner,
+                                        variant.as_deref(),
+                                        &at.to_string(),
+                                        value,
+                                    )
+                                })
+                                .flatten()
+                                .collect(),
+                            PatternPlace::Nowhere => Ty::new(),
+                        }
+                    }
+                    _ => member_types(&position.to_string()),
+                };
+                bound.push((part, types));
+            } else if s.is(part.first(), "..") {
+                // The rest of the members: nothing bound.
+                continue;
+            } else if let Some(colon) = top_level_token(s, &part, ":") {
+                let member = part[..colon].last().map_or("", |name| s.text(*name));
+                bound.push((part[colon + 1..].to_vec(), member_types(member)));
+            } else {
+                // The shorthand: `{ ref mut h }` binds the member `h`.
+                let member = part.last().map_or("", |name| s.text(*name));
+                let types = member_types(member);
+                bound.push((part, types));
+            }
+        }
+        for (part, types) in bound {
+            self.bind_by_pattern(&part, &types, within);
+        }
+    }
+
+    /// **What a struct or variant pattern's path names** ([`Scope::bind_by_pattern`]): `Some`, `Ok`
+    /// or `Err`, whose contents are the value's own types; the first-party structs and variants it
+    /// can be, through the body's own type (`Self`), its module's types and its `use`s; or nothing
+    /// the reader can place.
+    fn place_pattern(&self, path: &[&'static str]) -> PatternPlace {
+        let reader = self.reader;
+        let last = path[path.len() - 1];
+        if ["Some", "Ok", "Err"].contains(&last)
+            && (path.len() == 1 || ["Option", "Result"].contains(&path[path.len() - 2]))
+        {
+            return PatternPlace::Contents;
+        }
+        let declares = |owner: &str, variant: &str| {
+            reader
+                .first_party(owner)
+                .is_some_and(|(package, type_name)| {
+                    reader
+                        .variants
+                        .get(&(type_name.to_owned(), variant.to_owned()))
+                        .is_some_and(|found| {
+                            found
+                                .iter()
+                                .any(|(src, _)| reader.names[*src].crate_ident == package)
+                        })
+                })
+        };
+        let mut owners: BTreeSet<(String, Option<String>)> = BTreeSet::new();
+        if path.len() >= 2 {
+            for owner in self.path_type(&path[..path.len() - 1]) {
+                if declares(&owner, last) {
+                    owners.insert((owner, Some(last.to_owned())));
+                }
+            }
+        }
+        for owner in self.path_type(path) {
+            if reader.first_party(&owner).is_some() {
+                owners.insert((owner, None));
+            }
+        }
+        if path.len() == 1 {
+            // A variant a `use` brought in (`use Making::*;`, `use Making::Beside;`).
+            for canonical in reader.names[self.src].resolve(path, self.at, self.module) {
+                if let Some((owner, variant)) = canonical.rsplit_once("::")
+                    && declares(owner, variant)
+                {
+                    owners.insert((owner.to_owned(), Some(variant.to_owned())));
+                }
+            }
+        }
+        if owners.is_empty() {
+            PatternPlace::Nowhere
+        } else {
+            PatternPlace::Members(owners)
         }
     }
 
@@ -7986,22 +8806,56 @@ impl<'r> Scope<'r> {
                     types = self.written(&toks[at + 1..end]);
                     at = end;
                 }
-                if s.is(toks.get(at), "=") && types.is_empty() {
+                // Where the scrutinee ends: a conditional `let`'s names are in scope only after it
+                // (Rust reads `if let Ok(child) = child.wait()`'s second `child` in the outer
+                // scope; review N2), a plain `let`'s from its statement's end.
+                let mut scrutinee_end = at;
+                if s.is(toks.get(at), "=") {
                     let stops: &[&str] = if conditional {
-                        &["{", "&&", "||"]
+                        &["{", "&&", "||", "=>"]
                     } else {
                         &[";", "else"]
                     };
-                    let end = depth_zero(s, toks, at + 1, stops);
-                    types = self.expression(&toks[at + 1..end]);
+                    scrutinee_end = depth_zero(s, toks, at + 1, stops);
+                    if types.is_empty() {
+                        types = self.expression(&toks[at + 1..scrutinee_end]);
+                    }
                 }
-                self.add(pattern_names(s, pattern), &types);
+                let within = if conditional {
+                    // Over the rest of the condition and the block it opens: the first `{` past
+                    // this `=`, stepping over the patterns of the chain's later `let`s (a struct
+                    // pattern's braces are no block). A guard's `let` meets its arm's `=>` first,
+                    // and is read over the whole `match`.
+                    let mut open = depth_zero(s, toks, at + 1, &["{", "let", "=>"]);
+                    while s.is(toks.get(open), "let") {
+                        let equals = depth_zero(s, toks, open + 1, &["="]);
+                        open = depth_zero(s, toks, equals + 1, &["{", "let", "=>"]);
+                    }
+                    let to = if s.is(toks.get(open), "{") {
+                        closing(s, toks, open)
+                            .map_or_else(|| enclosing_group_end(s, toks, index), |c| toks[c].end)
+                    } else {
+                        enclosing_group_end(s, toks, index)
+                    };
+                    let from = toks.get(scrutinee_end).map_or(to, |t| t.start);
+                    (from, to)
+                } else {
+                    // From the end of its statement (`;`, past a `let … else` block) to its block's.
+                    let statement_end = depth_zero(s, toks, index + 1, &[";"]);
+                    let from = toks.get(statement_end).map_or(tok.end, |t| t.start);
+                    (from, enclosing_group_end(s, toks, index))
+                };
+                self.bind_by_pattern(pattern, &types, within);
             } else if tok.kind == Kind::Ident && text == "for" && !s.is(toks.get(index + 1), "<") {
                 let in_at = depth_zero(s, toks, index + 1, &["in", "{", ";"]);
                 if s.is(toks.get(in_at), "in") {
                     let end = depth_zero(s, toks, in_at + 1, &["{"]);
                     let types = self.expression(&toks[in_at + 1..end]);
-                    self.add(pattern_names(s, &toks[index + 1..in_at]), &types);
+                    let within = match closing(s, toks, end).filter(|_| s.is(toks.get(end), "{")) {
+                        Some(close) => (toks[end].start, toks[close].end),
+                        None => (tok.start, enclosing_group_end(s, toks, index)),
+                    };
+                    self.bind_by_pattern(&toks[index + 1..in_at], &types, within);
                 }
             } else if tok.kind == Kind::Ident && text == "match" {
                 let open = depth_zero(s, toks, index + 1, &["{"]);
@@ -8020,7 +8874,7 @@ impl<'r> Scope<'r> {
                         .iter()
                         .any(|w| s.is(toks.get(p), w))
                 })
-                && self.bindings.contains_key(text)
+                && self.bound_at(text, tok.start).is_some()
             {
                 // **An assignment to a binding already in scope** — `worker = spawn(…).ok();`
                 // after `let mut worker = None;`, possibly inside a closure — adds what is
@@ -8028,12 +8882,12 @@ impl<'r> Scope<'r> {
                 // filled later is untyped, and a wait on it (`worker.join()`) is no site at all.
                 let end = depth_zero(s, toks, index + 2, &[";", ","]);
                 let types = self.expression(&toks[index + 2..end]);
-                self.add(vec![text], &types);
+                self.assign(text, tok.start, &types);
             }
         }
     }
 
-    /// A `match`'s arms: each pattern's names take the scrutinee's types.
+    /// A `match`'s arms: each pattern bound over the scrutinee's types ([`Scope::bind_by_pattern`]).
     fn arms(&mut self, toks: &[Tok], types: &Ty) {
         let s = self.s();
         let mut at = 0;
@@ -8047,9 +8901,8 @@ impl<'r> Scope<'r> {
                 .iter()
                 .position(|t| s.is(Some(t), "if"))
                 .unwrap_or(pattern.len());
-            self.add(pattern_names(s, &pattern[..guard]), types);
             let body = arrow + 1;
-            at = if s.is(toks.get(body), "{") {
+            let next = if s.is(toks.get(body), "{") {
                 let close = closing(s, toks, body).unwrap_or(toks.len() - 1);
                 if s.is(toks.get(close + 1), ",") {
                     close + 2
@@ -8059,6 +8912,10 @@ impl<'r> Scope<'r> {
             } else {
                 depth_zero(s, toks, body, &[","]) + 1
             };
+            // Over the arm: its pattern, its guard and its body.
+            let last = next.min(toks.len()) - 1;
+            self.bind_by_pattern(&pattern[..guard], types, (toks[at].start, toks[last].end));
+            at = next;
         }
     }
 
@@ -8093,15 +8950,22 @@ impl<'r> Scope<'r> {
         {
             given = self.chain(toks, start, open - 3).unwrap_or_default();
         }
+        // Over the closure: a block body, or else the group the closure is written in.
+        let after = bar + 1 + end + 1;
+        let to = match closing(s, toks, after).filter(|_| s.is(toks.get(after), "{")) {
+            Some(close) => toks[close].end,
+            None => enclosing_group_end(s, toks, bar),
+        };
         for param in split_commas(s, params) {
-            let colon = param.iter().position(|t| s.is(Some(t), ":"));
+            let colon = top_level_token(s, &param, ":");
             let types = match colon {
                 Some(colon) => self.written(&param[colon + 1..]),
                 None => given.clone(),
             };
-            self.add(
-                pattern_names(s, &param[..colon.unwrap_or(param.len())]),
+            self.bind_by_pattern(
+                &param[..colon.unwrap_or(param.len())],
                 &types,
+                (toks[bar].start, to),
             );
         }
     }
@@ -8194,7 +9058,7 @@ impl<'r> Scope<'r> {
                 ty = Ty::new();
             } else if s.is(toks.get(at), "(") {
                 let close = closing(s, toks, at)?;
-                ty = self.call(&path, &toks[at + 1..close]);
+                ty = self.call(&path, &toks[at + 1..close], first.start);
                 at = close + 1;
             } else if s.is(toks.get(at), "{")
                 && path
@@ -8204,7 +9068,7 @@ impl<'r> Scope<'r> {
                 at = closing(s, toks, at)? + 1;
                 ty = self.path_type(&path);
             } else if path.len() == 1 {
-                ty = self.value(path[0]);
+                ty = self.value(path[0], first.start);
             } else {
                 ty = self.path_type(&path[..path.len() - 1]);
             }
@@ -8253,9 +9117,9 @@ impl<'r> Scope<'r> {
     }
 
     /// A name standing alone: a binding, a parameter, a `static`, or a unit value of a type.
-    fn value(&self, name: &str) -> Ty {
-        if let Some(types) = self.bindings.get(name) {
-            return types.clone();
+    fn value(&self, name: &str, at: usize) -> Ty {
+        if let Some(types) = self.bound_at(name, at) {
+            return types;
         }
         if let Some(statics) = self.reader.names[self.src].statics.get(name) {
             let s = self.s();
@@ -8289,15 +9153,16 @@ impl<'r> Scope<'r> {
     }
 
     /// A call's result: a first-party function's or associated function's declared return, a
-    /// wrapper's contents, a variant's payload, or what `std` returns by the table.
-    fn call(&self, path: &[&str], args: &[Tok]) -> Ty {
+    /// wrapper's contents, a variant's payload, what `std` returns by the table, or — for
+    /// [`CARRYING_FUNCTIONS`] — the first argument's types.
+    fn call(&self, path: &[&str], args: &[Tok], at: usize) -> Ty {
         let s = self.s();
         let reader = self.reader;
         let last = *path.last().unwrap_or(&"");
         if path.len() == 1 && ["Some", "Ok", "Err"].contains(&last) {
             return self.expression(args);
         }
-        if path.len() == 1 && self.bindings.contains_key(last) {
+        if path.len() == 1 && self.bound_at(last, at).is_some() {
             return Ty::new();
         }
         let qualifier = (path.len() >= 2).then(|| path[path.len() - 2]);
@@ -8326,6 +9191,10 @@ impl<'r> Scope<'r> {
             if let Some((package, name)) = reader.first_party(&canonical) {
                 for (src, record) in reader.callables(package, None, name) {
                     out.extend(reader.returns(src, record, None));
+                }
+            } else if CARRYING_FUNCTIONS.contains(&canonical.as_str()) {
+                if let Some(first) = split_commas(s, args).first() {
+                    out.extend(self.expression(first));
                 }
             } else if let Some((_, made)) = FOREIGN_FUNCTIONS
                 .iter()
@@ -8408,6 +9277,16 @@ fn closing_angle(s: &Src, toks: &[Tok], open: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// The union offset where the bracket `toks[at]` stands inside closes: the end of the block a
+/// statement is in, of the argument list a closure is written in. The end of `toks` when `toks[at]`
+/// stands inside none, or it does not close in `toks`.
+fn enclosing_group_end(s: &Src, toks: &[Tok], at: usize) -> usize {
+    unmatched_open(s, toks, at)
+        .and_then(|open| closing(s, toks, open))
+        .or_else(|| toks.len().checked_sub(1))
+        .map_or(0, |close| toks[close].end)
 }
 
 /// The bracket `toks[at]` stands inside.
@@ -8512,10 +9391,64 @@ fn chain_start(s: &Src, toks: &[Tok], end: usize) -> Option<usize> {
     }
 }
 
+/// The number of arguments written in the call whose name is `toks[name]` (past a turbofish), or
+/// `None` when no parenthesised argument list follows it.
+fn arguments_written(s: &Src, toks: &[Tok], name: usize) -> Option<usize> {
+    let mut open = name + 1;
+    if s.is(toks.get(open), "::") && s.is(toks.get(open + 1), "<") {
+        open = closing_angle(s, toks, open + 1)? + 1;
+    }
+    if !s.is(toks.get(open), "(") {
+        return None;
+    }
+    let close = closing(s, toks, open)?;
+    Some(split_commas(s, &toks[open + 1..close]).len())
+}
+
+/// The number of arguments the method-shaped vocabulary entry `path` takes as a method call
+/// ([`METHOD_ARITIES`]); `None` for one never called as a method, or a path the table lacks.
+fn method_arity(path: &str) -> Option<usize> {
+    METHOD_ARITIES
+        .iter()
+        .find(|(entry, _)| *entry == path)
+        .and_then(|(_, arity)| *arity)
+}
+
+/// **The method-shaped vocabulary entries whose call must be accounted for by its receiver's types**
+/// (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11, ruling R4 and review N1). A
+/// receiver the reading types is not always typed right: a closure parameter handed to a
+/// first-party method is given that method's receiver's types, and a field whose declared type is
+/// its struct's generic parameter is given the parameter's bare name. A call of such an entry is
+/// read only when its receiver's types hold the entry's type (a site) or a first-party type that
+/// declares a method of the call's name (`HangWatch::poll`); any other is an [`UnreadCall`]
+/// ([`Reader::unaccounted`]), as an untyped receiver is. `poll` is a vocabulary method name a
+/// first-party type shares (`HangWatch::poll`), and this row's entry is told by its receiver alone
+/// (rulings R4 and N1). Other shared names (`GitChild::wait` and `try_wait`, the lanes' `submit`,
+/// `send`, `present`, …) are plan row 93's cross-check of a receiver typed wrong.
+const ACCOUNTED_RECEIVERS: [&str; 1] = ["wgpu::Device::poll"];
+
 /// One site: its package, its offset, its entry.
 struct BareSite {
     at: usize,
     entry: usize,
+}
+
+/// **A call the inventory's reader could not read** ([`Reader::read`]): a method call whose name
+/// and argument count are a method-shaped vocabulary entry's ([`METHOD_ARITIES`]) and whose
+/// receiver is not one chain or has no written type, or a `write!`/`writeln!` whose first argument
+/// has none. It may be a site; the reading cannot say, so it is listed, not dropped.
+struct UnreadCall {
+    at: usize,
+    owner: &'static ItemRecord,
+    /// The vocabulary entries the call could be, by index.
+    entries: Vec<usize>,
+}
+
+/// [`Reader::read`]'s answer for one package: its sites, each with the callable it stands in, and
+/// the calls it could not read.
+struct PackageReading {
+    sites: Vec<(BareSite, Option<&'static ItemRecord>)>,
+    unread: Vec<UnreadCall>,
 }
 
 impl Reader<'_> {
@@ -8589,10 +9522,42 @@ impl Reader<'_> {
         (found, used)
     }
 
-    /// Every site in one package's product files, with the callable each stands in.
-    fn sites(&self, src: usize) -> Vec<(BareSite, Option<&'static ItemRecord>)> {
+    /// The [`ACCOUNTED_RECEIVERS`] entries the method call `toks[name]`, on a receiver of the types
+    /// `receiver` (not empty), could be while those types account for neither the entry nor the
+    /// call: the call's name and argument count are the entry's ([`METHOD_ARITIES`]), no type in
+    /// the set is the entry's, and no first-party type in it declares a method of that name.
+    fn unaccounted(&self, s: &Src, toks: &[Tok], name: usize, receiver: &Ty) -> Vec<usize> {
+        let text = s.text(toks[name]);
+        let written = arguments_written(s, toks, name);
+        let its_own = receiver.iter().any(|ty| {
+            self.first_party(ty).is_some_and(|(package, type_name)| {
+                !self.callables(package, Some(type_name), text).is_empty()
+            })
+        });
+        if written.is_none() || its_own {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                ACCOUNTED_RECEIVERS.contains(&entry.path.as_str())
+                    && entry
+                        .method
+                        .as_ref()
+                        .is_some_and(|(ty, method)| method == text && !receiver.contains(ty))
+                    && method_arity(&entry.path) == written
+            })
+            .map(|(at, _)| at)
+            .collect()
+    }
+
+    /// Every site in one package's product files, with the callable each stands in, and every call
+    /// there it could not read ([`UnreadCall`]): never a silent skip (row 19, ruling R4).
+    fn read(&self, src: usize) -> PackageReading {
         let s = &self.world.srcs[src];
         let mut out = Vec::new();
+        let mut unread = Vec::new();
         let callables: Vec<&'static ItemRecord> = s
             .index
             .items()
@@ -8741,9 +9706,47 @@ impl Reader<'_> {
                                 },
                                 owner,
                             ));
+                        } else if let Some(entry) = write_fmt.filter(|_| types.is_empty()) {
+                            unread.push(UnreadCall {
+                                at: tok.start,
+                                owner: record,
+                                entries: vec![entry],
+                            });
                         }
-                    } else if let Some(start) = chain_start(s, &toks, index - 2) {
-                        let receiver = scope.chain(&toks, start, index - 2).unwrap_or_default();
+                    } else {
+                        let receiver = chain_start(s, &toks, index - 2)
+                            .and_then(|start| scope.chain(&toks, start, index - 2))
+                            .unwrap_or_default();
+                        if receiver.is_empty() {
+                            let written = arguments_written(s, &toks, index);
+                            let entries: Vec<usize> = self
+                                .entries
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, entry)| {
+                                    entry.method.as_ref().is_some_and(|(_, name)| name == text)
+                                        && written.is_some()
+                                        && method_arity(&entry.path) == written
+                                })
+                                .map(|(at, _)| at)
+                                .collect();
+                            if !entries.is_empty() {
+                                unread.push(UnreadCall {
+                                    at: tok.start,
+                                    owner: record,
+                                    entries,
+                                });
+                            }
+                        } else {
+                            let entries = self.unaccounted(s, &toks, index, &receiver);
+                            if !entries.is_empty() {
+                                unread.push(UnreadCall {
+                                    at: tok.start,
+                                    owner: record,
+                                    entries,
+                                });
+                            }
+                        }
                         for (at, entry) in self.entries.iter().enumerate() {
                             let Some((ty, name)) = &entry.method else {
                                 continue;
@@ -8765,7 +9768,7 @@ impl Reader<'_> {
                 index += 1;
             }
         }
-        out
+        PackageReading { sites: out, unread }
     }
 }
 
@@ -8923,7 +9926,7 @@ fn vocabulary_sites_in(world: &World, effects: &[Vec<&str>]) -> SitesSplit {
     let mut in_doors: DoorEffects = BTreeMap::new();
     let mut registered = BTreeMap::new();
     for (src, s) in world.srcs.iter().enumerate() {
-        for (site, owner) in reader.sites(src) {
+        for (site, owner) in reader.read(src).sites {
             if !s.in_product(site.at) {
                 continue;
             }
@@ -9238,7 +10241,7 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
 /// The registry's sections, each headed `# <name>` once, in this order: a closed list, so a section
 /// misspelled, unknown or written twice — a second `# graphs` after the first, which
 /// [`section_in`] would never read — is refused by name rather than read past.
-const REGISTRY_SECTIONS: [&str; 11] = [
+const REGISTRY_SECTIONS: [&str; 12] = [
     "rows",
     "doors",
     "vocabulary",
@@ -9250,6 +10253,7 @@ const REGISTRY_SECTIONS: [&str; 11] = [
     "owners",
     "completions",
     "request-doors",
+    "request-door-cuts",
 ];
 
 /// **The registry's section headers are the closed list** [`REGISTRY_SECTIONS`]: every line that
@@ -9773,6 +10777,595 @@ fn a_site_in_a_function_taking_a_leg_is_a_bare_site() {
     );
 }
 
+/// A planted crate whose functions wait through the verbs the vocabulary took from bt-source's
+/// `BLOCKING` (plan row 176), and a door function waiting the same way (the control).
+const PLANTED_WAIT_WHILE_SITES: &str = "
+pub mod doors { pub struct TraceFlush; }
+pub struct WaitToken<'a, D> { door: &'a D }
+pub fn waits_while(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+let _ = c.wait_while(m.lock().unwrap(), |held| *held);
+}
+pub fn parks() { std::thread::park_timeout(std::time::Duration::ZERO); }
+pub fn sends(s: &std::sync::mpsc::SyncSender<()>) { let _ = s.send(()); }
+pub fn owned(_token: WaitToken<'_, doors::TraceFlush>, c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+";
+
+/// RED (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176) — **a wait through
+/// `Condvar::wait_timeout_while`, `Condvar::wait_while`, `thread::park_timeout` or
+/// `SyncSender::send` outside a door is a bare site.** Row 145's first form of the WinHTTP close
+/// door waited with `wait_timeout_while`, a name the vocabulary lacked, and its row left the
+/// inventory as "delete it" with no door in sight.
+///
+/// Against the planted crate ([`PLANTED_WAIT_WHILE_SITES`]): `waits_while`, `parks` and `sends`
+/// each hold their sites, counted one each; `owned`, which takes a `WaitToken`, is a door function
+/// whose `wait_timeout_while` is a door effect (the control).
+///
+/// MUTATION: delete the registry's `std::sync::Condvar::wait_timeout_while` line and
+/// `waits_while`'s first site leaves the inventory.
+#[test]
+fn a_wait_through_a_verb_from_blocking_outside_a_door_is_a_bare_site() {
+    let world = planted_world("ww-wait-while", PLANTED_WAIT_WHILE_SITES);
+    let (bare, in_doors, _) = vocabulary_sites_in(&world, &[]);
+    let planted = |item: &str, entry: &str| {
+        (
+            "planted".to_owned(),
+            "-".to_owned(),
+            item.to_owned(),
+            entry.to_owned(),
+        )
+    };
+    let mine: BTreeMap<&BareKey, &usize> = bare
+        .iter()
+        .filter(|((package, _, item, _), _)| {
+            package == "planted"
+                && [
+                    "crate::waits_while",
+                    "crate::parks",
+                    "crate::sends",
+                    "crate::owned",
+                ]
+                .contains(&item.as_str())
+        })
+        .collect();
+    let wanted = [
+        planted("crate::parks", "std::thread::park_timeout"),
+        planted("crate::sends", "std::sync::mpsc::SyncSender::send"),
+        planted(
+            "crate::waits_while",
+            "std::sync::Condvar::wait_timeout_while",
+        ),
+        planted("crate::waits_while", "std::sync::Condvar::wait_while"),
+    ];
+    assert_eq!(
+        mine,
+        wanted
+            .iter()
+            .map(|key| (key, &1))
+            .collect::<BTreeMap<_, _>>(),
+        "the planted waits are not each one bare site"
+    );
+    assert!(
+        in_doors.contains_key(&(
+            "planted".to_owned(),
+            "-".to_owned(),
+            "crate::owned".to_owned()
+        )),
+        "the control: `owned` takes a `WaitToken` and is not a door function; door effects {:?}",
+        in_doors.keys().collect::<Vec<_>>()
+    );
+}
+
+/// A planted crate whose functions each wait once on a handle a pattern binds out of a first-party
+/// struct or enum, one function per binding form [`Scope::bind_by_pattern`] reads (row 19), and
+/// one (`a_label`) that calls a vocabulary method's name on a payload member of another type.
+const PLANTED_PAYLOAD_BINDINGS: &str = "
+pub enum Held { Thread(std::thread::JoinHandle<()>), Kid { child: std::process::Child, label: String }, Gone }
+pub struct Holder { pub child: std::process::Child }
+pub struct Wrapped(pub std::process::Child);
+pub struct Rx { pub rx: std::sync::mpsc::Receiver<()>, pub tag: u8 }
+pub struct Trio(pub u8, pub String, pub std::process::Child);
+pub enum Kids { One(std::process::Child), Two(std::process::Child, std::process::Child) }
+pub enum Slot<T> { Full(T), Empty }
+pub struct Label;
+impl Label { pub fn wait(&self) {} }
+pub enum Named { Label(Label), Other }
+pub enum Either { Other(Label), Kid(std::process::Child) }
+impl Either {
+pub fn wait_either(&mut self) { match self { Self::Other(child) => { child.wait(); } Self::Kid(child) => { let _ = child.wait(); } } }
+}
+pub fn next_held() -> Held { Held::Gone }
+pub fn in_a_match_arm(held: Held) { match held { Held::Thread(thread) => { let _ = thread.join(); } _ => {} } }
+impl Held {
+pub fn through_self(&mut self) { match self { Self::Kid { child, .. } => { let _ = child.wait(); } _ => {} } }
+}
+pub fn by_shorthand(held: Held) { if let Held::Kid { mut child, .. } = held { let _ = child.wait(); } }
+pub fn by_renamed_field(held: Held) { if let Held::Kid { child: mut kid, label: _ } = held { let _ = kid.wait(); } }
+pub fn nested(held: Option<Held>) { if let Some(Held::Thread(thread)) = held { let _ = thread.join(); } }
+pub fn either_case(kids: Kids) { match kids { Kids::One(mut child) | Kids::Two(_, mut child) => { let _ = child.wait(); } } }
+pub fn after_the_rest(kids: Kids) { if let Kids::Two(.., mut child) = kids { let _ = child.wait(); } }
+pub fn after_the_rest_of_a_tuple_struct(trio: Trio) { let Trio(.., mut last) = trio; let _ = last.wait(); }
+pub fn at_binding(held: Held) { match held { Held::Thread(thread @ _) => { let _ = thread.join(); } _ => {} } }
+pub fn while_let() { while let Held::Thread(thread) = next_held() { let _ = thread.join(); } }
+pub fn let_else(held: Held) { let Held::Thread(thread) = held else { return; }; let _ = thread.join(); }
+pub fn let_struct(holder: Holder) { let Holder { mut child } = holder; let _ = child.wait(); }
+pub fn let_tuple_struct(wrapped: Wrapped) { let Wrapped(mut child) = wrapped; let _ = child.wait(); }
+pub fn in_a_for(all: Vec<Wrapped>) { for Wrapped(mut child) in all { let _ = child.wait(); } }
+pub fn for_a_tuple(pairs: Vec<(u8, Wrapped)>) { for (_, Wrapped(mut child)) in pairs { let _ = child.wait(); } }
+pub fn by_parameter(Wrapped(mut child): Wrapped) { let _ = child.wait(); }
+pub fn by_struct_parameter(Rx { rx, .. }: Rx) { let _ = rx.recv(); }
+pub fn by_closure(wrapped: Wrapped) { let wait = |Wrapped(mut child): Wrapped| { let _ = child.wait(); }; wait(wrapped); }
+pub fn by_method_closure(held: Option<Rx>) { let _ = held.map(|Rx { rx, .. }| rx.recv()); }
+pub fn by_replace(slot: &mut Held) { match std::mem::replace(slot, Held::Gone) { Held::Thread(thread) => { let _ = thread.join(); } _ => {} } }
+pub fn by_take(slot: &mut Option<Wrapped>) { if let Some(Wrapped(mut child)) = std::mem::take(slot) { let _ = child.wait(); } }
+pub fn generic_payload(slot: Slot<std::thread::JoinHandle<()>>) { if let Slot::Full(thread) = slot { let _ = thread.join(); } }
+pub fn a_label(named: Named, _kid: std::process::Child) { if let Named::Label(label) = named { label.wait(); } }
+pub fn a_block_let_does_not_leak(mut h: std::process::Child) { { let h = Label; h.wait(); } let _ = h.wait(); }
+pub fn a_let_shadows_from_its_end(h: Label, kid: std::process::Child) { h.wait(); let mut h = kid; let _ = h.wait(); }
+pub fn a_let_shadows_a_handle(mut h: std::process::Child) { let _ = h.wait(); let h = Label; h.wait(); }
+pub fn a_conditional_scrutinee_reads_the_outer_name(mut child: std::process::Child) { if let Ok(child) = child.wait() { let _ = child; } }
+pub fn a_conditional_let_ends_with_its_block(mut child: std::process::Child, named: Named) { if let Named::Label(child) = named { child.wait(); } let _ = child.wait(); }
+pub fn a_let_initializer_reads_the_outer_name(mut h: std::process::Child) { let h: Label = { let _ = h.wait(); Label }; h.wait(); }
+";
+
+/// RED (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19, ruling R1) — **a wait
+/// on a handle a pattern binds out of a first-party struct or enum is a bare site, in every binding
+/// form.** `GitChild::wait`'s `Self::HooksMayOutlive(child) => child.wait()` was no site: every
+/// name of a pattern took the outer value's types, so `child` read as `GitChild`, and
+/// `FormulaEngine::engine` called its join by path to be counted.
+///
+/// Against the planted crate ([`PLANTED_PAYLOAD_BINDINGS`]): each function holds one site, the
+/// handle bound by a match arm, `Self::V { .. }`, a struct variant's shorthand and a renamed field,
+/// a variant inside `Some`, an or-pattern, `name @ _`, members after `..` (counted from the end),
+/// `while let`, `let … else`, a struct and a
+/// tuple struct `let`, `for` (alone and inside a tuple), a parameter's pattern (a tuple struct's and
+/// a struct's), a closure parameter's pattern (written, and handed to a method of an `Option`), the scrutinee
+/// `std::mem::replace(…)` and `std::mem::take(…)`, and a generic payload `Slot<T>`. `a_label`
+/// binds a `Label` out of `Named::Label` beside a `Child` parameter; its `label.wait()` is no
+/// site (the control: the name takes its member's type, not every type in reach). And
+/// `Either::wait_either` binds `child` in two arms, a `Label` in one and a `Child` in the other
+/// (`GitChild::wait`'s own shape): one site, the `Child` arm's, because each arm's binding is in
+/// scope over its own arm only ([`Scope::bound_at`]).
+///
+/// The other scoping rules (review N2, N6), each one site of `Child::wait` beside a `Label`'s
+/// `wait` under the same name: a `let` in an inner block does not leak past its block
+/// (`a_block_let_does_not_leak`); a `let` shadows from its statement's end on, not before
+/// (`a_let_shadows_from_its_end`, `a_let_shadows_a_handle`), so its own initializer reads the
+/// outer name (`a_let_initializer_reads_the_outer_name`); a conditional `let`'s scrutinee reads
+/// the outer name (`if let Ok(child) = child.wait()`, `a_conditional_scrutinee_reads_the_outer_name`)
+/// and its names end with its block (`a_conditional_let_ends_with_its_block`).
+///
+/// MUTATION: make [`Scope::bind_by_pattern`] bind every name over `value` (the old
+/// `pattern_names` reading) and every function but `generic_payload` (whose value's written type
+/// holds the `JoinHandle` itself) loses its site. Run every `let` to the end of the body and
+/// `a_block_let_does_not_leak` loses its site; start a `let` before its body (plant P6: offset 0)
+/// and the parameter, bound from the body's start, shadows every `let` of its name
+/// (`a_let_shadows_from_its_end` loses its site, `a_let_shadows_a_handle` and
+/// `a_block_let_does_not_leak` count two); start it at its keyword (plant P8) and
+/// `a_let_initializer_reads_the_outer_name` loses its site; start a conditional `let` at its
+/// keyword and `a_conditional_scrutinee_reads_the_outer_name` loses its site.
+#[test]
+fn a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form() {
+    let world = planted_world("ww-payload-bindings", PLANTED_PAYLOAD_BINDINGS);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let join = "std::thread::JoinHandle::join";
+    let wait = "std::process::Child::wait";
+    let recv = "std::sync::mpsc::Receiver::recv";
+    let wanted: BTreeMap<BareKey, usize> = [
+        ("crate::in_a_match_arm", join),
+        ("crate::Held::through_self", wait),
+        ("crate::Either::wait_either", wait),
+        ("crate::by_shorthand", wait),
+        ("crate::by_renamed_field", wait),
+        ("crate::nested", join),
+        ("crate::either_case", wait),
+        ("crate::at_binding", join),
+        ("crate::after_the_rest", wait),
+        ("crate::after_the_rest_of_a_tuple_struct", wait),
+        ("crate::while_let", join),
+        ("crate::let_else", join),
+        ("crate::let_struct", wait),
+        ("crate::let_tuple_struct", wait),
+        ("crate::in_a_for", wait),
+        ("crate::for_a_tuple", wait),
+        ("crate::by_parameter", wait),
+        ("crate::by_struct_parameter", recv),
+        ("crate::by_closure", wait),
+        ("crate::by_method_closure", recv),
+        ("crate::by_replace", join),
+        ("crate::by_take", wait),
+        ("crate::generic_payload", join),
+        ("crate::a_block_let_does_not_leak", wait),
+        ("crate::a_let_shadows_from_its_end", wait),
+        ("crate::a_let_shadows_a_handle", wait),
+        ("crate::a_conditional_scrutinee_reads_the_outer_name", wait),
+        ("crate::a_conditional_let_ends_with_its_block", wait),
+        ("crate::a_let_initializer_reads_the_outer_name", wait),
+    ]
+    .into_iter()
+    .map(|(item, entry)| {
+        (
+            (
+                "planted".to_owned(),
+                "-".to_owned(),
+                item.to_owned(),
+                entry.to_owned(),
+            ),
+            1,
+        )
+    })
+    .collect();
+    let mine: BTreeMap<BareKey, usize> = bare
+        .into_iter()
+        .filter(|((package, ..), _)| package == "planted")
+        .collect();
+    let missing: Vec<&BareKey> = wanted
+        .keys()
+        .filter(|key| !mine.contains_key(*key))
+        .collect();
+    let extra: Vec<(&BareKey, &usize)> = mine
+        .iter()
+        .filter(|(key, count)| wanted.get(*key) != Some(*count))
+        .collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "the waits on pattern-bound handles: missing {missing:#?}; other or miscounted {extra:#?}"
+    );
+}
+
+/// A planted crate binding a name out of `std::num::Wrapping`, a foreign tuple struct whose member
+/// the reader has no declaration for, over a value whose types hold a `JoinHandle`; a handle a
+/// macro makes, whose type nothing writes; and a name a macro's pattern and a qualified-self path's
+/// pattern bind, under an outer `JoinHandle` of the same name.
+const PLANTED_UNPLACED_PATTERN: &str = "
+pub fn unplaced(value: std::num::Wrapping<std::thread::JoinHandle<()>>) {
+let std::num::Wrapping(inner) = value;
+let _ = inner.join();
+}
+macro_rules! spawned { () => { std::thread::spawn(|| ()) } }
+pub fn macro_made() {
+let handle = spawned!();
+let _ = handle.join();
+}
+macro_rules! some_of { ($n:ident) => { Some($n) } }
+pub fn macro_pattern(child: std::thread::JoinHandle<()>, held: Option<u8>) { let _ = &child; if let some_of!(child) = held { let _ = child.join(); } }
+pub trait Holds { type Held; }
+pub fn qualified_self<T: Holds>(child: std::thread::JoinHandle<()>, held: T::Held) { let _ = &child; if let <T as Holds>::Held(child) = held { let _ = child.join(); } }
+";
+
+/// RED (row 19, rulings R1 and R4) — **a name bound by a pattern the reader cannot place is read
+/// with no type, and its vocabulary call is listed as unread, never read as the outer value.**
+///
+/// `std::num::Wrapping(inner)` is foreign: no declaration in the world says what its member holds.
+/// The old reading gave `inner` the value's types (`Wrapping`, `JoinHandle`), a reading that
+/// happens to be right here and is wrong for `Self::HooksMayOutlive(child)`; the reading now says
+/// it does not know, so `inner.join()` is no site and is an [`UnreadCall`] of
+/// `std::thread::JoinHandle::join` (its count, zero, is the entry's — [`METHOD_ARITIES`]; and
+/// `ScopedJoinHandle::join`'s, so the row names both). `macro_made`'s handle is made by a macro the
+/// reader does not expand: its `.join()` is unread the same way. `macro_pattern` and
+/// `qualified_self` bind `child` by a pattern the reader cannot read (`some_of!(child)`,
+/// `<T as Holds>::Held(child)`): the inner `child` is untyped, so the outer `JoinHandle` of that
+/// name does not show through, and the `.join()` is unread, not a site (review N3).
+///
+/// MUTATION: bind [`PatternPlace::Nowhere`]'s parts over `value` and `unplaced`'s site comes back
+/// and its unread call goes; drop the `unread.push` of [`Reader::read`]'s method branch and both
+/// unread calls go.
+#[test]
+fn a_name_the_reader_cannot_place_is_read_as_unread_not_as_the_outer_type() {
+    let world = planted_world("ww-unplaced-pattern", PLANTED_UNPLACED_PATTERN);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let planted: Vec<&BareKey> = bare
+        .keys()
+        .filter(|(package, ..)| package == "planted")
+        .collect();
+    assert!(
+        planted.is_empty(),
+        "`inner` is bound by a pattern the reader cannot place; sites {planted:?}"
+    );
+    let unread = unread_calls_observed(&world);
+    for item in [
+        "crate::unplaced",
+        "crate::macro_made",
+        "crate::macro_pattern",
+        "crate::qualified_self",
+    ] {
+        let rows: Vec<(&BareKey, &usize)> = unread
+            .iter()
+            .filter(|((package, arm, at, _), _)| package == "planted" && arm == "-" && at == item)
+            .collect();
+        assert!(
+            matches!(rows.as_slice(), [((.., entries), 1)]
+                if entries.split(" | ").any(|entry| entry == "std::thread::JoinHandle::join")),
+            "`{item}`'s `.join()` is one unread call that may be `JoinHandle::join`; the unread \
+             calls {unread:?}"
+        );
+    }
+}
+
+/// A planted crate with a site of every wait plan row 181 added to the vocabulary:
+/// `GetOverlappedResult` imported and called bare, and called by its whole path, each with its wait
+/// flag `true`, `false` and a variable; `MsgWaitForMultipleObjectsEx`, `GetQueuedCompletionStatus`
+/// and `WaitNamedPipeW` by their whole paths only (the product imports them and calls them bare,
+/// the shape `GetOverlappedResult` stands for here); `libc::poll` and `libc::waitid` by path, and
+/// `waitpid` imported and called bare. `polls_its_own` calls a first-party `poll` bare and a
+/// first-party method `poll` (the control).
+const PLANTED_WAITS_IN_NEITHER_LIST: &str = "
+use windows::Win32::System::IO::GetOverlappedResult;
+use libc::waitpid;
+pub struct Pump;
+impl Pump { pub fn poll(&self) {} }
+pub fn poll() {}
+pub fn overlapped_bare(h: Handle, o: &Overlapped, n: &mut u32, flag: bool) {
+let _ = unsafe { GetOverlappedResult(h, o, n, true) };
+let _ = unsafe { GetOverlappedResult(h, o, n, false) };
+let _ = unsafe { GetOverlappedResult(h, o, n, flag) };
+}
+pub fn overlapped_by_path(h: Handle, o: &Overlapped, n: &mut u32, flag: bool) {
+let _ = unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, true) };
+let _ = unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, false) };
+let _ = unsafe { windows::Win32::System::IO::GetOverlappedResult(h, o, n, flag) };
+}
+pub fn message_wait(d: u32) {
+let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx(None, d, Mask, Flags) };
+}
+pub fn port_and_pipe(h: Handle, n: &mut u32, k: &mut usize, o: &mut Packet, name: Name, d: u32) {
+let _ = unsafe { windows::Win32::System::IO::GetQueuedCompletionStatus(h, n, k, o, d) };
+let _ = unsafe { windows::Win32::System::Pipes::WaitNamedPipeW(name, d) };
+}
+pub fn unix_waits(f: &mut [Fd], p: i32, s: &mut i32, i: &mut Info) {
+let _ = unsafe { libc::poll(f.as_mut_ptr(), 1, -1) };
+let _ = unsafe { libc::waitid(0, 0, i, 0) };
+let _ = unsafe { waitpid(p, s, 0) };
+}
+pub fn polls_its_own(pump: &Pump) {
+poll();
+pump.poll();
+}
+";
+
+/// RED (T-WAITS-IN-NEITHER-LIST, plan row 181) — **a wait neither the vocabulary nor
+/// bt-source's `BLOCKING` named before row 181 is a bare site outside a door, imported and bare or
+/// by its whole path, and a flag that makes the call return at once does not take it out**
+/// (ruling R1: `GetOverlappedResult` and `libc::waitid` are counted at every call, whatever their
+/// flag, as the A2e lint will ban every call).
+///
+/// Against the planted crate ([`PLANTED_WAITS_IN_NEITHER_LIST`]): `overlapped_bare` and
+/// `overlapped_by_path` hold three `GetOverlappedResult` sites each (flag `true`, `false`, a
+/// variable); `message_wait`, `port_and_pipe` and `unix_waits` one site of each of their calls,
+/// `waitpid` imported and called bare; `polls_its_own`, which calls only first-party `poll`s,
+/// holds none (the control).
+///
+/// MUTATION: delete the registry's `windows::Win32::System::IO::GetOverlappedResult` line and
+/// `overlapped_bare`'s and `overlapped_by_path`'s sites leave the inventory; delete the
+/// `libc::waitpid` line and `unix_waits`' imported site leaves it.
+#[test]
+fn a_wait_neither_list_named_is_a_bare_site_whatever_its_flag() {
+    let world = planted_world("ww-neither-list", PLANTED_WAITS_IN_NEITHER_LIST);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let mine: BTreeMap<(&str, &str), usize> = bare
+        .iter()
+        .filter(|((package, _, _, _), _)| package == "planted")
+        .map(|((_, _, item, entry), count)| ((item.as_str(), entry.as_str()), *count))
+        .collect();
+    let overlapped = "windows::Win32::System::IO::GetOverlappedResult";
+    let wanted: BTreeMap<(&str, &str), usize> = [
+        (("crate::overlapped_bare", overlapped), 3),
+        (("crate::overlapped_by_path", overlapped), 3),
+        (
+            (
+                "crate::message_wait",
+                "windows::Win32::UI::WindowsAndMessaging::MsgWaitForMultipleObjectsEx",
+            ),
+            1,
+        ),
+        (
+            (
+                "crate::port_and_pipe",
+                "windows::Win32::System::IO::GetQueuedCompletionStatus",
+            ),
+            1,
+        ),
+        (
+            (
+                "crate::port_and_pipe",
+                "windows::Win32::System::Pipes::WaitNamedPipeW",
+            ),
+            1,
+        ),
+        (("crate::unix_waits", "libc::poll"), 1),
+        (("crate::unix_waits", "libc::waitid"), 1),
+        (("crate::unix_waits", "libc::waitpid"), 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        mine, wanted,
+        "the planted waits are not the bare sites they are (and `polls_its_own` holds none)"
+    );
+}
+
+/// A planted crate with a `wgpu::Device::poll` written on every receiver shape the inventory
+/// types: a field of a parameter (once with `PollType::Poll`, once with a handed poll type), a
+/// parameter (`PollType::Wait`), a parameter whose type an import names, a first-party function's
+/// declared return, a field holding the device in an `Arc`, and a name a `match` arm binds to a
+/// first-party variant's member (row 19's reading); `its_own_poll`, a first-party `Watch::poll` on
+/// a receiver typed `Watch` (`HangWatch::poll`'s shape, the control); and three it cannot read:
+/// `untyped`, a `.poll(` on a binding a foreign call made, which no type on its road names;
+/// `through_a_closure`, on a closure parameter handed to a first-party method, which the reading
+/// types as that method's receiver (`Gpu`); and `through_a_generic_field`, on a field whose
+/// declared type is its struct's generic parameter.
+const PLANTED_DEVICE_POLL: &str = "
+use wgpu::Device;
+pub struct Gpu { device: wgpu::Device, shared: std::sync::Arc<wgpu::Device> }
+impl Gpu {
+pub fn with_device(&self, f: impl FnOnce(&wgpu::Device)) { f(&self.device) }
+}
+pub struct Holder<D> { device: D }
+pub enum State { Ready(wgpu::Device), Lost }
+pub struct Watch;
+impl Watch {
+pub fn new() -> Self { Watch }
+pub fn poll(&mut self, _now: u64) {}
+}
+fn device_of(gpu: &Gpu) -> &wgpu::Device { &gpu.device }
+pub fn through_a_field(gpu: &Gpu, p: wgpu::PollType) {
+let _ = gpu.device.poll(wgpu::PollType::Poll);
+let _ = gpu.device.poll(p);
+}
+pub fn through_a_parameter(d: &wgpu::Device) {
+let _ = d.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+}
+pub fn through_an_import(d: &Device, p: wgpu::PollType) {
+let _ = d.poll(p);
+}
+pub fn through_a_return(gpu: &Gpu, p: wgpu::PollType) {
+let _ = device_of(gpu).poll(p);
+}
+pub fn through_a_wrapper(gpu: &Gpu, p: wgpu::PollType) {
+let _ = gpu.shared.poll(p);
+}
+pub fn through_a_match(state: &State, p: wgpu::PollType) {
+match state {
+State::Ready(device) => {
+let _ = device.poll(p);
+}
+State::Lost => {}
+}
+}
+pub fn its_own_poll() {
+let mut watch = Watch::new();
+watch.poll(1);
+}
+pub fn untyped(p: wgpu::PollType) {
+let device = foreign::make();
+let _ = device.poll(p);
+}
+pub fn through_a_closure(gpu: &Gpu, p: wgpu::PollType) {
+gpu.with_device(|d| {
+let _ = d.poll(p);
+});
+}
+pub fn through_a_generic_field(holder: &Holder<wgpu::Device>, p: wgpu::PollType) {
+let _ = holder.device.poll(p);
+}
+";
+
+/// RED (T-WGPU-DEVICE-POLL-WAIT-IN-NEITHER-LIST, 0.4.10 plan row 11) — **`wgpu::Device::poll` is a
+/// bare site on every receiver the inventory types as a `wgpu::Device`, whatever the poll type
+/// (ruling R2), and on no other; a `.poll(` whose receiver's types account for neither the entry
+/// nor the call is an unread call, never dropped without a word** (ruling R4, review N1): a
+/// first-party `poll` on a receiver typed as its own type is no site and no unread call
+/// (`HangWatch::poll`'s shape); a `.poll(` on a receiver with no type is unread (row 19's reading),
+/// and so is one on a receiver typed as a value that is not the device ([`ACCOUNTED_RECEIVERS`]).
+///
+/// Against the planted crate ([`PLANTED_DEVICE_POLL`]): `through_a_field` holds two sites, each
+/// other `through_…` that the reading types one, `through_a_match` among them; `its_own_poll`
+/// holds none and is not unread; `untyped`, `through_a_closure` and `through_a_generic_field` hold
+/// no site and are one unread call each, of `wgpu::Device::poll`.
+///
+/// MUTATION: delete the registry's `wgpu::Device::poll` line and every planted site leaves the
+/// inventory; match a method entry by its name alone (drop `receiver.contains(ty)` in
+/// [`Reader::read`]'s site loop, or add `|| name == "poll"` beside it — P2) and `its_own_poll`
+/// holds a site; read the receiver as accounted for whatever its types ([`Reader::unaccounted`]
+/// answering nothing) and `through_a_closure` and `through_a_generic_field` are unread no more.
+#[test]
+fn a_gpu_wait_is_a_site_only_on_a_receiver_typed_wgpu_device() {
+    let world = planted_world("ww-device-poll", PLANTED_DEVICE_POLL);
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let mine: BTreeMap<(&str, &str), usize> = bare
+        .iter()
+        .filter(|((package, _, _, _), _)| package == "planted")
+        .map(|((_, _, item, entry), count)| ((item.as_str(), entry.as_str()), *count))
+        .collect();
+    let poll = "wgpu::Device::poll";
+    let wanted: BTreeMap<(&str, &str), usize> = [
+        (("crate::through_a_field", poll), 2),
+        (("crate::through_a_parameter", poll), 1),
+        (("crate::through_an_import", poll), 1),
+        (("crate::through_a_return", poll), 1),
+        (("crate::through_a_wrapper", poll), 1),
+        (("crate::through_a_match", poll), 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        mine, wanted,
+        "the planted GPU waits are not the bare sites they are (and `its_own_poll`, `untyped`, \
+         `through_a_closure` and `through_a_generic_field` hold none)"
+    );
+    let observed = unread_calls_observed(&world);
+    let unread: BTreeMap<(&str, &str), usize> = observed
+        .iter()
+        .filter(|((package, _, _, _), _)| package == "planted")
+        .map(|((_, _, item, entries), count)| ((item.as_str(), entries.as_str()), *count))
+        .collect();
+    let wanted: BTreeMap<(&str, &str), usize> = [
+        (("crate::untyped", poll), 1),
+        (("crate::through_a_closure", poll), 1),
+        (("crate::through_a_generic_field", poll), 1),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        unread, wanted,
+        "the planted `.poll(` calls the reading cannot account for are not the unread calls they \
+         are (and `its_own_poll` is read)"
+    );
+}
+
+/// A planted crate with a wait in a function gated on a feature no product build sets, the same
+/// wait in one gated on a feature the product build sets, and in an ungated one (the control).
+const PLANTED_TEST_ONLY_FEATURE_SITE: &str = "
+#[cfg(any(test, feature = \"harness\"))]
+pub fn harness_only(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+pub fn shipped(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+#[cfg(feature = \"on\")]
+pub fn gated_on(c: &std::sync::Condvar, m: &std::sync::Mutex<bool>) {
+let _ = c.wait_timeout_while(m.lock().unwrap(), std::time::Duration::ZERO, |held| *held);
+}
+";
+
+/// RED (T-BARE-SITE-VOCABULARY-WAIT-WHILE-BLIND-SPOT, plan row 176) — **a site in an item gated on
+/// a feature the product build does not set is no bare site**: the header of
+/// `window-thread-bare-sites.tsv` says so, and `bt-platform`'s `trust-harness` helpers
+/// (`engine_ledger::outstanding_reaching`, the two `state_reaching`) are written so.
+///
+/// Against the planted crate ([`PLANTED_TEST_ONLY_FEATURE_SITE`]), built with `on` and not
+/// `harness`: `harness_only`'s wait is not in the inventory; `gated_on`'s is, for a feature the
+/// product sets hides nothing; `shipped`'s is (the control).
+///
+/// MUTATIONS: drop [`Src::enclosing_items_permit`] from [`Src::in_product`] and `harness_only`'s
+/// site is a bare site; read every feature as off in [`product_build_cfg`] (`features.contains`
+/// → `false`) and `gated_on`'s site leaves the inventory.
+#[test]
+fn a_site_behind_a_feature_the_product_does_not_set_is_no_bare_site() {
+    let world = planted_world_with_features(
+        "ww-test-only-feature",
+        PLANTED_TEST_ONLY_FEATURE_SITE,
+        &["on"],
+    );
+    let (bare, _, _) = vocabulary_sites_in(&world, &[]);
+    let items: BTreeSet<&str> = bare
+        .keys()
+        .filter(|(package, _, _, entry)| {
+            package == "planted" && entry == "std::sync::Condvar::wait_timeout_while"
+        })
+        .map(|(_, _, item, _)| item.as_str())
+        .collect();
+    assert_eq!(
+        items,
+        BTreeSet::from(["crate::gated_on", "crate::shipped"]),
+        "bare sites {:?}",
+        bare.keys().collect::<Vec<_>>()
+    );
+}
+
 /// RED (T-A2-R1-NONLEG; revision (q)6) — **`# graphs` admits no line**: the live registry's
 /// section is its header alone, and a planted line under it — a well-formed graph line, or one of
 /// the wrong width — is refused for what it is.
@@ -9973,11 +11566,12 @@ fn probe_effect_failures(
 /// effect**: `bt-render` has no bare site, and every function of its product that holds a
 /// vocabulary effect stands under [`RENDER_EFFECT_DOOR`], as every `bt-render` row of the
 /// registry's `# effects` says. The headless probe's submit and present and the read-back's submit
-/// are `bt-render-probe`'s, a tool crate; `bt_render::probe_surface` prepares, encodes and reads
-/// and hands the work over.
+/// and its wait on the device (`wgpu::Device::poll`, 0.4.10 plan row 11) are `bt-render-probe`'s,
+/// a tool crate; `bt_render::probe_surface` prepares, encodes and reads and hands the work over.
 ///
 /// MUTATION: put `gpu.queue.submit(std::iter::empty());` back into
-/// `WindowRenderer::read_back_work` and this names it as a bare site of `bt-render`; give a
+/// `WindowRenderer::read_back_work`, or the device's `poll(wgpu::PollType::Wait { .. })` into
+/// `WindowRenderer::read_back_rows`, and this names it as a bare site of `bt-render`; give a
 /// `bt-render` row of `# effects` another door and this names the row's line.
 #[test]
 fn the_product_library_holds_no_probe_effect() {
@@ -10095,7 +11689,15 @@ fn a_binding_filled_by_assignment_takes_the_assigned_types() {
         .map(|(at, _, record)| (at, record))
         .expect("the leaf constructor");
     let scope = Scope::of(&reader, src, record);
-    let types = scope.value("resolved_program");
+    // Read where the body last names it, after the assignment.
+    let s = &world.srcs[src];
+    let body = record.body().expect("the leaf constructor has a body");
+    let last_use = s
+        .lex(body.start(), body.end())
+        .into_iter()
+        .rfind(|tok| s.text(*tok) == "resolved_program")
+        .expect("the body names `resolved_program`");
+    let types = scope.value("resolved_program", last_use.start);
     assert!(
         types.iter().any(|ty| ty.ends_with("PathBuf")),
         "`resolved_program` is assigned `Some(PathBuf::from(…))`; the scope says {types:?}"
@@ -10165,6 +11767,284 @@ fn every_bare_site_is_a_row_and_every_row_a_site() {
         failures.is_empty(),
         "the bare-site inventory and the code differ ({total} observed; the observed file is \
          target/window-thread-bare-sites.tsv):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// **The calls the inventory's reader could not read** (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-
+/// HANDLES, 0.4.10 plan row 19, rulings R4 and R6): `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`.
+const UNREAD_RECEIVERS: &str =
+    include_str!("../../../docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv");
+const UNREAD_COLUMNS: [&str; 6] = ["crate", "arm", "item", "entries", "calls", "reason"];
+
+/// Every product call the reader could not read ([`UnreadCall`]), by `(crate, arm, item, the
+/// entries it could be joined by " | ")`, counted — in a door function's body as outside one, since
+/// a call there may be an effect the `# effects` row does not count.
+fn unread_calls_observed(world: &World) -> BTreeMap<BareKey, usize> {
+    let reader = Reader::new(world);
+    let mut out = BTreeMap::new();
+    for (src, s) in world.srcs.iter().enumerate() {
+        for call in reader.read(src).unread {
+            if !s.in_product(call.at) {
+                continue;
+            }
+            let (item, arm) = item_and_arm(call.owner);
+            let entries = call
+                .entries
+                .iter()
+                .map(|entry| reader.entries[*entry].path.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            *out.entry((s.package.to_owned(), arm, item, entries))
+                .or_insert(0) += 1;
+        }
+    }
+    out
+}
+
+/// The committed list's rows, keyed, each with its count (a positive integer) and its reason, each
+/// key once.
+fn unread_calls_committed() -> Result<BTreeMap<BareKey, (usize, String)>, Vec<String>> {
+    let mut rows = BTreeMap::new();
+    let mut failures = Vec::new();
+    let mut lines = UNREAD_RECEIVERS
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
+    if header != UNREAD_COLUMNS {
+        failures.push(format!(
+            "the list's columns are {header:?}, not {UNREAD_COLUMNS:?}"
+        ));
+        return Err(failures);
+    }
+    for line in lines {
+        let cells: Vec<&str> = line.split('\t').collect();
+        if cells.len() != UNREAD_COLUMNS.len() {
+            failures.push(format!("not six cells: {line}"));
+            continue;
+        }
+        let count = match cells[4].parse::<usize>() {
+            Ok(count) if count > 0 && cells[4] == count.to_string() => count,
+            _ => {
+                failures.push(format!("the count is not a positive integer: {line}"));
+                continue;
+            }
+        };
+        let key = (
+            cells[0].to_owned(),
+            cells[1].to_owned(),
+            cells[2].to_owned(),
+            cells[3].to_owned(),
+        );
+        if rows.insert(key, (count, cells[5].to_owned())).is_some() {
+            failures.push(format!("a key written twice: {line}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(rows)
+    } else {
+        Err(failures)
+    }
+}
+
+/// `YYYY-MM-DD: why`, the `why` not empty.
+fn reason_is_dated(reason: &str) -> bool {
+    reason.split_once(": ").is_some_and(|(date, why)| {
+        let parts: Vec<&str> = date.split('-').collect();
+        parts.len() == 3
+            && [4, 2, 2]
+                .iter()
+                .zip(&parts)
+                .all(|(len, part)| part.len() == *len && part.bytes().all(|b| b.is_ascii_digit()))
+            && !why.trim().is_empty()
+    })
+}
+
+/// The list's header and the rows `observed`, each with the reason the committed list gives its
+/// key (empty for a key it lacks), as the file holds them.
+fn unread_calls_rendered(
+    observed: &BTreeMap<BareKey, usize>,
+    committed: &BTreeMap<BareKey, (usize, String)>,
+) -> String {
+    let mut out = String::new();
+    for line in UNREAD_RECEIVERS
+        .lines()
+        .take_while(|line| line.starts_with('#'))
+    {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&UNREAD_COLUMNS.join("\t"));
+    out.push('\n');
+    for (key, count) in observed {
+        let (package, arm, item, entries) = key;
+        let reason = committed.get(key).map_or("", |(_, reason)| reason.as_str());
+        out.push_str(&format!(
+            "{package}\t{arm}\t{item}\t{entries}\t{count}\t{reason}\n"
+        ));
+    }
+    out
+}
+
+/// RED (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19, ruling R4) — **every
+/// product call the inventory's reader could not read is a row of
+/// `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`, with its count and a dated reason, and every row
+/// is such a call.**
+///
+/// A method call whose name and argument count are a method-shaped vocabulary entry's
+/// ([`METHOD_ARITIES`]) on a receiver the reading gives no type, or that is not one chain, or a
+/// `write!`/`writeln!` whose first argument has none, may be a site the inventory does not count;
+/// until row 19 such a call was passed over in silence. It is listed instead, keyed `(crate, arm,
+/// item, the entries it could be)`, so a new one is a row the file does not have and needs a
+/// reason; `scripts/ci/check-window-waits.ps1` refuses a row added or grown against the merge base
+/// unless its reason is dated and is not a reason the merge base's list already gives. The
+/// observed list is left in `target/WINDOW-WAITS-UNREAD-RECEIVERS.tsv`, carrying the committed
+/// reasons.
+///
+/// MUTATION: add `let _ = std::thread::spawn(|| ()).join();` with the handle passed through an
+/// untyped closure parameter to any product function and it goes red with that row.
+#[test]
+fn every_unread_vocabulary_call_is_a_row_and_every_row_a_call() {
+    let world = World::new();
+    let observed = unread_calls_observed(&world);
+    let committed = match unread_calls_committed() {
+        Ok(rows) => rows,
+        Err(failures) => panic!(
+            "docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv is not well formed:\n  {}",
+            failures.join("\n  ")
+        ),
+    };
+    let generated = repository_root()
+        .join("target")
+        .join("WINDOW-WAITS-UNREAD-RECEIVERS.tsv");
+    if let Some(parent) = generated.parent() {
+        std::fs::create_dir_all(parent).expect("the workspace has a target directory");
+    }
+    std::fs::write(&generated, unread_calls_rendered(&observed, &committed))
+        .expect("target/ is writable");
+    let mut failures = Vec::new();
+    for (key, count) in &observed {
+        match committed.get(key) {
+            Some((held, _)) if held == count => {}
+            Some((held, _)) => failures.push(format!(
+                "{} {} {} {}: {count} unread call(s) in the code, {held} in the file",
+                key.0, key.1, key.2, key.3
+            )),
+            None => failures.push(format!(
+                "{} {} {} {}: {count} unread call(s) in the code, and no row — type the receiver \
+                 (the reading's grammar, above `BARE_SITES`) or list it with a dated reason",
+                key.0, key.1, key.2, key.3
+            )),
+        }
+    }
+    for (key, (held, reason)) in &committed {
+        if !observed.contains_key(key) {
+            failures.push(format!(
+                "{} {} {} {}: a row of {held} the code no longer has — delete it",
+                key.0, key.1, key.2, key.3
+            ));
+        }
+        if !reason_is_dated(reason) {
+            failures.push(format!(
+                "{} {} {} {}: the reason is not dated `YYYY-MM-DD: why`: '{reason}'",
+                key.0, key.1, key.2, key.3
+            ));
+        }
+    }
+    let total: usize = observed.values().sum();
+    println!(
+        "the reader's unread calls: {total} call(s) in {} row(s)",
+        observed.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "the unread-receiver list and the code differ ({total} observed; the observed file is \
+         target/WINDOW-WAITS-UNREAD-RECEIVERS.tsv):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// RED (row 19, ruling R6) — **every method-shaped vocabulary entry states how many arguments it
+/// takes as a method call, once, and a first-party entry's count is its declaration's.**
+///
+/// [`METHOD_ARITIES`] decides which unread calls can be a vocabulary method: a count written wrong
+/// drops a candidate from the diagnostic silently. So the table holds exactly the vocabulary's
+/// method-shaped entries (`Type::name`, and the system calls whose capitalised module reads as
+/// one; a free function's path is matched as a path, never as a method), and for an entry declared
+/// in the product (`bt_pty::PtySession::resize`) the count is
+/// read from its signature: its parameters past `self`, or `None` for one that takes no `self`. A
+/// `std` or foreign signature has no source in the world; its line is the signature's count as
+/// documented.
+///
+/// MUTATION: write `("bt_pty::PtySession::resize", Some(2))` and it goes red; add a method-shaped
+/// vocabulary line without a line here and it goes red.
+#[test]
+fn every_method_shaped_vocabulary_entry_states_how_many_arguments_it_takes() {
+    let world = World::new();
+    let reader = Reader::new(&world);
+    let mut failures = Vec::new();
+    let mut stated: BTreeMap<&str, usize> = BTreeMap::new();
+    for (path, _) in METHOD_ARITIES {
+        *stated.entry(path).or_default() += 1;
+    }
+    for (path, times) in &stated {
+        if *times > 1 {
+            failures.push(format!("`{path}` is stated {times} times"));
+        }
+        if !reader
+            .entries
+            .iter()
+            .any(|entry| entry.path == *path && entry.method.is_some())
+        {
+            failures.push(format!(
+                "`{path}` is no method-shaped vocabulary entry: delete its line"
+            ));
+        }
+    }
+    for entry in &reader.entries {
+        // A free function's path (`std::thread::sleep`) is matched as a path, never as a method.
+        let Some((ty, name)) = &entry.method else {
+            continue;
+        };
+        if !stated.contains_key(entry.path.as_str()) {
+            failures.push(format!(
+                "the method-shaped vocabulary entry `{}` states no argument count: add its line",
+                entry.path
+            ));
+        }
+        let Some((package, type_name)) = reader.first_party(ty) else {
+            continue;
+        };
+        let declared: BTreeSet<Option<usize>> = reader
+            .callables(package, Some(type_name), name)
+            .into_iter()
+            .filter_map(|(src, record)| {
+                let s = &world.srcs[src];
+                let toks = s.lex(record.declaration().start(), record.declaration().end());
+                let (_, open, close) = signature(s, &toks)?;
+                let params = split_commas(s, &toks[open + 1..close]);
+                let takes_self = params
+                    .first()
+                    .is_some_and(|first| first.iter().any(|t| s.text(*t) == "self"));
+                Some(takes_self.then(|| params.len() - 1))
+            })
+            .collect();
+        let written = method_arity(&entry.path);
+        if declared.is_empty() {
+            failures.push(format!(
+                "`{}` is first-party and no declaration of it is found",
+                entry.path
+            ));
+        } else if declared != BTreeSet::from([written]) {
+            failures.push(format!(
+                "`{}`: the table says {written:?}, its declarations {declared:?}",
+                entry.path
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the vocabulary's argument counts are not its signatures':\n  {}",
         failures.join("\n  ")
     );
 }
@@ -10685,13 +12565,111 @@ fn every_request_door_has_its_line() {
     );
 }
 
+/// `# request-door-cuts`' columns (plan row 52): the door, what its C1 walk enters, what it walks
+/// beside, and the row's dated reason.
+const REQUEST_DOOR_CUT_COLUMNS: [&str; 4] = ["door", "enqueue", "beside", "reason"];
+
+/// **What `# request-door-cuts` refuses against `# request-doors`** (plan row 52): a cut whose door
+/// is no `# request-doors` line asked on the window, a door cut twice, an empty cell, no enqueue, and
+/// a reason not dated `YYYY-MM-DD: why`. Whether each name is the door's direct callee is
+/// bt-source's guard's to read.
+fn request_door_cut_failures(lines: &[Vec<&str>], cuts: &[Vec<&str>]) -> Vec<String> {
+    let walked: BTreeSet<&str> = lines
+        .iter()
+        .filter(|cells| cells[1] == "window")
+        .map(|cells| cells[0])
+        .collect();
+    let mut failures = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for cells in cuts {
+        let door = cells[0];
+        if !seen.insert(door) {
+            failures.push(format!("`{door}` has two `# request-door-cuts` lines"));
+        }
+        if !walked.contains(door) {
+            failures.push(format!(
+                "`{door}` is cut and is no `# request-doors` line asked on the window"
+            ));
+        }
+        if cells.iter().any(|cell| cell.trim().is_empty()) {
+            failures.push(format!("`{door}`'s cut: an empty cell (`—` is none)"));
+        }
+        if cells[1] == "—" {
+            failures.push(format!("`{door}`'s cut names no enqueue"));
+        }
+        let dated = cells[3].split_once(": ").is_some_and(|(date, why)| {
+            let parts: Vec<&str> = date.split('-').collect();
+            parts.len() == 3
+                && [4, 2, 2].iter().zip(&parts).all(|(len, part)| {
+                    part.len() == *len && part.bytes().all(|b| b.is_ascii_digit())
+                })
+                && !why.trim().is_empty()
+        });
+        if !dated {
+            failures.push(format!(
+                "`{door}`'s cut reason is not dated `YYYY-MM-DD: why`"
+            ));
+        }
+    }
+    failures
+}
+
+/// RED (plan row 52) — **every cut is a walked request door's, once, with an enqueue and a dated
+/// reason**: the live registry passes; a cut planted on a door not walked (`main`), the hand-off's
+/// cut written twice, and an undated reason are each refused by name.
+///
+/// MUTATION: let [`request_door_cut_failures`] read only `seen` — the cut of `main` passes.
+#[test]
+fn every_request_door_cut_is_a_walked_doors() {
+    let lines = section("request-doors", &REQUEST_DOOR_COLUMNS);
+    let cuts = section("request-door-cuts", &REQUEST_DOOR_CUT_COLUMNS);
+    let failures = request_door_cut_failures(&lines, &cuts);
+    assert!(
+        failures.is_empty(),
+        "`# request-door-cuts` and `# request-doors`:\n  {}",
+        failures.join("\n  ")
+    );
+    let planted = |row: Vec<&'static str>| -> Vec<String> {
+        let mut cuts = cuts.clone();
+        cuts.push(row);
+        request_door_cut_failures(&lines, &cuts)
+    };
+    assert_eq!(
+        planted(vec![
+            "main",
+            "Runtime::hand_off",
+            "—",
+            "2026-11-02: planted"
+        ]),
+        ["`main` is cut and is no `# request-doors` line asked on the window"]
+    );
+    assert_eq!(
+        planted(vec![
+            "Runtime::hand_off",
+            "Runtime::answer_handoff",
+            "—",
+            "2026-11-02: planted"
+        ]),
+        ["`Runtime::hand_off` has two `# request-door-cuts` lines"]
+    );
+    assert_eq!(
+        planted(vec![
+            "Runtime::submit_clipboard_write",
+            "Runtime::ask_the_clipboard",
+            "—",
+            "planted"
+        ]),
+        ["`Runtime::submit_clipboard_write`'s cut reason is not dated `YYYY-MM-DD: why`"]
+    );
+}
+
 /// **The mailbox items, a closed list, each with its dated reason** (the re-check of the review of
 /// T-REQUEST-DOOR-GUARD, R1): a `mailbox` item's own lock is exempt on every door's road whose row
 /// names it, a declaration the guard cannot prove (the engine reads no flow). So the exemption is
 /// a reviewed diff: a `# request-doors` cell that names an item this list does not is refused, and
 /// so is a line here no cell names. The reason is the item's, whichever door's road meets it: what
 /// its body holds its lock across, and why the window thread waits on no worker for longer.
-const MAILBOX: [(&str, &str); 35] = [
+const MAILBOX: [(&str, &str); 40] = [
     (
         "lane::lock",
         "2026-10-24: the lane's lock helper (`Mutex::lock`, a poison read through); it holds \
@@ -10821,10 +12799,6 @@ const MAILBOX: [(&str, &str); 35] = [
         "2026-10-24: the known package state, held for one clone",
     ),
     (
-        "explorer_menu::remember",
-        "2026-10-24: the known package state, held for one store",
-    ),
-    (
         "shell_integration::page_environment_cell",
         "2026-10-24: the page environment's mailbox (`Mutex::lock`), taken by its door for a read \
          or an update",
@@ -10868,6 +12842,37 @@ const MAILBOX: [(&str, &str); 35] = [
         "watch_steward::Steward::lock",
         "2026-10-24: the steward's asks, taken by the ear's door for a want's update; the worker \
          takes them once a round",
+    ),
+    (
+        "clipboard_lane::ClipboardLane::submit",
+        "2026-11-02: the last paste's mark (`last_paste`), taken by the window's door to stamp a \
+         paste and let go before the lane's admission; the clipboard's worker never takes it \
+         (plan row 52, R4)",
+    ),
+    (
+        "clipboard_lane::ClipboardLane::a_paste_was_asked_after",
+        "2026-11-02: the last paste's mark (`last_paste`), taken for one read on the window \
+         thread; the clipboard's worker never takes it (plan row 52, R4)",
+    ),
+    (
+        "ClipboardPictureMailbox::withdraw",
+        "2026-11-02: the picture inbox, held to mint a generation and drop what it held; the \
+         saving thread takes it only to deposit an answer (plan row 52)",
+    ),
+    (
+        "ClipboardPictureMailbox::refuse",
+        "2026-11-02: the picture inbox, held to count one refusal for the next turn's toast; the \
+         saving thread takes it only to deposit an answer (plan row 52)",
+    ),
+    (
+        "bt_pty::Retirements::begin",
+        "2026-11-02: the retirement count, held for one increment before the teardown's thread \
+         starts; the thread takes it only to decrement and notify (plan row 52, R6)",
+    ),
+    (
+        "bt_pty::Retirements::end",
+        "2026-11-02: the retirement count, held for one decrement and a notify when the teardown's \
+         thread could not start (plan row 52, R6)",
     ),
 ];
 
@@ -10920,8 +12925,10 @@ fn mailbox_failures(lines: &[Vec<&str>], mailbox: &[(&str, &str)]) -> Vec<String
 /// door out of the walk is ([`NOT_WALKED`]).
 ///
 /// MUTATION: plant `diagnostics::note` in the hand-off's mailbox — refused as unlisted; drop
-/// `explorer_menu::remember` from its one cell — its line is refused as unused; strip a reason's
-/// date — refused as undated.
+/// `explorer_menu::state` from its one cell, the Explorer press's — its line is refused as unused
+/// (re-aimed 2026-11-09, 0.4.10 plan row 68b: the start's probe, whose cell named
+/// `explorer_menu::remember`, is a member of the carry pass now and no request door); strip a
+/// reason's date — refused as undated.
 #[test]
 fn every_mailbox_item_has_its_reason() {
     let lines = section("request-doors", &REQUEST_DOOR_COLUMNS);
@@ -10959,13 +12966,13 @@ fn every_mailbox_item_has_its_reason() {
         }),
         "an unlisted mailbox item is refused"
     );
-    let dropped = edited("explorer_menu::begin_probe", &|cell| {
-        cell.replace(", explorer_menu::remember", "")
+    let dropped = edited("explorer_menu::request", &|cell| {
+        cell.replace(", explorer_menu::state", "")
     });
     assert!(
         failures_of(&dropped)
             .iter()
-            .any(|failure| failure.contains("`explorer_menu::remember` is in no")),
+            .any(|failure| failure.contains("`explorer_menu::state` is in no")),
         "a line no cell names is refused"
     );
     let mut undated = MAILBOX;
@@ -12701,6 +14708,33 @@ impl Drop for PlantedFolder {
 /// `rest`, written to a scratch folder, indexed, and read as the window-waits guard reads the
 /// product's packages ([`World::over`]).
 fn planted_world(tag: &str, rest: &str) -> World {
+    planted_world_with_features(tag, rest, &[])
+}
+
+/// [`planted_world`], its package built with `features` on, as a product build would set them.
+fn planted_world_with_features(tag: &str, rest: &str, features: &[&str]) -> World {
+    let index: &'static Index = Box::leak(Box::new(
+        planted_index(tag, rest)
+            .unwrap_or_else(|rejections| panic!("{}", bt_source::report(&rejections))),
+    ));
+    World::over(
+        vec![Src {
+            package: "planted",
+            index,
+            features: Box::leak(Box::new(
+                features
+                    .iter()
+                    .map(|feature| (*feature).to_owned())
+                    .collect(),
+            )),
+        }],
+        &[BTreeSet::new()],
+    )
+}
+
+/// The planted crate of [`planted_world`] indexed, or what the index refuses in it — for a plant
+/// the index itself refuses (a `cfg_attr` that writes a `cfg`, plan row 77).
+fn planted_index(tag: &str, rest: &str) -> Result<Index, Vec<bt_source::Rejection>> {
     let folder = PlantedFolder(bt_testpath::temp_path(tag));
     let directory = &folder.0;
     std::fs::create_dir_all(directory).expect("a scratch folder");
@@ -12721,19 +14755,17 @@ fn planted_world(tag: &str, rest: &str) -> World {
         bt_source::Vendor::Excluded,
     )
     .expect("the planted crate is where it was written");
-    let index: &'static Index = Box::leak(Box::new(
-        Index::build(&universe)
-            .unwrap_or_else(|rejections| panic!("{}", bt_source::report(&rejections))),
-    ));
+    let index = Index::build(&universe);
     drop(folder);
-    World::over(
-        vec![Src {
-            package: "planted",
-            index,
-            features: Box::leak(Box::default()),
-        }],
-        &[BTreeSet::new()],
-    )
+    index
+}
+
+/// What the index refuses in the planted crate of [`planted_world`], one refusal a line.
+fn planted_refusals(tag: &str, rest: &str) -> String {
+    match planted_index(tag, rest) {
+        Ok(_) => String::new(),
+        Err(rejections) => bt_source::report(&rejections),
+    }
 }
 
 /// RED (T-WINDOW-WAITS-RESOLVER-CUTOFF) — **a receiver's trait chained past the resolver's hop
@@ -13768,13 +15800,18 @@ fn a_use_bound_is_no_use_declaration() {
     );
 }
 
-/// RED (T-DOOR-PINS-BY-DOOR review, H4) — **a pinned door's call under a statement's `#[cfg…]` is
-/// refused**: the index reads a file's, an item's and a module's `cfg` but no statement's, so a
-/// gated settle or flush after `run_app` would meet the tail's pin on a build it is not in. A
-/// gated statement that holds no pinned call (as `main`'s `with_default_menu`) changes nothing.
+/// RED (T-DOOR-PINS-BY-DOOR review, H4; split by the gate's kind by plan row 77, 2026-10-29) —
+/// **a pinned door's call under a statement's platform or feature `#[cfg…]` is refused**: the
+/// index keeps such a statement in the product (some product build compiles it), so a gated settle
+/// or flush after `run_app` would meet the tail's pin on a build it is not in. A statement gated to
+/// tests, or to nothing (`any()`), is out of the product by the index's gate grain: its call is not
+/// in the product, so the tail's pin is "not there" and nothing is refused for the statement. A
+/// `cfg_attr` that writes a `cfg` is the index's own refusal. A gated statement that holds no
+/// pinned call (as `main`'s `with_default_menu`) changes nothing.
 ///
-/// MUTATION: make [`gated`] answer `None` — the gated calls meet their pins and the cases are
-/// green.
+/// MUTATION: make [`gated`] answer `None` — the platform-gated calls meet their pins and those
+/// cases are green; drop the gate grain from `Occurrence::in_the_product` — the test-gated calls
+/// reach [`gated`] and are refused for their statement instead of being "not there".
 #[test]
 fn a_pinned_call_under_a_statement_cfg_is_refused() {
     assert_eq!(
@@ -13790,25 +15827,20 @@ fn a_pinned_call_under_a_statement_cfg_is_refused() {
     for (tag, tail) in [
         (
             "ww-doors-cfg-block",
-            "#[cfg(any())] { gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
+            "#[cfg(feature = \"menu\")] { gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
         ),
         (
             "ww-doors-cfg-statement",
-            "#[cfg(test)] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
-        ),
-        (
-            "ww-doors-cfg-attr",
-            "#[cfg_attr(test, cfg(any()))] \
-             gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
+            "#[cfg(feature = \"menu\")] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
         ),
         (
             "ww-doors-cfg-inner",
-            "{ #![cfg(test)] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
+            "{ #![cfg(feature = \"trace\")] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
         ),
         (
             "ww-doors-cfg-road",
             "gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); \
-             #[cfg(test)] trace_shutdown.flush_through_its_door();",
+             #[cfg(feature = \"menu\")] trace_shutdown.flush_through_its_door();",
         ),
     ] {
         let failures = planted_door_failures(tag, "", tail, "");
@@ -13819,6 +15851,53 @@ fn a_pinned_call_under_a_statement_cfg_is_refused() {
             "{tag}: refused, once: {failures:?}"
         );
     }
+    let not_there = "the pinned call `admitted::<doors::DiagnosticsSettle, _>` in `planted \
+                     crate::main` after `run_app` is not there";
+    for (tag, tail) in [
+        (
+            "ww-doors-test-block",
+            "#[cfg(any())] { gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
+        ),
+        (
+            "ww-doors-test-statement",
+            "#[cfg(test)] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
+        ),
+        (
+            "ww-doors-test-inner",
+            "{ #![cfg(test)] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); }",
+        ),
+    ] {
+        assert_eq!(
+            planted_door_failures(tag, "", tail, ""),
+            [not_there],
+            "{tag}: the test-gated settle is not in the product"
+        );
+    }
+    assert_eq!(
+        planted_door_failures(
+            "ww-doors-test-road",
+            "",
+            "gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ()); \
+             #[cfg(test)] trace_shutdown.flush_through_its_door();",
+            "",
+        ),
+        Vec::<String>::new(),
+        "a test-gated flush beside the settle is not in the product, and the settle meets its pin"
+    );
+    let main = PLANTED_DOOR_MAIN
+        .replace(
+            "{tail}",
+            "#[cfg_attr(test, cfg(any()))] gate::admitted::<gate::doors::DiagnosticsSettle, _>(|| ());",
+        )
+        .replace("{more}", "");
+    let refused = planted_refusals(
+        "ww-doors-cfg-attr",
+        &format!("{PLANTED_LANDMARK_ITEMS}{PLANTED_DOOR_ITEMS}{main}"),
+    );
+    assert!(
+        refused.contains("`#[cfg_attr(test, cfg(any()))]` writes a `cfg`"),
+        "a `cfg_attr` that writes a `cfg` is the index's refusal: {refused}"
+    );
 }
 
 /// A planted `main` for the writer table's statement-`cfg` cases, after [`PLANTED_LANDMARK_ITEMS`]:
@@ -13850,15 +15929,20 @@ fn planted_tail_exiting(tag: &str, tail: &str) -> (Vec<String>, String) {
     )
 }
 
-/// RED (T-WINDOW-WAITS-STATEMENT-CFG) — **a pinned writer's call under a statement's `#[cfg…]` is
-/// refused**, as the door table's is: the index reads a file's, an item's and a module's `cfg` but
-/// no statement's, so `#[cfg(test)] admission::exiting();` after `run_app` would meet the tail's
-/// pin on a build it is not in. Refused once, by call, line and owner, for the gated statement,
-/// a gated block, a `cfg_attr`, an inner `#![cfg]`, a match arm, and a gated second call beside
-/// the real one (refused, not a surplus); a gated statement holding no pinned call changes nothing.
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG; split by the gate's kind by plan row 77, 2026-10-29) — **a
+/// pinned writer's call under a statement's platform or feature `#[cfg…]` is refused**, as the
+/// door table's is: the index keeps such a statement in the product, so `#[cfg(feature = "menu")]
+/// admission::exiting();` after `run_app` would meet the tail's pin on a build it is not in.
+/// Refused once, by call, line and owner, for the gated statement, a gated block, an inner
+/// `#![cfg]`, a match arm, and a gated second call beside the real one (refused, not a surplus); a
+/// gated statement holding no pinned call changes nothing. Gated to tests, the same shapes are out
+/// of the product by the index's gate grain: alone the pin is "not there", beside the real call it
+/// is met; a `cfg_attr` that writes a `cfg` is the index's refusal.
 ///
-/// MUTATION: drop the [`gated`] check of [`pinned_writer_failures`]' writer calls — the gated
-/// calls meet the pin (`[]`) and the second call beside the real one is a surplus.
+/// MUTATION: drop the [`gated`] check of [`pinned_writer_failures`]' writer calls — the
+/// platform-gated calls meet the pin (`[]`) and the second call beside the real one is a surplus;
+/// drop the gate grain from `Occurrence::in_the_product` — the test-gated calls are refused for
+/// their statement instead.
 #[test]
 fn a_pinned_writer_call_under_a_statement_cfg_is_refused() {
     for (tag, tail) in [
@@ -13866,6 +15950,10 @@ fn a_pinned_writer_call_under_a_statement_cfg_is_refused() {
         (
             "ww-writer-cfg-elsewhere",
             "admission::exiting(); #[cfg(feature = \"menu\")] { let _menu = 0; }",
+        ),
+        (
+            "ww-writer-test-beside",
+            "admission::exiting();\n#[cfg(test)] admission::exiting();",
         ),
     ] {
         assert_eq!(
@@ -13877,27 +15965,23 @@ fn a_pinned_writer_call_under_a_statement_cfg_is_refused() {
     for (tag, tail) in [
         (
             "ww-writer-cfg-statement",
-            "#[cfg(test)] admission::exiting();",
+            "#[cfg(feature = \"menu\")] admission::exiting();",
         ),
         (
             "ww-writer-cfg-block",
-            "#[cfg(any())] { admission::exiting(); }",
-        ),
-        (
-            "ww-writer-cfg-attr",
-            "#[cfg_attr(test, cfg(any()))] admission::exiting();",
+            "#[cfg(feature = \"trace\")] { admission::exiting(); }",
         ),
         (
             "ww-writer-cfg-inner",
-            "{ #![cfg(test)] admission::exiting(); }",
+            "{ #![cfg(feature = \"menu\")] admission::exiting(); }",
         ),
         (
             "ww-writer-cfg-arm",
-            "match 0 { #[cfg(test)] _ => admission::exiting(), _ => {} }",
+            "match 0 { #[cfg(feature = \"menu\")] _ => admission::exiting(), _ => {} }",
         ),
         (
             "ww-writer-cfg-beside",
-            "admission::exiting();\n#[cfg(test)] admission::exiting();",
+            "admission::exiting();\n#[cfg(feature = \"menu\")] admission::exiting();",
         ),
     ] {
         let (failures, main) = planted_tail_exiting(tag, tail);
@@ -13910,15 +15994,55 @@ fn a_pinned_writer_call_under_a_statement_cfg_is_refused() {
             "{tag}: refused at line {line}, once: {failures:?}"
         );
     }
+    let not_there = "the pinned call `admission::exiting` in `planted crate::main` after `run_app` is not there";
+    for (tag, tail) in [
+        (
+            "ww-writer-test-statement",
+            "#[cfg(test)] admission::exiting();",
+        ),
+        (
+            "ww-writer-test-block",
+            "#[cfg(any())] { admission::exiting(); }",
+        ),
+        (
+            "ww-writer-test-inner",
+            "{ #![cfg(test)] admission::exiting(); }",
+        ),
+        (
+            "ww-writer-test-arm",
+            "match 0 { #[cfg(test)] _ => admission::exiting(), _ => {} }",
+        ),
+    ] {
+        assert_eq!(
+            planted_tail_exiting(tag, tail).0,
+            [not_there],
+            "{tag}: the test-gated `exiting` is not in the product"
+        );
+    }
+    let main = PLANTED_WRITER_MAIN.replace(
+        "{tail}",
+        "#[cfg_attr(test, cfg(any()))] admission::exiting();",
+    );
+    let refused = planted_refusals(
+        "ww-writer-cfg-attr",
+        &format!("{PLANTED_LANDMARK_ITEMS}{main}"),
+    );
+    assert!(
+        refused.contains("`#[cfg_attr(test, cfg(any()))]` writes a `cfg`"),
+        "a `cfg_attr` that writes a `cfg` is the index's refusal: {refused}"
+    );
 }
 
-/// RED (T-WINDOW-WAITS-STATEMENT-CFG) — **a pinned callback entry under a statement's `#[cfg…]`
-/// is refused**: `enter_callback`'s calls are counted by the writer table's own finder, so a gated
-/// entry would make up its pinned count on a build it is not in. Refused once — the entry is not
-/// also "not there" or miscounted; a gated entry beside the real one is refused, not counted.
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG; split by the gate's kind by plan row 77, 2026-10-29) — **a
+/// pinned callback entry under a statement's platform or feature `#[cfg…]` is refused**:
+/// `enter_callback`'s calls are counted by the writer table's own finder, so a gated entry would
+/// make up its pinned count on a build it is not in. Refused once — the entry is not also "not
+/// there" or miscounted; a gated entry beside the real one is refused, not counted. Gated to tests,
+/// the entry is out of the product by the index's gate grain: alone it is "not there", beside the
+/// real one it is not counted.
 ///
-/// MUTATION: count a gated `enter_callback` again (drop its [`gated`] check) — the gated entry
-/// meets the pinned count (`[]`), and beside the real one it is "called 2×".
+/// MUTATION: count a gated `enter_callback` again (drop its [`gated`] check) — the
+/// platform-gated entry meets the pinned count (`[]`), and beside the real one it is "called 2×".
 #[test]
 fn a_callback_entry_under_a_statement_cfg_is_refused() {
     let entry = [("planted", "crate", "planted-cb", 1)];
@@ -13937,12 +16061,12 @@ fn a_callback_entry_under_a_statement_cfg_is_refused() {
     for (tag, body) in [
         (
             "ww-callback-cfg-statement",
-            "#[cfg(test)] admission::enter_callback(\"planted-cb\", || ());",
+            "#[cfg(feature = \"menu\")] admission::enter_callback(\"planted-cb\", || ());",
         ),
         (
             "ww-callback-cfg-beside",
             "admission::enter_callback(\"planted-cb\", || ()); \
-             #[cfg(test)] { admission::enter_callback(\"planted-cb\", || ()); }",
+             #[cfg(feature = \"menu\")] { admission::enter_callback(\"planted-cb\", || ()); }",
         ),
     ] {
         let failures = failures(tag, body);
@@ -13954,6 +16078,25 @@ fn a_callback_entry_under_a_statement_cfg_is_refused() {
             "{tag}: refused, once: {failures:?}"
         );
     }
+    assert_eq!(
+        failures(
+            "ww-callback-test-statement",
+            "#[cfg(test)] admission::enter_callback(\"planted-cb\", || ());"
+        ),
+        [
+            "the pinned callback entry `enter_callback(\"planted-cb\")` in `planted crate` is not there"
+        ],
+        "the test-gated entry is not in the product"
+    );
+    assert_eq!(
+        failures(
+            "ww-callback-test-beside",
+            "admission::enter_callback(\"planted-cb\", || ()); \
+             #[cfg(test)] { admission::enter_callback(\"planted-cb\", || ()); }"
+        ),
+        Vec::<String>::new(),
+        "a test-gated entry beside the real one is not counted"
+    );
 }
 
 /// RED (T-WINDOW-WAITS-STATEMENT-CFG) — **a landmark under a statement's `#[cfg…]` is refused**:
@@ -14021,13 +16164,17 @@ fn a_landmark_under_a_statement_cfg_is_refused() {
     );
 }
 
-/// RED (T-WINDOW-WAITS-STATEMENT-CFG, ruling D3) — **a remover helper's call under a statement's
-/// `#[cfg…]` is refused**: the remover-effect doors' callers are counted by owner, so a gated call
-/// from another function would be counted on a build it is not in — or, inside the road, make up
-/// the road's one call. Refused once; its helper's callers are not also compared.
+/// RED (T-WINDOW-WAITS-STATEMENT-CFG, ruling D3; split by the gate's kind by plan row 77,
+/// 2026-10-29) — **a remover helper's call under a statement's platform or feature `#[cfg…]` is
+/// refused**: the remover-effect doors' callers are counted by owner, so a gated call from another
+/// function would be counted on a build it is not in — or, inside the road, make up the road's one
+/// call. Refused once; its helper's callers are not also compared. Gated to tests, the call is out
+/// of the product by the index's gate grain: from another function it is not counted, and in the
+/// road it leaves the road without its call.
 ///
-/// MUTATION: drop the [`gated`] check of [`remover_door_failures`] — the gated caller is counted
-/// (a second owner in "found"), and the gated call in the road meets the road's count (`[]`).
+/// MUTATION: drop the [`gated`] check of [`remover_door_failures`] — the platform-gated caller is
+/// counted (a second owner in "found"), and the gated call in the road meets the road's count
+/// (`[]`).
 #[test]
 fn a_remover_helper_call_under_a_statement_cfg_is_refused() {
     let failures = |tag: &str, schedule: &str, other: &str| {
@@ -14052,9 +16199,13 @@ fn a_remover_helper_call_under_a_statement_cfg_is_refused() {
         (
             "ww-remover-cfg-elsewhere",
             "copy_new();",
-            "#[cfg(test)] copy_new();",
+            "#[cfg(feature = \"menu\")] copy_new();",
         ),
-        ("ww-remover-cfg-road", "#[cfg(any())] { copy_new(); }", ""),
+        (
+            "ww-remover-cfg-road",
+            "#[cfg(feature = \"trace\")] { copy_new(); }",
+            "",
+        ),
     ] {
         let failures = failures(tag, schedule, other);
         assert!(
@@ -14064,6 +16215,23 @@ fn a_remover_helper_call_under_a_statement_cfg_is_refused() {
             "{tag}: refused, once: {failures:?}"
         );
     }
+    assert_eq!(
+        failures(
+            "ww-remover-test-elsewhere",
+            "copy_new();",
+            "#[cfg(test)] copy_new();"
+        ),
+        Vec::<String>::new(),
+        "a test-gated caller elsewhere is not in the product, so not counted"
+    );
+    assert_eq!(
+        failures("ww-remover-test-road", "#[cfg(any())] { copy_new(); }", ""),
+        [
+            "`deferred_removal::copy_new` is called only by its pinned worker road; found {}, \
+             wanted {\"planted crate::deferred_removal::schedule\": 1}"
+        ],
+        "a test-gated call in the road leaves the road without its call"
+    );
 }
 
 /// RED (T-DOOR-PINS-BY-DOOR review, H5) — **outside every body the index records, a token is read

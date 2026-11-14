@@ -26,8 +26,8 @@ if (Test-Path $rendered) { Remove-Item $rendered -Force }
 
 Push-Location $repo
 try {
-    & cargo test -p bt-source --locked --test call_graph -- --exact `
-        the_unfollowed_edges_are_the_committed_list | Out-Host
+    & cargo test -p bt-source --locked --test real_tree -- --exact `
+        call_graph::the_unfollowed_edges_are_the_committed_list | Out-Host
 } finally {
     Pop-Location
 }

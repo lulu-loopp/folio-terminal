@@ -6,9 +6,9 @@
 use super::*;
 use crate::test_support::{
     EndSessionHome, ResizeGateHarness, TITLE_FRAME, calls_of, claim_after_a_look, cross_tab, facts,
-    facts_with, free_calls_of, grid_of, item_body, latched, launch_plan_on_disk, method_body,
-    on_the_window_thread, placement, quiet, reader_names, record_as_the_app_does, shells_document,
-    source, tab_with_a_files_column, the_system_asks, waiting,
+    facts_with, free_calls_of, grid_of, item_body, latched, launch_plan_on_disk, leaf_saying,
+    method_body, on_the_window_thread, placement, quiet, reader_names, record_as_the_app_does,
+    shells_document, source, tab_with_a_files_column, the_system_asks, waiting,
 };
 use bt_source::ItemQuery;
 use std::time::Duration;
@@ -772,6 +772,7 @@ fn saved_window(bounds: WindowBoundsV1, maximized: bool) -> SessionWindowV1 {
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             })),
             pinned: false,
             focused_leaf: "leaf-0".to_owned(),
@@ -1401,8 +1402,11 @@ fn one_turn_asks_the_desktop_where_the_window_is_exactly_once() {
 /// so a notification that arrived during a drag would wait for the hand to let
 /// go. Coordinator ruling 2026-09-24: the arm keeps a reading of its own, taken
 /// through the one writer, and decides the delivery on it. So the writer has
-/// these callers — the turn's head, the window's birth and this arm, and since
-/// ticket 62 the re-placing of a taskbar flash the lane's answer contradicts —
+/// these callers — the turn's head, the window's birth and this arm, since
+/// ticket 62 the re-placing of a taskbar flash the lane's answer contradicts,
+/// and since 0.4.10 plan row 72 (re-review R2) the two stops that choose the
+/// window their box is owned by (`fail` and `stop_every_window_keeping_in`,
+/// pinned by `every_box_a_stop_raises_while_a_window_stands_is_owned_by_one`) —
 /// and in the arm the reading comes before the delivery that reads it.
 ///
 /// MUTATION: drop `runtime.observe_window_place()` from the `AttentionSpoke`
@@ -1414,7 +1418,9 @@ fn a_delivery_between_turns_is_decided_on_a_fresh_reading_of_its_own() {
         reader_names(&writers),
         vec![
             "dress_new_window".to_owned(),
+            "fail".to_owned(),
             "replace_contradicted_flash".to_owned(),
+            "stop_every_window_keeping_in".to_owned(),
             "turn".to_owned(),
             "user_event".to_owned()
         ],
@@ -1422,8 +1428,10 @@ fn a_delivery_between_turns_is_decided_on_a_fresh_reading_of_its_own() {
         writers.report(source())
     );
     // Four since ticket 62: re-placing a flash the taskbar lane's answer contradicts decides
-    // again on a reading of its own, through the same writer.
-    assert_eq!(writers.len(), 4, "{}", writers.report(source()));
+    // again on a reading of its own, through the same writer. Six since 0.4.10 plan row 72
+    // (re-review R2): a stop reads every window's place fresh before it chooses its box's owner,
+    // since a window left behind on another virtual desktop takes no turn.
+    assert_eq!(writers.len(), 6, "{}", writers.report(source()));
     let arm = attention_spoke_arm();
     let observed = arm
         .find("runtime.observe_window_place();")
@@ -1604,6 +1612,7 @@ fn a_files_only_tab_is_named_on_the_restore_prompt_by_the_folder_it_held() {
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             }))),
         ],
     });
@@ -1989,8 +1998,13 @@ fn a_tabs_shells_and_its_terminal_leaves_are_one_set() {
 /// and the second assertion becomes the first.
 #[test]
 fn every_pane_the_present_painted_is_square_with_its_shell() {
-    let claim =
-        |tab: &TabState| fleet_claim(tab.sessions.values().map(|leaf| leaf.session_facts(false)));
+    let claim = |tab: &TabState| {
+        fleet_claim(
+            tab.sessions
+                .values()
+                .map(|leaf| leaf.session.session_facts(false)),
+        )
+    };
     let mut tab = cross_tab(1, &["LEFT", "RIGHT"]);
     for (_, leaf) in tab.leaves_mut() {
         leaf.output_revision = output_revision(leaf.output_revision, true, false);
@@ -2022,6 +2036,53 @@ fn every_pane_the_present_painted_is_square_with_its_shell() {
         StatusClaim::Silent,
         "a tab every pane of which reached the glass owes nothing when you leave it"
     );
+}
+
+/// RED (T-CONTRACT-M8, ticket O-5a, ruling E8; the ownership contract's §2.2 invariant 5 and
+/// §3.4 M8 pin) — **a view reports the revision it has seen through one session door, and unread
+/// never goes back.**
+///
+/// `ShellSession::mark_seen` keeps the larger of what the session holds and what a view reports,
+/// so a report that arrives late — a view that painted an older frame — cannot bring back an
+/// unread claim for output a newer report already answered. Today's two reporters,
+/// `mark_leaf_seen` and `mark_leaf_painted`, report the session's own current count, so the
+/// larger is always the report and the product reads as it did; with two views on one session
+/// (O-6) the stale report is real. The census half is bt-source's
+/// `the_seen_revision_has_one_door`.
+///
+/// MUTATION (observed red): `mark_seen` stores the report instead of taking the maximum — the
+/// stale report brings the ledger back to 1, and the backgrounded pane claims unread for output
+/// it had shown.
+#[test]
+fn a_view_reports_seen_and_unread_never_goes_back() {
+    let mut leaf = leaf_saying("构建完成 build ok — 下一步 next\r\n");
+    leaf.session.output_revision = output_revision(leaf.session.output_revision, true, false);
+    leaf.session.output_revision = output_revision(leaf.session.output_revision, true, false);
+    assert_eq!(leaf.session.output_revision, 2, "two drains heard output");
+    assert!(
+        leaf.session.session_facts(false).has_unseen_output(),
+        "nothing has been seen yet"
+    );
+
+    leaf.session.mark_seen(2);
+    assert!(!leaf.session.session_facts(false).has_unseen_output());
+
+    // A stale report: a view that last painted the first drain's frame.
+    leaf.session.mark_seen(1);
+    assert_eq!(
+        leaf.session.last_seen_revision, 2,
+        "a stale report is not a step back"
+    );
+    assert!(
+        !leaf.session.session_facts(false).has_unseen_output(),
+        "output already seen stays seen"
+    );
+
+    // And the next thing the shell says still counts.
+    leaf.session.output_revision = output_revision(leaf.session.output_revision, true, false);
+    assert!(leaf.session.session_facts(false).has_unseen_output());
+    mark_leaf_painted(&mut leaf.session);
+    assert_eq!(leaf.session.last_seen_revision, 3);
 }
 
 /// RED (T-FRESH-FACTS) — **each thing a window's settings ear hears wakes the loop for its own

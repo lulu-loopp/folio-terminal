@@ -1902,7 +1902,9 @@ pub fn client_area_animation_enabled() -> Result<bool, String> {
 /// for; any multiplier but one would apply the reader's preference twice.
 ///
 /// A trackpad does not come this way at all — it is precise, and winit reports
-/// `PixelDelta`, which the caller spends without asking this door anything.
+/// `PixelDelta`, which the caller spends without asking this door anything,
+/// except the forwarded mouse report, which takes this answer as its notch
+/// height (0.4.9 plan row 117), so one line keeps it at one report per cell.
 pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
     Ok(WheelScrollAmount::Lines(1))
 }

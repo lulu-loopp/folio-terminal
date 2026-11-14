@@ -44,7 +44,8 @@
 //! * **The registry flush** (Windows only, [`flush_current_user_key`]):
 //!   `RegFlushKey` on a key under `HKEY_CURRENT_USER`, for the entrance value a
 //!   later ticket writes (U-22).
-//! * **The two locks** ([`try_hold`], [`hold_within`]): a byte-range lock
+//! * **The two locks** ([`try_hold`], [`hold_within`], and [`hold_by`], whose
+//!   wait is read and paused on the caller's [`PollClock`]): a byte-range lock
 //!   (`LockFileEx`) on Windows, `flock` on macOS, held by a [`Held`] whose drop
 //!   releases it. The admission file `H\admission` is held [`Hold::Shared`] by
 //!   every running copy of the install (many holders; the file is opened for
@@ -77,6 +78,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+use crate::poll_clock::{PollClock, WallPollClock};
 
 /// Each arm's real surface, for the doors built on this one's durable write.
 pub(crate) use arm::Os;
@@ -169,6 +172,24 @@ impl Failure {
     #[must_use]
     pub fn refused_while_open(&self) -> bool {
         self.stage == Stage::Rename && arm::refused_while_open(&self.error)
+    }
+
+    /// **Whether this is a removal refused because something still holds what
+    /// it removes** — on Windows `ERROR_ACCESS_DENIED` or
+    /// `ERROR_SHARING_VIOLATION` at [`Stage::Remove`]: an executable inside
+    /// the folder still mapped as a process's image for a moment after that
+    /// process has ended, or a scanner or an indexer holding a file without
+    /// `FILE_SHARE_DELETE`, which lets go of it again in a moment
+    /// (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE). `ERROR_ACCESS_DENIED` is also
+    /// what a removal the account has no right to answers, which this cannot
+    /// tell apart and which never goes away by itself: a caller asks again
+    /// only within a bound, and its line at the bound says what was refused.
+    /// This door never asks again. **Never on macOS**: `unlink(2)` and
+    /// `rmdir(2)` remove what is open, and no error of theirs goes away by
+    /// itself.
+    #[must_use]
+    pub fn removal_refused_while_held(&self) -> bool {
+        self.stage == Stage::Remove && arm::refused_while_open(&self.error)
     }
 }
 
@@ -805,34 +826,64 @@ pub const LOCK_POLL: Duration = Duration::from_millis(25);
 /// file is `NotFound`) or at [`Stage::Lock`]; on a platform with no arm, one at
 /// [`Stage::OpenLockFile`] whose error is `Unsupported` and names this door.
 pub fn try_hold(path: &Path, hold: Hold) -> Result<Option<Held>, Failure> {
-    hold_until(path, hold, None)
+    hold_until::<WallPollClock>(path, hold, None)
 }
 
 /// **The same, asking again every [`LOCK_POLL`] until `wait` has passed** —
 /// the applier's bounded wait for the running copies to quit. `Ok(None)` means
-/// the lock was still held by somebody else at the deadline.
+/// the lock was still held by somebody else at the deadline. It is
+/// [`hold_by`] on [`WallPollClock`], `wait` past the wall clock's reading.
 ///
 /// # Errors
 /// As [`try_hold`].
 pub fn hold_within(path: &Path, hold: Hold, wait: Duration) -> Result<Option<Held>, Failure> {
-    hold_until(path, hold, Some(Instant::now() + wait))
+    hold_by(path, hold, Instant::now() + wait, &WallPollClock)
 }
 
-fn hold_until(path: &Path, hold: Hold, deadline: Option<Instant>) -> Result<Option<Held>, Failure> {
+/// **Take the lock on `path`, asking again after each pause of [`LOCK_POLL`]
+/// (the last one cut to what is left) until `clock` reads `until`**: the
+/// bounded wait with its deadline read, and every pause taken, on the
+/// caller's clock (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK). `until` is a reading
+/// of that same clock. `Ok(None)` means the lock was still held by somebody
+/// else at that deadline.
+///
+/// The one door through which a lock wait is read and paused on a clock of the
+/// caller's ([`PollClock`]): [`WallPollClock`] is [`hold_within`]'s; a caller
+/// whose road already reads its waits on a clock of its own (bt-app's
+/// `update_apply::WaitClock`, through a small adapter that carries the
+/// worker its pause needs) passes that clock here instead of writing a lock
+/// loop beside this one.
+///
+/// # Errors
+/// As [`try_hold`].
+pub fn hold_by<C: PollClock + ?Sized>(
+    path: &Path,
+    hold: Hold,
+    until: Instant,
+    clock: &C,
+) -> Result<Option<Held>, Failure> {
+    hold_until(path, hold, Some((clock, until)))
+}
+
+fn hold_until<C: PollClock + ?Sized>(
+    path: &Path,
+    hold: Hold,
+    deadline: Option<(&C, Instant)>,
+) -> Result<Option<Held>, Failure> {
     let file = arm::open_lock_file(path, hold)
         .map_err(|error| Failure::at(Stage::OpenLockFile, path, error))?;
     loop {
         if arm::try_lock(&file, hold).map_err(|error| Failure::at(Stage::Lock, path, error))? {
             return Ok(Some(Held { hold, file }));
         }
-        let Some(deadline) = deadline else {
+        let Some((clock, deadline)) = deadline else {
             return Ok(None);
         };
-        let now = Instant::now();
+        let now = clock.now();
         if now >= deadline {
             return Ok(None);
         }
-        std::thread::sleep(LOCK_POLL.min(deadline - now));
+        clock.pause(LOCK_POLL.min(deadline - now));
     }
 }
 
@@ -890,6 +941,10 @@ mod arm {
     /// `MoveFileExW(…, MOVEFILE_REPLACE_EXISTING)` over a target another
     /// handle holds without delete sharing answers `ERROR_ACCESS_DENIED`; a
     /// source or target opened with no sharing at all, `ERROR_SHARING_VIOLATION`.
+    /// A removal answers the same two: `ERROR_ACCESS_DENIED` while a file
+    /// inside is still mapped as a process's image, `ERROR_SHARING_VIOLATION`
+    /// while a handle holds one without delete sharing
+    /// ([`super::Failure::removal_refused_while_held`]).
     pub(super) fn refused_while_open(error: &io::Error) -> bool {
         error.raw_os_error().is_some_and(|code| {
             code == ERROR_ACCESS_DENIED.0.cast_signed()
@@ -2097,6 +2152,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// RED (T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE) — **on the real arm, a
+    /// folder's removal refused while a file inside it is held without delete
+    /// sharing is a removal refused while held, and the folder goes once the
+    /// hold lifts**; a refused rename is not one, nor a removal's other
+    /// refusals, and on macOS none is.
+    ///
+    /// MUTATION: `removal_refused_while_held` answers
+    /// `arm::refused_while_open(&self.error)` (the stage not asked).
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_removal_refused_while_a_file_inside_is_held_says_so_and_lands_once_let_go() {
+        let denied = || io::Error::from_raw_os_error(if cfg!(windows) { 5 } else { 13 });
+        let at = |stage| Failure::at(stage, Path::new("x"), denied());
+        assert_eq!(
+            at(Stage::Remove).removal_refused_while_held(),
+            cfg!(windows)
+        );
+        assert!(!at(Stage::Rename).removal_refused_while_held());
+        assert!(
+            !Failure::at(
+                Stage::Remove,
+                Path::new("x"),
+                io::Error::from_raw_os_error(2)
+            )
+            .removal_refused_while_held()
+        );
+        #[cfg(windows)]
+        {
+            let home = scratch("held-removal");
+            let folder = home.join("txn");
+            std::fs::create_dir_all(folder.join("rescue")).unwrap();
+            let file = folder.join("rescue").join("folio.exe");
+            std::fs::write(&file, b"held").unwrap();
+            let held = crate::trust_harness::hold_without_delete_sharing(&file).unwrap();
+            let refused = durable_remove(&folder).unwrap_err();
+            assert!(refused.removal_refused_while_held(), "{refused}");
+            assert!(!refused.refused_while_open(), "{refused}");
+            drop(held);
+            durable_remove(&folder).unwrap();
+            assert!(!folder.exists(), "removed once let go");
+            let _ = std::fs::remove_dir_all(&home);
+        }
+    }
+
     /// RED (U-12) — **a durable remove flushes the directory the entry was in,
     /// after the removal, and nothing there already is done, not a failure.**
     ///
@@ -2420,36 +2519,117 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// RED (U-11) — **the bounded wait asks until its deadline and not past
-    /// it, and is answered at once when the lock is free.**
+    /// RED (U-11) — **the bounded wait on the wall clock gives up while the
+    /// lock stays held, and a free lock is taken at the first ask, with no
+    /// wait to spend.**
     ///
     /// The applier waits for the running copies to quit for a bounded time
     /// (F-6: 60 s, then `Prepared`, deferred). A wait that gave up at the first
     /// refusal would defer every update a quitting copy was slow to leave;
-    /// one that ignored its deadline would hang the job.
+    /// one that ignored its deadline would hang the job. How far the wait asks
+    /// — to its deadline and not past it — is counted on a clock of the
+    /// caller's in `a_lock_wait_on_a_clock_of_the_callers_reads_and_pauses_on_it`
+    /// ([`hold_by`]; [`hold_within`] is it on [`WallPollClock`]), never measured
+    /// here (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
     ///
-    /// MUTATION: return `Ok(None)` after the first refusal in `hold_until`
-    /// whatever the deadline.
+    /// MUTATION: in `hold_until`, read the deadline before the first ask (a
+    /// free lock asked with no wait left is then refused).
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn a_durable_lock_wait_gives_up_at_its_deadline_and_not_before() {
         let home = scratch("admission-deadline");
         let lock = home.join("lock");
         let holder = try_hold(&lock, Hold::Exclusive).unwrap().unwrap();
-        let wait = Duration::from_millis(300);
-        let began = Instant::now();
-        assert!(hold_within(&lock, Hold::Exclusive, wait).unwrap().is_none());
-        let waited = began.elapsed();
-        assert!(waited >= wait, "gave up after {waited:?}, before {wait:?}");
-        assert!(waited < Duration::from_secs(5), "waited {waited:?}");
-        drop(holder);
-        let began = Instant::now();
-        let taken = hold_within(&lock, Hold::Exclusive, Duration::from_secs(30)).unwrap();
-        assert!(taken.is_some());
         assert!(
-            began.elapsed() < Duration::from_secs(5),
-            "a free lock is taken at once"
+            hold_within(&lock, Hold::Exclusive, Duration::from_millis(300))
+                .unwrap()
+                .is_none(),
+            "a lock held to the end is not had"
         );
+        drop(holder);
+        let taken = hold_within(&lock, Hold::Exclusive, Duration::ZERO).unwrap();
+        assert!(taken.is_some(), "a free lock is taken at the first ask");
+        drop(taken);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK) — **a lock wait on the
+    /// caller's clock reads its deadline and takes every pause there**: a lock
+    /// held to the end is given up after the pauses the deadline allows on that
+    /// clock, the last one cut to what is left, and a holder let go in a pause
+    /// of the clock's is taken at the next ask. The clock moves only by the
+    /// pauses it is asked for and never sleeps, so the counts are facts of the
+    /// test, not of the machine.
+    ///
+    /// MUTATION: in `hold_until`, read `Instant::now()` for `now`, or sleep
+    /// instead of `clock.pause` (the counted pauses then differ, or none is
+    /// counted).
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_lock_wait_on_a_clock_of_the_callers_reads_and_pauses_on_it() {
+        struct Counted {
+            began: Instant,
+            pauses: std::cell::RefCell<Vec<Duration>>,
+            at_pause: std::cell::RefCell<Box<dyn FnMut(usize)>>,
+        }
+        impl PollClock for Counted {
+            fn now(&self) -> Instant {
+                self.began + self.pauses.borrow().iter().sum::<Duration>()
+            }
+            fn pause(&self, pause: Duration) {
+                let number = {
+                    let mut pauses = self.pauses.borrow_mut();
+                    pauses.push(pause);
+                    pauses.len()
+                };
+                (self.at_pause.borrow_mut())(number);
+            }
+        }
+        let counted = |at_pause: Box<dyn FnMut(usize)>| Counted {
+            began: Instant::now(),
+            pauses: std::cell::RefCell::new(Vec::new()),
+            at_pause: std::cell::RefCell::new(at_pause),
+        };
+        let home = scratch("lock-wait-on-a-clock");
+        let lock = home.join("lock");
+
+        let holder = try_hold(&lock, Hold::Exclusive).unwrap().unwrap();
+        let clock = counted(Box::new(|_: usize| {}));
+        let wait = LOCK_POLL * 4 + Duration::from_millis(10);
+        let until = clock.now() + wait;
+        assert!(
+            hold_by(&lock, Hold::Exclusive, until, &clock)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            *clock.pauses.borrow(),
+            vec![
+                LOCK_POLL,
+                LOCK_POLL,
+                LOCK_POLL,
+                LOCK_POLL,
+                Duration::from_millis(10)
+            ],
+            "the wait gave up at its deadline on the caller's clock, the last pause cut"
+        );
+
+        let holder = std::rc::Rc::new(std::cell::RefCell::new(Some(holder)));
+        let let_go = std::rc::Rc::clone(&holder);
+        let clock = counted(Box::new(move |pause: usize| {
+            if pause == 2 {
+                let_go.borrow_mut().take();
+            }
+        }));
+        let until = clock.now() + LOCK_POLL * 200;
+        let taken = hold_by(&lock, Hold::Exclusive, until, &clock).unwrap();
+        assert!(taken.is_some(), "the holder let go in pause 2");
+        assert_eq!(
+            clock.pauses.borrow().len(),
+            2,
+            "taken at the ask after pause 2"
+        );
+        assert!(holder.borrow().is_none());
         drop(taken);
         let _ = std::fs::remove_dir_all(&home);
     }

@@ -52,6 +52,7 @@ fn leaf_selection(tab: &mut TabState, seat: SeatId, columns: u32) -> ViewSelecti
         .expect("the seat under test holds a session");
     let frame = leaf
         .session
+        .session
         .viewport_frame(&mut leaf.view.projection)
         .expect("a live leaf has a viewport frame");
     ViewSelection {
@@ -153,10 +154,12 @@ fn a_new_selection_leaves_no_other_pane_of_the_tab_wearing_one() {
         .get_mut(&left)
         .expect("the left seat holds a session")
         .session
+        .session
         .set_view_selection(Some(stale_left));
     tab.sessions
         .get_mut(&right)
         .expect("the right seat holds a session")
+        .session
         .session
         .set_view_selection(Some(stale_right));
     assert_eq!(
@@ -508,11 +511,11 @@ fn the_arrived_members_of_a_merge_are_already_seen() {
     for seat in migrated {
         let leaf = target.sessions.get(&seat).expect("migrated");
         assert_eq!(
-            leaf.last_seen_revision, leaf.output_revision,
+            leaf.session.last_seen_revision, leaf.session.output_revision,
             "{seat:?} arrived still claiming to be unread"
         );
         assert!(
-            !leaf.session.status().bell_latched(),
+            !leaf.session.session.status().bell_latched(),
             "{seat:?} arrived still ringing"
         );
     }

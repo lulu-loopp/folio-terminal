@@ -20,9 +20,9 @@ use super::*;
 use crate::lane::{
     Adapter, Admission, Bound, Bounds, Cancellation, Claim, Contract, Delivered, Delivery,
     EXPECTED_FAILURES, Executor, ExpectedFailure, Failure, FailureKind, Gate, HANDOFF, LaneName,
-    LaneUnderTest, Ledger, Order, Outcome, Owed, PLANTED_PANIC, Refused, Replacement, Request,
-    Saying, TaskFailure, Terminal, Verdict, WakeProbe, Withdrawal, WorkerEnd, check, judge,
-    receive, run_suite, task,
+    LaneUnderTest, Ledger, Mark, Order, Outcome, Owed, PLANTED_PANIC, Refused, Replacement,
+    Request, Saying, TaskFailure, Terminal, Verdict, WakeProbe, Withdrawal, WorkerEnd, check,
+    judge, receive, run_suite, task,
 };
 
 /// Every lane's adapter. A lane missing here is a lane [`judge`] reports as skipped.
@@ -323,7 +323,7 @@ fn the_judge_is_red_on_an_unexpected_pass_a_different_failure_a_skipped_lane_and
         "{unexpected_pass:?}"
     );
     let different = planted(&|verdict| {
-        verdict.result = Err(Failure::SubmissionWaited { longest_ms: 5_000 });
+        verdict.result = Err(Failure::SubmissionWaited { lapses: 1 });
     });
     assert!(
         different.len() == 1 && different[0].contains("different failure"),
@@ -678,8 +678,8 @@ fn play(case: &Case, order: &[Step]) -> Option<String> {
     for (at, request) in requests.iter_mut().enumerate() {
         if let Some(request) = request {
             // The consumer asks twice: taking consumes.
-            taken[at].extend(request.take());
-            taken[at].extend(request.take());
+            taken[at].extend(request.take(&Mark::unmarked_for_a_test()));
+            taken[at].extend(request.take(&Mark::unmarked_for_a_test()));
         }
     }
     let sunk = locked(&sunk).clone();
@@ -879,7 +879,10 @@ fn the_ledger_refuses_at_the_door_synchronously() {
         Some(Refused::Full { bound: 2 }),
         "an answer its requester has not taken is still held"
     );
-    assert_eq!(first.take(), Some(Terminal::Done(1)));
+    assert_eq!(
+        first.take(&Mark::unmarked_for_a_test()),
+        Some(Terminal::Done(1))
+    );
     assert_eq!(
         ledger.admit_joined(first.id(), owed()).err(),
         Some(Refused::TwinEnded),
@@ -944,20 +947,26 @@ fn a_failure_is_said_once_per_request_joins_included_and_once_per_streak() {
             .admit_joined(failed.id(), owed())
             .expect("joined to an owed request");
         assert!(ledger.publish(failed.id(), failure()));
-        assert!(failed.take().is_some());
-        assert!(matches!(joined.take(), Some(Terminal::Joined { .. })));
+        assert!(failed.take(&Mark::unmarked_for_a_test()).is_some());
+        assert!(matches!(
+            joined.take(&Mark::unmarked_for_a_test()),
+            Some(Terminal::Joined { .. })
+        ));
         // An answer whose join is delivered first: the joined answer ends the streak.
         let mut answered = ledger.admit(owed()).expect("admitted");
         let mut twin = ledger
             .admit_joined(answered.id(), owed())
             .expect("joined to an owed request");
         assert!(ledger.publish(answered.id(), Terminal::Done(0)));
-        assert!(matches!(twin.take(), Some(Terminal::Joined { .. })));
+        assert!(matches!(
+            twin.take(&Mark::unmarked_for_a_test()),
+            Some(Terminal::Joined { .. })
+        ));
         // The same failure again.
         let mut again = ledger.admit(owed()).expect("admitted");
         assert!(ledger.publish(again.id(), failure()));
-        assert!(again.take().is_some());
-        assert!(answered.take().is_some());
+        assert!(again.take(&Mark::unmarked_for_a_test()).is_some());
+        assert!(answered.take(&Mark::unmarked_for_a_test()).is_some());
         assert_eq!(said.load(Ordering::SeqCst), lines, "{saying:?}");
     }
 }
@@ -1033,6 +1042,9 @@ enum Planted {
     /// The worker publishes a request's answer while its work still holds the file it took,
     /// and lets the file go after.
     PublishesBeforeLettingGo,
+    /// The asker's admission does not return until the worker has taken the job it queued: a
+    /// press on a busy lane waits for the worker.
+    AdmissionWaitsForTheWorker,
 }
 
 /// How many identities the FIFO scripted lane's ledger owes at most.
@@ -1107,6 +1119,8 @@ impl Queue {
         let mut jobs = locked(&self.jobs);
         loop {
             if let Some(job) = jobs.waiting.pop_front() {
+                // An asker planted to wait for its job to be taken hears it here.
+                self.more.notify_all();
                 return Some(job);
             }
             if jobs.closed {
@@ -1119,6 +1133,26 @@ impl Queue {
     fn close(&self) {
         locked(&self.jobs).closed = true;
         self.more.notify_all();
+    }
+
+    /// **The planted asker's wait**: until the worker has taken `job` from the line (or the lane
+    /// closed). It ends when the worker moves, which the suite's held [`Gate`] allows only once
+    /// its cap has run out — and, should no gate cap ever let it, at the suite's patience, so a
+    /// missing cap is a red rather than a hang.
+    fn await_taken(&self, job: (u64, u64)) {
+        let mut jobs = locked(&self.jobs);
+        let since = std::time::Instant::now();
+        while !jobs.closed && jobs.waiting.contains(&job) {
+            let left = crate::lane::PATIENCE.saturating_sub(since.elapsed());
+            if left.is_zero() {
+                return;
+            }
+            jobs = self
+                .more
+                .wait_timeout(jobs, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
     }
 }
 
@@ -1143,6 +1177,9 @@ struct ScriptedLane {
     kept: Arc<Kept>,
     asked: Vec<Asked>,
     fault_seen: bool,
+    /// What the suite runs once inside the next drain, between its read of the first request and
+    /// of the rest — the moment a worker can end requests while the consumer is reading them.
+    between_reads: Option<Box<dyn FnOnce()>>,
 }
 
 fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) -> ScriptedLane {
@@ -1243,6 +1280,7 @@ fn scripted_lane(contract: &'static Contract, policy: Policy, planted: Planted) 
         kept,
         asked: Vec::new(),
         fault_seen: false,
+        between_reads: None,
     }
 }
 
@@ -1253,6 +1291,14 @@ impl Drop for ScriptedLane {
 }
 
 impl ScriptedLane {
+    /// Put `job` in line for the worker — and, on the lane planted so, wait until it is taken.
+    fn enqueue(&self, job: (u64, u64)) {
+        self.queue.push(job);
+        if self.planted == Planted::AdmissionWaitsForTheWorker {
+            self.queue.await_taken(job);
+        }
+    }
+
     fn owe(&self, question: u64) -> Owe {
         Owe {
             kept: Arc::clone(&self.kept),
@@ -1273,7 +1319,7 @@ impl ScriptedLane {
                 let request = self.ledger.admit(self.owe(question))?;
                 self.ledger
                     .publish(twin, Terminal::Superseded { by: request.id() });
-                self.queue.push((request.id(), question));
+                self.enqueue((request.id(), question));
                 Ok(request)
             }
             (Policy::Fifo, Some(twin)) => {
@@ -1282,12 +1328,12 @@ impl ScriptedLane {
                     joined => return joined,
                 }
                 let request = self.ledger.admit(self.owe(question))?;
-                self.queue.push((request.id(), question));
+                self.enqueue((request.id(), question));
                 Ok(request)
             }
             (Policy::Fifo, None) => {
                 let request = self.ledger.admit(self.owe(question))?;
-                self.queue.push((request.id(), question));
+                self.enqueue((request.id(), question));
                 Ok(request)
             }
             (Policy::Latest, _) => {
@@ -1364,17 +1410,35 @@ impl LaneUnderTest for ScriptedLane {
                 outcome: Outcome::Fault(end.to_string()),
             });
         }
-        self.asked.retain_mut(|asked| match asked.request.take() {
-            Some(terminal) => {
-                found.push(Delivered {
-                    target: Some(asked.target),
-                    ticket: Some(asked.request.id()),
-                    question: Some(asked.question),
-                    outcome: outcome(terminal),
-                });
-                false
+        // The drain's mark (`Ledger::drain_mark`), read once before any request is, on a lane
+        // that delivers in admission order: every request below it has ended, so what is taken is
+        // a prefix of the admissions, and a request that ends while the rest are being read waits
+        // for the next drain (a take refuses a request at or past its mark). A latest-value lane's
+        // consumer keeps its order by adoption instead (`Delivery::NewestAdopted`), and takes
+        // whatever has ended.
+        let mark = match self.contract.delivery {
+            Delivery::Submission => self.ledger.drain_mark(),
+            Delivery::NewestAdopted => Mark::unmarked_for_a_test(),
+        };
+        let mut between = self.between_reads.take();
+        self.asked.retain_mut(|asked| {
+            let id = asked.request.id();
+            let terminal = asked.request.take(&mark);
+            if let Some(step) = between.take() {
+                step();
             }
-            None => true,
+            match terminal {
+                Some(terminal) => {
+                    found.push(Delivered {
+                        target: Some(asked.target),
+                        ticket: Some(id),
+                        question: Some(asked.question),
+                        outcome: outcome(terminal),
+                    });
+                    false
+                }
+                None => true,
+            }
         });
         found
     }
@@ -1480,6 +1544,313 @@ fn a_lane_built_on_the_seam_keeps_every_claim() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// RED (T-LANE-CONTRACT-PROMPT-BOUND, plan row 103) — **A full lane answers without waiting, and
+/// an admission that waits for the worker is red** — by the gate's count, not by a clock.
+///
+/// The FIFO scripted lane keeps the claim under the suite's own cap. The same lane planted so that
+/// an admission returns only once the worker has taken its job cannot return while the executor
+/// is held: its flood comes back only because the gate lets go on its own, and that lapse is the
+/// verdict (`SubmissionWaited`). The plant lapses once whatever the cap is, so the test gives the
+/// gate a short one; nothing it asserts reads the time.
+///
+/// The same plant under a claim with no lapse check of its own (`EveryRequestEndsExactlyOnce`,
+/// whose first submission after `hold_one` waits for the worker) passes that claim's own checks
+/// once the gate has let go; only `check`'s fold makes it red.
+///
+/// MUTATION: drop the `lapses > 0` check in `full_lane_answers_without_waiting` — the planted lane
+/// keeps the rest of the claim (its ledger still refuses past its bound), and `check`'s fold is
+/// what still says `SubmissionWaited`; drop both, and the first half is red.
+/// MUTATION: drop the fold in `check` (the claim's own result, lapse or not) — the second half
+/// passes as `Ok(())`, and the test is red.
+/// MUTATION: count no lapse in `Gate::arrive` — both halves are red. Or let `Gate::arrive` hold
+/// without a cap — the planted admissions give up at the suite's patience with no lapse counted,
+/// and the test is red rather than hung.
+#[test]
+fn a_full_lane_answers_without_waiting_and_an_admission_waiting_for_the_worker_is_red() {
+    let claim = Claim::FullLaneAnswersWithoutWaiting;
+    assert_eq!(
+        on_scripted(&SCRIPTED_FIFO, Policy::Fifo, Planted::Nothing, claim),
+        Ok(())
+    );
+    let mut lane = scripted_lane(
+        &SCRIPTED_FIFO,
+        Policy::Fifo,
+        Planted::AdmissionWaitsForTheWorker,
+    );
+    lane.gate.lapse_after(std::time::Duration::from_millis(50));
+    let (requests, waited) = check(&mut lane, claim);
+    assert!(requests > 0, "the claim asked the planted lane nothing");
+    assert_eq!(
+        waited,
+        Err(Failure::SubmissionWaited { lapses: 1 }),
+        "an admission that waits for the worker is a submission that waited"
+    );
+
+    let mut lane = scripted_lane(
+        &SCRIPTED_FIFO,
+        Policy::Fifo,
+        Planted::AdmissionWaitsForTheWorker,
+    );
+    lane.gate.lapse_after(std::time::Duration::from_millis(50));
+    let (requests, waited) = check(&mut lane, Claim::EveryRequestEndsExactlyOnce);
+    assert!(requests > 0, "the claim asked the planted lane nothing");
+    assert_eq!(
+        waited,
+        Err(Failure::SubmissionWaited { lapses: 1 }),
+        "a lapse is red in a claim that does not read the gate itself"
+    );
+}
+
+/// A worker that stands in `pass` on a thread of its own, and the flag it raises once `pass` has
+/// returned: the test awaits that flag within the suite's patience, and never joins a worker that
+/// has not raised it.
+fn passing_apart(
+    pass: impl FnOnce() + Send + 'static,
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let raised = Arc::clone(&returned);
+    let worker = std::thread::spawn(move || {
+        pass();
+        raised.store(true, Ordering::SeqCst);
+    });
+    (returned, worker)
+}
+
+/// **`what`, after a lapse, failed, and its failure names the lapse** — not some other panic on
+/// the way, nor the worker that never came.
+fn assert_names_the_lapse(caught: std::thread::Result<()>, what: &str) {
+    let said = caught
+        .err()
+        .and_then(|panic| panic.downcast::<String>().ok())
+        .unwrap_or_else(|| panic!("{what} after a lapse is red, with a message"));
+    assert!(
+        said.contains("let go on its own"),
+        "{what}'s failure names the lapse: {said}"
+    );
+}
+
+/// RED (T-LANE-DOOR-CALLS-ON-THE-TEST-THREAD, plan row 111) — **A worker standing in a held hold
+/// past its cap is let go, once, and the hold's release is red** — so a door a test calls while a
+/// fake's work stands in a hold, and that waits on that work, fails the test on its own thread
+/// instead of hanging the run.
+///
+/// A worker passes a held hold whose cap is short, and the test awaits its return within the
+/// suite's patience. The hold counts one lapse; a pass after it goes straight through; a wait for a
+/// standing worker and the release both panic, naming the lapse. The worker is never let go by
+/// the test, so it can only come back through the lapse, under any cap: nothing here reads the
+/// time.
+///
+/// MUTATION: let `Hold::pass` wait without its cap — the worker never comes back and the test is
+/// red (`came_back`), with the worker left standing.
+/// MUTATION: count no lapse in `Hold::pass` — red (`lapses() == 1`).
+/// MUTATION: drop the assertion in `Hold::release` — the release returns, and the test is red.
+/// MUTATION: let `Hold::wait_standing` wait only for a standing worker — nothing stands after the
+/// lapse, the wait gives up at the suite's patience saying nothing stood, and the test is red
+/// (the wait's failure does not name the lapse).
+#[test]
+fn a_hold_stood_in_past_its_cap_lets_go_once_and_its_release_is_red() {
+    let hold = Arc::new(crate::lane::Hold::default());
+    hold.lapse_after(std::time::Duration::from_millis(50));
+    hold.hold();
+    let standing = Arc::clone(&hold);
+    let (returned, worker) = passing_apart(move || standing.pass());
+    let came_back = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
+    assert!(
+        came_back,
+        "a worker standing in a held hold comes back through the hold's cap"
+    );
+    worker.join().expect("the worker ends");
+    assert_eq!(
+        hold.lapses(),
+        1,
+        "the hold counts that it let go on its own"
+    );
+    hold.pass();
+    assert_eq!(
+        hold.lapses(),
+        1,
+        "a lapse lets go once: a later pass is not held"
+    );
+    let awaited = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hold.wait_standing("a worker after the lapse");
+    }));
+    assert_names_the_lapse(awaited, "the wait for a standing worker");
+    let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hold.release()));
+    assert_names_the_lapse(released, "the hold's release");
+}
+
+/// RED (T-LANE-DOOR-CALLS-ON-THE-TEST-THREAD, plan row 111) — **A gate that let go on its own makes
+/// its release red** outside the suite's claims too: a lane's module test whose door waited on the
+/// held worker fails on its own thread, where the lapse was a pause nothing read before. The
+/// suite's claims let go without the assertion and judge the count themselves (`check`), so the
+/// planted lane above keeps its `SubmissionWaited`.
+///
+/// MUTATION: drop the assertion in `Gate::release` — the release returns, and the test is red.
+#[test]
+fn a_gate_that_let_go_on_its_own_makes_its_release_red() {
+    let gate = Arc::new(Gate::default());
+    gate.lapse_after(std::time::Duration::from_millis(50));
+    gate.hold();
+    let arriving = Arc::clone(&gate);
+    let (returned, worker) = passing_apart(move || arriving.arrive());
+    let came_back = crate::lane::within_patience(|| returned.load(Ordering::SeqCst));
+    assert!(
+        came_back,
+        "a worker held at the gate comes back through the gate's cap"
+    );
+    worker.join().expect("the worker ends");
+    assert_eq!(
+        gate.lapses(),
+        1,
+        "the gate counts that it let go on its own"
+    );
+    let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gate.release()));
+    assert_names_the_lapse(released, "the gate's release");
+}
+
+/// PIN (T-BARRIER-HELD-DOOR-CALLS, plan row 133) — **a latest-value lane's admission never waits
+/// for its worker**: the three roads of `Coalescing::ask` taken while a run is out — a request that
+/// waits for the next run, one joined to the waiting run, one displacing it — and the reads beside
+/// them (`count_arrivals`, `waiting`, `ended`) come back on the test's thread while the worker
+/// stands in a held hold mid-run. (The first request, which starts the worker, is not one of them:
+/// nothing is out yet.)
+///
+/// The contract suite could not keep this until row 160: its programs adapter asked under the
+/// program lane's own lock (`ProgramsLane::request`), which the walk worker takes as soon as it is
+/// free, so a wait planted in `ask` deadlocked the suite rather than lapsing (row 111's plant C).
+/// The admission now keeps that lock only for its urgency read, so the suite is red there too (its
+/// programs verdict `SubmissionWaited`); this pin is the direct witness, with no product lane in
+/// the way. Here the test holds no lane lock. A planted wait that lets the coalescing's book lock
+/// go while it waits lets the hold go on its own at its cap, and the test is red there, never a
+/// hang; one that keeps the book lock while it waits stops the worker's next take as well, and is
+/// the suite watchdog's (row 113) to end.
+///
+/// MUTATION: in `Coalescing::ask`, wait (the book lock let go between looks) while a run is
+/// waiting until the worker takes it — the joined request waits on the held worker, the hold
+/// lapses at the cap, and the test is red after it at a mid-run assert, before the release ("the
+/// displacing request waits for the next run" or "nothing is taken while the first run is still
+/// owed", as the race with the let-go worker falls).
+#[test]
+fn a_coalescing_ask_never_waits_for_its_worker() {
+    type Answered = crate::lane::ToTheApplication<u8, String>;
+    let hold = Arc::new(crate::lane::Hold::default());
+    let ledger: Arc<Ledger<u64, Answered>> = Ledger::new(
+        "coalescing-pin",
+        Some(8),
+        crate::lane::Saying::PerRequest,
+        |_: &str| {},
+        || {},
+    );
+    let lane = Arc::new(crate::lane::Coalescing::<u64, Answered, u8>::new(ledger));
+    let ask = |op: u8| {
+        let (serving, standing) = (Arc::clone(&lane), Arc::clone(&hold));
+        lane.ask(
+            op,
+            Answered::owed(),
+            |waiting, asked| waiting == asked,
+            |_, newer| newer,
+            move |ran| {
+                crate::lane::Executor::thread_door(bt_platform::ThreadPriority::BelowNormal)
+                    .start_worker("lane-contract-coalescing-pin", ran, move |ctx| {
+                        loop {
+                            let crate::lane::Waiting { operation, op, .. } = serving.next(ctx);
+                            standing.pass();
+                            serving.ledger().publish(operation, Terminal::Done(op));
+                        }
+                    })
+            },
+        )
+        .expect("the lane admits the request")
+        .id
+    };
+    hold.hold();
+    let first = ask(1);
+    hold.wait_standing("the first run taken by the worker");
+    let after = ask(2);
+    let joined = ask(2);
+    let displacing = ask(3);
+    let _ = lane.count_arrivals();
+    assert_eq!(
+        lane.waiting(|waiting| waiting.map(|waiting| waiting.op)),
+        Some(3),
+        "the displacing request waits for the next run"
+    );
+    assert!(
+        lane.ended().is_empty(),
+        "nothing is taken while the first run is still owed"
+    );
+    hold.release();
+    let mut ended = Vec::new();
+    let all_four = crate::lane::within_patience(|| {
+        ended.extend(lane.ended());
+        ended.len() == 4
+    });
+    assert!(
+        all_four,
+        "every request ends once the worker is let go: {ended:?}"
+    );
+    assert_eq!(
+        ended,
+        vec![
+            (first, Terminal::Done(1)),
+            (after, Terminal::Superseded { by: displacing }),
+            (
+                joined,
+                Terminal::Joined {
+                    with: after,
+                    outcome: Box::new(Terminal::Superseded { by: displacing }),
+                }
+            ),
+            (displacing, Terminal::Done(3)),
+        ],
+        "each request's own terminal, in the order they were made"
+    );
+}
+
+/// RED (T-CLIPBOARD-ORDER-HOLDS-BY-SPEED, plan row 72) — **a lane built on the seam takes only
+/// what ended before its drain began**, so a request that ends while the drain is reading the
+/// requests waits for the next drain, and the declared order holds however slow the drain is
+/// beside the worker.
+///
+/// The worker holds request 0 while 1 and 2 wait. The drain reads 0 (not ended), and then — at
+/// the moment a slow drain gives a fast worker — the worker is let go and every request ends
+/// before the drain reads 1 and 2. That drain takes nothing; the next takes 0, 1 and 2. No timing
+/// decides it: the step runs inside the drain, between two reads.
+///
+/// MUTATION: take every ended request whatever the mark (`owed` ignored in
+/// `ScriptedLane::drain`), and the first drain takes 1 and 2, before 0 (2026-10-28: this test's
+/// neighbour `a_lane_built_on_the_seam_keeps_every_claim` failed so, under load, once).
+#[test]
+fn a_request_that_ends_while_the_drain_reads_waits_for_the_next_drain() {
+    let mut lane = scripted_lane(&SCRIPTED_FIFO, Policy::Fifo, Planted::Nothing);
+    let gate = Arc::clone(&lane.gate);
+    gate.hold();
+    lane.submit(0, 0);
+    assert!(gate.wait_entered(1), "the worker holds request 0");
+    lane.submit(0, 1);
+    lane.submit(0, 2);
+    let ledger = Arc::clone(&lane.ledger);
+    lane.between_reads = Some(Box::new(move || {
+        gate.release();
+        crate::lane::wait_until("every request ended", || ledger.earliest_owed().is_none());
+    }));
+    let first = lane.drain();
+    let second = lane.drain();
+    let delivered: Vec<u64> = first
+        .iter()
+        .chain(&second)
+        .filter_map(|delivered| delivered.question)
+        .collect();
+    assert!(
+        first.is_empty(),
+        "the first drain takes nothing that ended after it began: {first:?}"
+    );
+    assert_eq!(delivered, [0, 1, 2], "delivered in the declared order");
 }
 
 /// RED (T-CLIPBOARD-LANE) — **A withdrawn request ends `Cancelled` once**: the FIFO lane on the

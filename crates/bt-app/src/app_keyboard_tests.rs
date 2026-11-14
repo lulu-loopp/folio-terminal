@@ -653,7 +653,10 @@ fn closing_the_palette_cancels_a_composition_typed_into_it() {
     };
     assert_eq!(ime_owner(typing), ImeOwner::Palette);
     assert!(
-        !composition_outlived_its_field(Some(ImeOwner::Palette), ime_owner(typing)),
+        !composition_outlived_its_field(
+            Some(&an_origin_of(ImeOwner::Palette)),
+            &an_origin_of(ime_owner(typing))
+        ),
         "while the box is up the letters are its own",
     );
     // The palette is closed: `menu_or_dialog` and `palette` go down
@@ -661,7 +664,10 @@ fn closing_the_palette_cancels_a_composition_typed_into_it() {
     let closed = KeyboardOwner::default();
     assert_eq!(ime_owner(closed), ImeOwner::Shell);
     assert!(
-        composition_outlived_its_field(Some(ImeOwner::Palette), ime_owner(closed)),
+        composition_outlived_its_field(
+            Some(&an_origin_of(ImeOwner::Palette)),
+            &an_origin_of(ime_owner(closed))
+        ),
         "and the moment the box is gone the composition has no field",
     );
 }
@@ -680,21 +686,40 @@ fn closing_the_palette_cancels_a_composition_typed_into_it() {
 #[test]
 fn a_composition_does_not_follow_the_keyboard_to_another_owner() {
     for started_in in ImeOwner::ALL {
+        let origin = an_origin_of(started_in);
         assert!(
-            !composition_outlived_its_field(Some(started_in), started_in),
+            !composition_outlived_its_field(Some(&origin), &origin),
             "{started_in:?} keeps its own composition while it keeps the keyboard",
         );
         for now in ImeOwner::ALL.into_iter().filter(|rung| *rung != started_in) {
             assert!(
-                composition_outlived_its_field(Some(started_in), now),
+                composition_outlived_its_field(Some(&origin), &an_origin_of(now)),
                 "a composition begun in {started_in:?} may not arrive at {now:?}",
             );
         }
     }
     assert!(
-        !composition_outlived_its_field(None, ImeOwner::Shell),
+        !composition_outlived_its_field(None, &an_origin_of(ImeOwner::Shell)),
         "and a window composing nothing has nothing to cancel",
     );
+}
+
+/// One field of `rung`, as `Runtime::composition_origin_now` names it when the instance cannot
+/// be named — every rung's origin is its own variant, so two of these differ exactly when the
+/// rungs do.
+fn an_origin_of(rung: ImeOwner) -> CompositionOrigin {
+    match rung {
+        ImeOwner::Rename => CompositionOrigin::Rename(None),
+        ImeOwner::GraphSearch => CompositionOrigin::GraphSearch(None),
+        ImeOwner::GitPrompt => CompositionOrigin::GitPrompt,
+        ImeOwner::Palette => CompositionOrigin::Palette,
+        ImeOwner::SettingsField => CompositionOrigin::Settings(None),
+        ImeOwner::Modal => CompositionOrigin::Modal,
+        ImeOwner::FilesTree => CompositionOrigin::FilesTree(None),
+        ImeOwner::Preview => CompositionOrigin::Preview(None),
+        ImeOwner::Search => CompositionOrigin::Search(None),
+        ImeOwner::Shell => CompositionOrigin::Shell(None),
+    }
 }
 
 /// PIN (user report + ruling, 2026-08-13) — **the caret blinks exactly when
@@ -750,6 +775,7 @@ fn only_a_shell_with_the_keyboard_gets_a_blinking_caret() {
         preview: false,
         menu_or_dialog: false,
         palette: false,
+        settings_field: false,
     }));
 }
 
@@ -876,6 +902,23 @@ fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
         ImeCaretSource::Field,
         "so its candidate list hangs off its own caret"
     );
+    // **And so does a settings field** (T-SETTINGS-FIELDS-IME-POSITION): the dialog is a modal
+    // and a field of it is a text field, and the field wins — before this rung a composition
+    // typed into one was swallowed with the dialog's switches.
+    assert_eq!(
+        ime_owner(KeyboardOwner {
+            settings_field: true,
+            menu_or_dialog: true,
+            ..KeyboardOwner::default()
+        }),
+        ImeOwner::SettingsField,
+        "a settings field is a modal's and a text field, and the field wins"
+    );
+    assert_eq!(
+        ime_caret_source(ImeOwner::SettingsField),
+        ImeCaretSource::Field,
+        "so its candidate list hangs off its own caret"
+    );
     assert_eq!(
         ime_owner(KeyboardOwner {
             rename: true,
@@ -915,6 +958,7 @@ fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
             search: true,
             preview: true,
             palette: true,
+            settings_field: true,
         }),
         ImeOwner::Rename,
         "and the editor is the topmost of all of them"
@@ -967,11 +1011,12 @@ fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
 
     // **The whole of "zero PTY writes", stated as a property.**
     //
-    // Seven bits since the search capsule joined the ladder (§7.1.5d): the
-    // sweep is over every combination there is, so a rung added without a
+    // Nine bits since the palette and the settings field joined the ladder
+    // (the search capsule made it seven, §7.1.5d): the sweep is over every
+    // combination there is, so a rung added without a
     // matching arm in `keyboard_owner_is_a_shell` fails here rather than in
     // a screenshot of a query appearing at somebody's prompt.
-    for bits in 0..256u16 {
+    for bits in 0..512u16 {
         let owner = KeyboardOwner {
             rename: bits & 1 != 0,
             menu_or_dialog: bits & 2 != 0,
@@ -981,6 +1026,7 @@ fn a_composition_goes_where_the_keyboard_is_and_only_the_shell_has_a_pty() {
             git_prompt: bits & 32 != 0,
             search: bits & 64 != 0,
             palette: bits & 128 != 0,
+            settings_field: bits & 256 != 0,
         };
         assert_eq!(
             matches!(ime_owner(owner), ImeOwner::Shell),
@@ -1114,7 +1160,8 @@ fn every_rung_of_the_ime_ladder_says_where_its_caret_comes_from() {
             | ImeOwner::GitPrompt
             | ImeOwner::Preview
             | ImeOwner::Search
-            | ImeOwner::Palette => ImeCaretSource::Field,
+            | ImeOwner::Palette
+            | ImeOwner::SettingsField => ImeCaretSource::Field,
         };
         assert_eq!(
             source, expected,
@@ -1129,10 +1176,10 @@ fn every_rung_of_the_ime_ladder_says_where_its_caret_comes_from() {
         ImeCaretSource::Field,
         "a query composed in the capsule is composed in the capsule"
     );
-    // Seven bits, exactly as the sweep above: every rung the ladder can
+    // Nine bits, exactly as the sweep above: every rung the ladder can
     // reach has to be in the table this test walks, or the table is proving
     // something about a smaller ladder than the one that ships.
-    for bits in 0..256u16 {
+    for bits in 0..512u16 {
         let owner = ime_owner(KeyboardOwner {
             rename: bits & 1 != 0,
             menu_or_dialog: bits & 2 != 0,
@@ -1142,6 +1189,7 @@ fn every_rung_of_the_ime_ladder_says_where_its_caret_comes_from() {
             git_prompt: bits & 32 != 0,
             search: bits & 64 != 0,
             palette: bits & 128 != 0,
+            settings_field: bits & 256 != 0,
         });
         assert!(
             ImeOwner::ALL.contains(&owner),
@@ -1369,7 +1417,7 @@ fn with_the_restore_card_up_ctrl_v_pastes_nothing_into_the_shell() {
     );
     assert!(
         squeezed_body("Runtime", "spend_paste")
-            .contains("self.apply_clipboard_payload(target,payload)"),
+            .contains("self.apply_clipboard_payload(target,sequence,payload)"),
         "the lane's answer is applied where the paste is spent"
     );
     let apply = squeezed_body("Runtime", "apply_clipboard_payload");

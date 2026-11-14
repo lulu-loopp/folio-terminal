@@ -35,6 +35,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Callable;
+use crate::declarations::cfg_predicates;
 use crate::index::{ImplRecord, Index, ItemKind, ItemRecord, ModuleShape, TokenKind};
 
 /// A type, as far as a declaration says.
@@ -536,16 +537,28 @@ pub(crate) struct MethodDecl {
     /// The `impl` block's self type as written there: the type the method is
     /// declared on, which the bare name it is filed under does not say.
     pub(crate) self_ty: Option<Ty>,
+    /// The trait the `impl` block implements, by its bare name (`Glass`, `Owed` for
+    /// `Owed<Id>`); `None` for an inherent method and a trait's own declaration.
+    pub(crate) trait_name: Option<String>,
     pub(crate) params: Vec<Ty>,
     /// The item, when a product build can contain it: what a call resolved
     /// to this declaration reaches.
     pub(crate) callable: Option<Callable>,
 }
 
+/// **One `impl` block's binding of an associated type** — `type Glass = WindowRenderer;` in
+/// `impl Backend for Native`: the trait implemented (by its bare name), the type bound, read in the
+/// block's module with the block's generics in scope, and whether a product build has the block.
+#[derive(Clone, Debug)]
+pub(crate) struct Binding {
+    pub(crate) trait_name: String,
+    pub(crate) ty: Ty,
+    pub(crate) product: bool,
+}
+
 /// One free function of the workspace.
 #[derive(Clone, Debug)]
 pub(crate) struct FnDecl {
-    pub(crate) package: String,
     /// Its package and module, whether or not a product build has it.
     pub(crate) place: Place,
     pub(crate) generics: Vec<String>,
@@ -556,11 +569,15 @@ pub(crate) struct FnDecl {
 }
 
 /// The `use` items written directly in one module: each name brought in,
-/// with the path it was written as, and each glob's path.
+/// with the path it was written as, and each glob's path — of every `use`
+/// item, and again of those a product build can compile (not under
+/// `cfg(test)`; plan row 126).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Imports {
     pub(crate) names: BTreeMap<String, Vec<String>>,
     pub(crate) globs: Vec<Vec<String>>,
+    pub(crate) product_names: BTreeMap<String, Vec<String>>,
+    pub(crate) product_globs: Vec<Vec<String>>,
 }
 
 /// One `impl Deref for X`.
@@ -584,7 +601,8 @@ pub(crate) struct Declarations {
     /// trait's signature is not trusted for that name.
     pub(crate) trait_methods: BTreeSet<String>,
     /// A workspace trait's own method declarations, by trait and method name: what a call on a
-    /// [`Ty::Assoc`] bounded by that trait answers.
+    /// [`Ty::Assoc`] bounded by that trait answers. `callable` is set for a provided method (one
+    /// with a body) a product build has.
     pub(crate) trait_declarations: BTreeMap<(String, String), Vec<MethodDecl>>,
     /// The traits each associated type name is bounded by, over every workspace trait that
     /// declares one (`type Glass: Glass<..>;` gives `Glass` → `{Glass}`).
@@ -596,6 +614,13 @@ pub(crate) struct Declarations {
     /// resolved to every candidate's declaration, and only agreeing ones answer. `bt-app` declares
     /// each name once (the window seam's `Backend`), so nothing is merged there today.
     pub(crate) associated_bounds: BTreeMap<String, BTreeSet<String>>,
+    /// The traits that declare each associated type name, bounded or not (`Device` →
+    /// `{Backend, Glass}`): whose impls' bindings of the name a call through it reaches.
+    pub(crate) associated_declarers: BTreeMap<String, BTreeSet<String>>,
+    /// Every `impl` block's bindings of associated types, by the associated type's name (T-CENSUS-
+    /// FOLLOWS-ASSOCIATED-TYPE-CALLS): what a call through `B::Glass` reaches is the bound trait's
+    /// method on the type the product impls bind `Glass` to.
+    pub(crate) associated_bindings: BTreeMap<String, Vec<Binding>>,
     /// Crate (library target) names, mapped to their packages.
     pub(crate) crates: BTreeMap<String, String>,
     /// Every module's `use` items, by package and module path.
@@ -647,6 +672,18 @@ fn self_arguments(written: &Written, self_ty: &syn::Type) -> Vec<Ty> {
     }
 }
 
+/// A trait's name as an item or a block spells it (`Owed<Id>`, `crate::seam::Glass`), bare:
+/// `Owed`, `Glass`.
+pub(crate) fn bare_trait_name(spelled: &str) -> String {
+    let unargued = spelled.split('<').next().unwrap_or(spelled);
+    unargued
+        .rsplit("::")
+        .next()
+        .unwrap_or(unargued)
+        .trim()
+        .to_owned()
+}
+
 /// An `impl` block's header, parsed: the block with its body emptied.
 pub(crate) fn impl_header(index: &Index, block: &ImplRecord) -> Option<syn::ItemImpl> {
     let head = &index.union()[block.whole().start()..block.body().start()];
@@ -696,6 +733,7 @@ impl Declarations {
 
     fn read_one(&mut self, index: &Index, crates: &BTreeSet<String>) {
         self.read_associated_bounds(index);
+        self.read_bindings(index, crates);
         self.read_derefs(index, crates);
         self.read_aliases(index, crates);
         self.read_imports(index);
@@ -730,6 +768,10 @@ impl Declarations {
                 let syn::TraitItem::Type(associated) = member else {
                     continue;
                 };
+                self.associated_declarers
+                    .entry(associated.ident.to_string())
+                    .or_default()
+                    .insert(declaration.name().to_owned());
                 for bound in &associated.bounds {
                     if let syn::TypeParamBound::Trait(bound) = bound
                         && let Some(last) = bound.path.segments.last()
@@ -739,6 +781,42 @@ impl Declarations {
                             .or_default()
                             .insert(last.ident.to_string());
                     }
+                }
+            }
+        }
+    }
+
+    /// Every trait `impl` block's `type X = T;` items, each read in the block's module with the
+    /// block's generics in scope (a binding to one of them is [`Ty::Param`]).
+    fn read_bindings(&mut self, index: &Index, crates: &BTreeSet<String>) {
+        for block in index.impls() {
+            let Some(trait_name) = block.trait_path().and_then(<[String]>::last) else {
+                continue;
+            };
+            let Ok(parsed) = syn::parse_str::<syn::ItemImpl>(index.text(block.whole())) else {
+                self.unparsed
+                    .push(format!("impl {trait_name} for {}", block.type_owner()));
+                continue;
+            };
+            let package = package_at(index, block.whole().start());
+            let module = module_at(index, block.whole().start());
+            let mut written = self.written(package, module, crates);
+            written.enter(&parsed.generics);
+            let product = block.declared.iter().any(|path| {
+                path.compilation
+                    .and(block.variant().compilation)
+                    .permits_product()
+            });
+            for member in &parsed.items {
+                if let syn::ImplItem::Type(binding) = member {
+                    self.associated_bindings
+                        .entry(binding.ident.to_string())
+                        .or_default()
+                        .push(Binding {
+                            trait_name: trait_name.clone(),
+                            ty: written.ty(&binding.ty),
+                            product,
+                        });
                 }
             }
         }
@@ -942,6 +1020,11 @@ impl Declarations {
                     syn::ReturnType::Type(_, ty) => written.ty(ty),
                 };
                 let params = typed_inputs(&written, &signature);
+                // A provided method (one with a body) is what a call reaches on a type whose
+                // impl does not write it.
+                let callable = item
+                    .body()
+                    .and_then(|_| Callable::of(index, item, &package));
                 self.trait_declarations
                     .entry((trait_name.to_owned(), item.name().to_owned()))
                     .or_default()
@@ -952,8 +1035,9 @@ impl Declarations {
                         impl_params: Vec::new(),
                         self_args: Vec::new(),
                         self_ty: None,
+                        trait_name: None,
                         params,
-                        callable: None,
+                        callable,
                     });
             }
             return;
@@ -988,6 +1072,7 @@ impl Declarations {
                 impl_params,
                 self_args,
                 self_ty,
+                trait_name: item.trait_name().map(bare_trait_name),
                 params,
                 callable,
             });
@@ -1018,7 +1103,6 @@ impl Declarations {
             .entry(item.name().to_owned())
             .or_default()
             .push(FnDecl {
-                package,
                 place,
                 generics: generic_names(&signature.generics),
                 params,
@@ -1032,9 +1116,13 @@ impl Declarations {
     fn read_imports(&mut self, index: &Index) {
         for module in index.modules() {
             let text = index.text(module.span());
+            let source = match module.body() {
+                ModuleShape::WholeFile => text.to_owned(),
+                ModuleShape::Inline => format!("mod m {text}"),
+            };
             let items = match module.body() {
-                ModuleShape::WholeFile => syn::parse_file(text).map(|file| file.items),
-                ModuleShape::Inline => syn::parse_str::<syn::ItemMod>(&format!("mod m {text}"))
+                ModuleShape::WholeFile => syn::parse_file(&source).map(|file| file.items),
+                ModuleShape::Inline => syn::parse_str::<syn::ItemMod>(&source)
                     .map(|parsed| parsed.content.map(|(_, items)| items).unwrap_or_default()),
             };
             let Ok(items) = items else {
@@ -1047,7 +1135,14 @@ impl Declarations {
             let mut imports = Imports::default();
             for item in &items {
                 if let syn::Item::Use(used) = item {
-                    flatten_use(&used.tree, &mut Vec::new(), &mut imports);
+                    let mut one = Imports::default();
+                    flatten_use(&used.tree, &mut Vec::new(), &mut one);
+                    if cfg_predicates(&used.attrs, &source).1.permits_product() {
+                        imports.product_names.extend(one.names.clone());
+                        imports.product_globs.extend(one.globs.clone());
+                    }
+                    imports.names.extend(one.names);
+                    imports.globs.extend(one.globs);
                 }
             }
             let package = package_at(index, module.span().start());
@@ -1058,6 +1153,8 @@ impl Declarations {
                     .or_default();
                 entry.names.extend(imports.names.clone());
                 entry.globs.extend(imports.globs.clone());
+                entry.product_names.extend(imports.product_names.clone());
+                entry.product_globs.extend(imports.product_globs.clone());
             }
         }
     }
@@ -1065,7 +1162,7 @@ impl Declarations {
 
 /// A `use` tree, flattened into the names it brings in and the globs it
 /// opens; `prefix` is the path written before this subtree.
-fn flatten_use(tree: &syn::UseTree, prefix: &mut Vec<String>, imports: &mut Imports) {
+pub(crate) fn flatten_use(tree: &syn::UseTree, prefix: &mut Vec<String>, imports: &mut Imports) {
     match tree {
         syn::UseTree::Path(path) => {
             prefix.push(path.ident.to_string());
@@ -1266,6 +1363,9 @@ pub(crate) struct Callees {
     /// resolve: the walk lists the site with this reason unless the path's
     /// free functions answer it instead (a module path is spelled the same).
     pub(crate) unresolved: Option<String>,
+    /// Set with `refused` when every product declaration of the name is another type's of the
+    /// receiver's name: the receiver's type declares no such method, and a deref may reach one.
+    pub(crate) others_only: bool,
 }
 
 impl Callees {
@@ -1279,6 +1379,15 @@ impl Callees {
     pub(crate) fn refused(why: String) -> Self {
         Self {
             refused: Some(why),
+            ..Self::default()
+        }
+    }
+
+    /// Refused because only other types of the receiver's name declare the method.
+    pub(crate) fn others_only(why: String) -> Self {
+        Self {
+            refused: Some(why),
+            others_only: true,
             ..Self::default()
         }
     }
@@ -1339,6 +1448,93 @@ pub(crate) fn std_named(name: &str, args: Vec<Ty>) -> Ty {
 
 pub(crate) fn option_of(inner: Ty) -> Ty {
     std_named("Option", vec![inner])
+}
+
+/// `Result<ok, err>`, the standard enum.
+pub(crate) fn result_of(ok: Ty, err: Ty) -> Ty {
+    std_named("Result", vec![ok, err])
+}
+
+/// **A type outside the workspace, by its full path** (`std::io::Error`, `anyhow::Error`): what
+/// [`RESULT_ALIASES`] name as error types. Written in no module, so the call graph places it at
+/// that path and the census reads it as an outside type.
+pub(crate) fn foreign_named(krate: &str, prefix: &[&str], name: &str) -> Ty {
+    Ty::Named(Named {
+        name: name.to_owned(),
+        krate: Some(krate.to_owned()),
+        prefix: prefix.iter().map(|segment| (*segment).to_owned()).collect(),
+        args: Vec::new(),
+        home: String::new(),
+        module: String::new(),
+    })
+}
+
+/// **The foreign `Result` aliases the analyser reads, on a fixed table** (plan row 101, ruling
+/// R2): each alias's full path, how many type arguments it may be written with, and the standard
+/// `Result` it names. Every foreign `Result` alias the walked packages write is here; any other
+/// type is not a `Result` to the rules (never one by its bare name).
+///
+/// | Alias | Arguments | Names |
+/// |---|---|---|
+/// | `std::io::Result<T>` | 1 | `Result<T, std::io::Error>` |
+/// | `std::fmt::Result` (`core::fmt::Result`) | 0 | `Result<(), std::fmt::Error>` |
+/// | `std::thread::Result<T>` | 1 | `Result<T, Box<dyn Any + Send>>` (the payload untyped) |
+/// | `anyhow::Result<T>`, `anyhow::Result<T, E>` | 1, 2 | `Result<T, anyhow::Error>`, `Result<T, E>` |
+/// | `windows::core::Result<T>` | 1 | `Result<T, windows::core::Error>` |
+///
+/// Beside the table, anyhow's `Context::context`/`with_context` are read **by method name** on
+/// every standard `Option`/`Result` (`std_method`), whether or not the package depends on anyhow:
+/// a held limit, true while anyhow is the one dependency whose trait gives them these names
+/// (`eyre`'s or `snafu`'s would be read as anyhow's). A first-party trait's method of the name is
+/// asked first and wins.
+pub(crate) const RESULT_ALIASES: [&[&str]; 6] = [
+    &["std", "io", "Result"],
+    &["std", "fmt", "Result"],
+    &["core", "fmt", "Result"],
+    &["std", "thread", "Result"],
+    &["anyhow", "Result"],
+    &["windows", "core", "Result"],
+];
+
+/// **The dependency trait a listed method of a standard type comes from**, when it is not the
+/// type's own: anyhow's `Context` for `context`/`with_context` on an `Option` or a `Result` (read
+/// by method name, the held limit [`RESULT_ALIASES`] states). The call graph labels the method's
+/// foreign target with it.
+pub(crate) fn dependency_trait_of(kind: Std, name: &str) -> Option<[&'static str; 2]> {
+    match (kind, name) {
+        (Std::Option | Std::Result, "context" | "with_context") => Some(["anyhow", "Context"]),
+        _ => None,
+    }
+}
+
+/// What the [`RESULT_ALIASES`] row at `path` names with `args`; `None` for a path off the table
+/// or a number of arguments the alias does not take.
+pub(crate) fn result_alias<S: AsRef<str>>(path: &[S], args: &[Ty]) -> Option<Ty> {
+    let path: Vec<&str> = path.iter().map(AsRef::as_ref).collect();
+    if !RESULT_ALIASES.contains(&path.as_slice()) {
+        return None;
+    }
+    let ok = || args.first().cloned();
+    Some(match (path.as_slice(), args.len()) {
+        (["std", "io", "Result"], 1) => result_of(ok()?, foreign_named("std", &["io"], "Error")),
+        (["std" | "core", "fmt", "Result"], 0) => result_of(
+            Ty::Tuple(Vec::new()),
+            foreign_named("std", &["fmt"], "Error"),
+        ),
+        (["std", "thread", "Result"], 1) => result_of(
+            ok()?,
+            std_named(
+                "Box",
+                vec![Ty::unknown("a panic's payload, `dyn Any + Send`")],
+            ),
+        ),
+        (["anyhow", "Result"], 1) => result_of(ok()?, foreign_named("anyhow", &[], "Error")),
+        (["anyhow", "Result"], 2) => result_of(ok()?, args.get(1)?.clone()),
+        (["windows", "core", "Result"], 1) => {
+            result_of(ok()?, foreign_named("windows", &["core"], "Error"))
+        }
+        _ => return None,
+    })
 }
 
 fn unknown_ret(name: &str) -> Ty {
@@ -1557,10 +1753,20 @@ pub(crate) fn std_method(kind: Std, args: &[Ty], name: &str) -> Option<Method> {
                         other => option_of(other),
                     },
                     "filter" | "inspect" | "or" | "or_else" | "xor" | "clone" => option_of(t),
+                    // The adapters that keep the value (plan row 101): a `Result` of it.
+                    "ok_or" | "ok_or_else" => {
+                        result_of(t, Ty::unknown(format!("the error `{name}` makes")))
+                    }
                     _ => unknown_ret(name),
                 };
                 with_closure(Class::Read, ret, closure)
             }
+            // anyhow's `Context`, the one dependency trait giving an `Option` these (plan row
+            // 101): an `anyhow::Result` of the value.
+            "context" | "with_context" => method(
+                Class::Read,
+                result_of(t, foreign_named("anyhow", &[], "Error")),
+            ),
             _ => return None,
         },
         Std::Result => match name {
@@ -1574,10 +1780,22 @@ pub(crate) fn std_method(kind: Std, args: &[Ty], name: &str) -> Option<Method> {
             | "map_or_else" | "into_iter" | "iter" | "eq" | "ne" => {
                 let ret = match name {
                     "unwrap_or" | "unwrap_or_default" | "unwrap_or_else" => t,
+                    // The adapters that keep the value (plan row 101): a `Result` of it, with
+                    // the error kept where the adapter keeps it.
+                    "inspect" | "inspect_err" => result_of(t, arg(args, 1)),
+                    "map_err" | "or_else" => {
+                        result_of(t, Ty::unknown(format!("the error `{name}` makes")))
+                    }
                     _ => unknown_ret(name),
                 };
                 method(Class::Read, ret)
             }
+            // anyhow's `Context`, the one dependency trait giving a `Result` these (plan row
+            // 101): an `anyhow::Result` of the value.
+            "context" | "with_context" => method(
+                Class::Read,
+                result_of(t, foreign_named("anyhow", &[], "Error")),
+            ),
             _ => return None,
         },
         Std::String | Std::Str => match name {

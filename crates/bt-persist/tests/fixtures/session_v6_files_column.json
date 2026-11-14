@@ -23,7 +23,7 @@
         "children": [
           {
             "kind": "files",
-            "root": "D:\\Developer\\folio-terminal",
+            "root": "D:\\Developer\\lunar-workshop",
             "open": [
               "crates"
             ],
@@ -33,7 +33,7 @@
           {
             "kind": "term",
             "profile_id": "pwsh",
-            "cwd": "D:\\Developer\\folio-terminal",
+            "cwd": "D:\\Developer\\lunar-workshop",
             "manual_name": null
           }
         ]

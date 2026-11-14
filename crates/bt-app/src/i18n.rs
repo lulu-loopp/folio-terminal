@@ -366,6 +366,19 @@ text_entries! {
     /// Folio's own files went and something it never wrote stood beside them, so
     /// that something is still there (audit 3, E-1).
     CleanupNotOurs,
+    /// A recorded macOS update home beside a gone app, left because it holds an update that is
+    /// not finished (0.4.10 plan row 68e).
+    CleanupUpdateHomeInFlight,
+    /// A recorded macOS update home whose app could not be checked — on a volume that is not
+    /// there, or a path the system will not say about — left (row 68e, review N8).
+    CleanupUpdateHomeUnchecked,
+    /// A recorded macOS update home whose `lock` or `admission` another copy holds, left (row
+    /// 68e, review N8).
+    CleanupUpdateHomeInUse,
+    /// The account's sign-in entry naming a Folio whose program could not be checked — on a
+    /// volume that is not there, or a path the system will not say about — left (row 22a, review
+    /// N3: row 68e's rule, a line says only what is known).
+    CleanupSignInUnchecked,
     CleanupRefused,
     CleanupRoot,
     CleanupRunning,
@@ -410,6 +423,10 @@ text_entries! {
     CleanupMarkClipboard,
     CleanupMarkPanicLog,
     CleanupMarkRemoverHome,
+    CleanupMarkRestartRegistration,
+    CleanupMarkServicesEntry,
+    CleanupMarkNotificationPermission,
+    CleanupMarkUpdateJournal,
     CleanupKindPerCopy,
     CleanupKindPerAccount,
     CleanupKindData,
@@ -449,6 +466,11 @@ text_entries! {
     /// The clipboard held a picture and the file Folio writes for it could not
     /// be written (§7.61).
     PasteClipboardPicture,
+    /// The clipboard offered a picture that did not render beside a promise that could not be
+    /// pasted either (plan row 81).
+    PasteClipboardPictureUnread,
+    /// The files a clipboard promise offered are past what one paste writes (plan row 81).
+    PasteClipboardPromiseTooLarge,
     PasteProfileOverride,
 
     // ── window chrome ──────────────────────────────────────────────────────
@@ -571,6 +593,9 @@ text_entries! {
     /// 2026-09-07): the row's three answers are three places **in that menu**, so
     /// the surface is still what the title names and the answers name the places.
     RowContextMenu,
+    /// **Whether Folio starts when you sign in** (0.4.10 plan row 22a, R13): the switch whose
+    /// answer is the account's `Run\Folio` entry. On Windows only until row 22b.
+    RowStartAtSignIn,
     /// The daily-check switch directly under About > Version.
     RowAutoCheck,
     RowTabLayout,
@@ -591,6 +616,9 @@ text_entries! {
     RowFontSize,
 
     DescTheme,
+    /// The Theme row's sentence while a Windows contrast theme is on (T-HIGH-CONTRAST,
+    /// DESIGN §7.1.6): what is in force, and when the row's own choice takes over again.
+    DescThemeHighContrast,
     DescCursor,
     DescFormulas,
     DescInlineFormulas,
@@ -625,6 +653,15 @@ text_entries! {
     /// repairs this on its own; the sentence exists for the seconds before it
     /// has, and for the machine where the repair could not run.
     DescExplorerFirstPageElsewhere,
+    /// **What the sign-in switch does** (row 22a) — its line while the entry is this copy's or
+    /// there is none.
+    DescStartAtSignIn,
+    /// And while the entry starts another copy of Folio, in another folder.
+    DescStartAtSignInElsewhere,
+    /// And while Windows' own Startup-apps switch has the entry off (R13: the fact, no advice).
+    DescStartAtSignInTurnedOff,
+    /// And while another program's startup entry has the name.
+    DescStartAtSignInNotOurs,
     /// **And when this run of Folio has just registered the package** — the one
     /// line of the five that is advice rather than a fact about the machine.
     ///
@@ -709,6 +746,22 @@ text_entries! {
     /// worth making: a path invented here would be a menu entry that launches
     /// whatever happens to be at it.
     ContextMenuNoExecutable,
+    /// The card raised when the sign-in switch's On has written the entry (row 22a).
+    SignInOnToast,
+    /// And when its Off has taken the entry away.
+    SignInOffToast,
+    /// And when its On pointed another copy's entry at this copy (review N9).
+    SignInTookOverToast,
+    /// Why On wrote nothing: this copy's path is longer than a `Run` value runs.
+    SignInPathTooLong,
+    /// Why On wrote nothing: another program's startup entry has the name.
+    SignInEntryNotOurs,
+    /// Why a press changed nothing: this copy's program is not one an entry may start — a path
+    /// the system would not name, or one macOS has put in quarantine (review N2: the switch's own
+    /// sentence, never the hooks').
+    SignInProgramNotStartable,
+    /// What a write said when the entry read back is not the one written.
+    SignInReadBackDiffers,
 
     // ── the first page of Windows 11's menu (§7.4a) ────────────────────────
     /// **What Explorer draws on the first page**, asked for per call by
@@ -842,6 +895,13 @@ text_entries! {
     /// (T-VIDEO-ENGINE-NO-DURATION). The surface stops showing a player that
     /// will never start and prints this instead.
     VideoDidNotLoad,
+    /// **What a surface says when the video player did not come up on this
+    /// machine** (plan row 189): an engine not built within its open budget
+    /// even after one more, an engine thread that could not be started, or a
+    /// platform, device or engine factory that refused. It says nothing about
+    /// the file, because nothing was learned about it; until row 189 these
+    /// printed [`Self::VideoFormatCannotPlay`].
+    VideoPlayerDidNotStart,
     /// **What a video's bar says in place of its scrubber** when the recording
     /// has loaded and declares no length — a live stream, or a container
     /// written without a duration (T-VIDEO-ENGINE-NO-DURATION). There is
@@ -1096,6 +1156,9 @@ text_entries! {
     RowDarkScheme,
     DescLightScheme,
     DescDarkScheme,
+    /// The Light scheme and Dark scheme rows' sentence while a Windows contrast theme is on
+    /// (T-HIGH-CONTRAST), as [`Self::DescThemeHighContrast`] is the Theme row's.
+    DescSchemeHighContrast,
     /// The title of the card raised for a scheme file that would not parse. Its
     /// body names the file and the reason and is therefore a value-carrying
     /// string — see [`scheme_file_skipped`].
@@ -2143,6 +2206,10 @@ text_entries! {
     /// screen), and **what does not change** — the marks inside the window,
     /// which are not this row's to switch off.
     DescTurnEndNotifications,
+    /// `Agents ▸ Resume agents after restart` — the row (0.4.9 plan row 195).
+    RowResumeAgents,
+    /// Its sentence: what comes back, and when.
+    DescResumeAgents,
     /// The body of a turn-end interruption from a source that wrote no sentence
     /// of its own. States the fact; names nothing to act on.
     ToastTurnFinished,
@@ -2679,17 +2746,20 @@ text_entries! {
     CategoryAgents,
     /// `Agents` — the word in the rail.
     NavAgents,
-    /// `Agents ▸ Codex notify` — the row.
-    RowCodexNotify,
+    /// `Agents ▸ Codex hooks` — the row (its entry is a hook from codex 0.148, the
+    /// `notify` line below; 0.4.10 plan row 69c).
+    RowCodexHooks,
     /// Its sentence. Two facts and a boundary, on `DescClaudeHooks`'s shape: what
     /// is written and where, and then **which** of the two things an agent can
     /// say this one carries. The third clause earns its place — the row beside it
     /// arranges for a pane to say *it is waiting for you*, and a reader who
     /// assumed this did the same would install it, watch an approval box sit
     /// there with nothing on the tab, and conclude the switch was broken.
-    DescCodexNotify,
+    DescCodexHooks,
+    /// The `notify` line written, on a codex below 0.148.
     CodexNotifyAddedToast,
-    CodexNotifyRemovedToast,
+    /// Folio's entry taken out — the hook, an earlier Folio's `notify` line, or both.
+    CodexEntryRemovedToast,
     /// The refusal's own half of the sentence; the reason follows it, in the
     /// installer's words.
     CodexNotifyFailedToast,
@@ -3052,6 +3122,10 @@ text_entries! {
     /// A one-click edit of `$PROFILE` refused because the file is not what the check, or the
     /// write being undone, saw (0.4.8 G7).
     ShellProfileChangedElsewhere,
+    /// Enable via `$PROFILE` refused, and the start's carry of an older Folio line left, because
+    /// the data folder is not `%APPDATA%\Folio` (or its previous name): no guarded line names the
+    /// script there (0.4.10 plan row 68c, R3).
+    ShellProfileOutsideAppData,
     ShellProfileNothing,
     /// A change asked of a worker the thread door would not start — `$PROFILE`'s Enable, Undo or
     /// removal, the Explorer first-page switch — so nothing was changed
@@ -3163,6 +3237,9 @@ text_entries! {
     ShellDidNotStart,
     /// The face kept at the bottom of a pane whose shell ended before it became usable.
     ShellBirthDeath,
+    /// The face kept at the bottom of a pane whose shell the system ended with the session
+    /// (plan row 191).
+    ShellEndedBySystem,
     /// About > Version: no newer release is known.
     VersionUpToDate,
     /// About > Version controls and inline links.
@@ -3259,6 +3336,82 @@ text_entries! {
     UpdateFailedUndone,
     /// Its detail; `{version}` is the version whose changes were not kept (0.4.8 E5).
     UpdateCardUndone,
+    // ── agent hooks said and repaired at start (0.4.10 plan row 67b) ─────────
+    //
+    // D3: the refusals of the three agent writers, in the register of a settings row's line,
+    // because each is now also what the row says.
+    /// A key named twice where Folio's hooks go (`attention_hooks::mapped`).
+    AgentHooksDuplicateKey,
+    /// The write-time self-check's refusal, every writer's (0.4.10 plan row 67a).
+    AgentHooksSpliceRefused,
+    /// A file none of the three writers can read; also the row's line over one.
+    AgentHooksUnreadable,
+    /// The dated copy of the person's own file could not be kept (`Landing::NoBackup`).
+    AgentConfigNoBackup,
+    /// Codex's one `notify` key runs somebody else's program.
+    AgentCodexNotifyTaken,
+    /// A hook file of somebody else's stands under Folio's name in Copilot's folder.
+    AgentCopilotFileTaken,
+    /// The row's line over hooks a living other copy runs (R5); `{path}` is that copy's program.
+    AgentHooksOtherCopy,
+    /// The row's line over an entry that names a copy of Folio in a shape this build cannot read.
+    AgentHooksUnclassified,
+    /// The notice after the start-time scan pointed hooks of a gone copy at this one (R8).
+    AgentHooksRepairedClaude,
+    AgentHooksRepairedCodex,
+    AgentHooksRepairedCopilot,
+    /// The resume row's line while resume is on and an agent's hooks are not this copy's;
+    /// `{agents}` is the list.
+    DescResumeAgentsNeedsHooks,
+
+    // ── codex's Stop hook (0.4.10 plan row 69) ─────────────────────────────
+    //
+    // One contiguous block at the end, per this table's standing rule. **Three
+    // refusals**, each the reason half of `CodexNotifyFailedToast`'s sentence,
+    // said where `attention_codex::apply_resolved` writes nothing.
+    /// `config.toml` already declares hook events, and codex warns on every start
+    /// when both it and `hooks.json` do (R15).
+    CodexHooksInToml,
+    /// `hooks.json`, with Folio's hook in it, is a file codex's own `HooksFile`
+    /// type refuses — a byte-order mark, a top-level key other than `description`
+    /// and `hooks`, a key named twice, a handler or a value of a type codex does not
+    /// take — and codex reads none of such a file, so the hook would never run.
+    CodexHooksFileIgnored,
+    /// Windows PowerShell 5.1 reads Folio's path as a wildcard pattern and cannot
+    /// parse it (a `[` with no `]` after it, among others), so the hook would
+    /// fail on every turn (re-review R1).
+    CodexHookPathBrackets,
+
+    // ── codex's entry by its version, and its rows (0.4.10 plan row 69c) ──
+    //
+    // The Chinese column is a draft for the Chinese pass (R11).
+    /// `config.toml` cannot be read — not UTF-8, not TOML, or a `notify` that is
+    /// not a list of words. Named, because this row has two files.
+    CodexConfigUnreadable,
+    /// The hook written: codex asks once to trust it (R13).
+    CodexHookAddedToast,
+    /// A removal that took Folio's hook out of `hooks.json` and left `config.toml`
+    /// as it was — a file it could not read or will not edit (`LeftUnread`,
+    /// re-review R4); the reason follows it.
+    CodexHookRemovedConfigLeft,
+    /// The same, when `hooks.json` held no hook of Folio's.
+    CodexNoHookConfigLeft,
+    /// The repair notice when the hook was pointed here (R8): codex asks again,
+    /// because the command changed.
+    AgentHooksRepairedCodexHook,
+    /// The row's line over a key named twice where Folio's hooks go: the scan wrote nothing, so it
+    /// says what the file is, not what a write did (review N7; the press keeps
+    /// `AgentHooksDuplicateKey`).
+    AgentHooksDuplicateKeyRow,
+    /// The row's line over entries of this copy's that no install put where they stand (ruling
+    /// N1); `{events}` is the list of their events.
+    AgentHooksPlaced,
+    /// The row's line over a due repair held while an update is on trial (review N4).
+    AgentHooksRepairHeld,
+    /// The row's line over a due repair the writer refused (review N4); `{reason}` is its sentence.
+    AgentHooksRepairRefused,
+    /// A press's refusal while the start-time repair of the same file is writing (review N2).
+    AgentHooksBeingRepaired,
 }
 
 impl Text {
@@ -3338,6 +3491,16 @@ impl Text {
                 lang,
                 "The clipboard picture could not be saved. Copy again and retry.",
                 "剪贴板图片无法保存。重新复制后再试。",
+            ),
+            Self::PasteClipboardPictureUnread => pick(
+                lang,
+                "The clipboard picture could not be read. Copy again and retry.",
+                "剪贴板图片无法读取。重新复制后再试。",
+            ),
+            Self::PasteClipboardPromiseTooLarge => pick(
+                lang,
+                "The copied files are too many or too large to paste. Save them first.",
+                "复制的文件太多或太大，无法粘贴。请先保存。",
             ),
             Self::PasteProfileOverride => pick(
                 lang,
@@ -3461,6 +3624,11 @@ impl Text {
             Self::RowRepairRowBreaks => pick(lang, "Repair row breaks", "修复公式换行"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
             Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
+            Self::RowStartAtSignIn => pick(
+                lang,
+                "Start at sign-in",
+                "Start at sign-in", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签页布局"),
             Self::RowSidebar => pick(lang, "Sidebar", "侧栏"),
             Self::RowSplitDirection => pick(lang, "Split direction", "拆分方向"),
@@ -3479,6 +3647,11 @@ impl Text {
                 lang,
                 "Light, dark, or follow your system setting",
                 "浅色、深色，或跟随系统设置",
+            ),
+            Self::DescThemeHighContrast => pick(
+                lang,
+                "A Windows contrast theme is in use. Your choice applies once it is off.",
+                "正在使用 Windows 对比度主题。关闭后，此处的选择生效。",
             ),
             Self::DescCursor => pick(
                 lang,
@@ -3555,6 +3728,28 @@ impl Text {
                 lang,
                 "That entry points at another folder. Folio takes the entry back next launch.",
                 "该菜单项指向另一个文件夹。Folio 下次启动时将其改回。",
+            ),
+            Self::DescStartAtSignIn => pick(
+                lang,
+                "Starts Folio when you sign in to Windows.",
+                "Starts Folio when you sign in to Windows.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::DescStartAtSignInElsewhere => pick(
+                lang,
+                "Starts the copy of Folio in another folder when you sign in.",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "Starts the copy of Folio in another folder when you sign in.",
+            ),
+            Self::DescStartAtSignInTurnedOff => pick(
+                lang,
+                "Turned off in Startup apps.",
+                "Turned off in Startup apps.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::DescStartAtSignInNotOurs => pick(
+                lang,
+                "Another program's startup entry is named Folio, and it is left as it is.",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "Another program's startup entry is named Folio, and it is left as it is.",
             ),
             // **Advice, and the only line here that is.** Explorer was told the
             // moment the package was registered; what it does with that is not
@@ -3643,6 +3838,11 @@ impl Text {
                 "深色窗口使用的配色。自定义配色文件放在 %APPDATA%\\Folio\\schemes。",
                 "The same for a dark window. Your own schemes go in ~/Library/Application Support/Folio/schemes.",
                 "深色窗口使用的配色。自定义配色文件放在 ~/Library/Application Support/Folio/schemes。",
+            ),
+            Self::DescSchemeHighContrast => pick(
+                lang,
+                "A Windows contrast theme is in use. This scheme applies once it is off.",
+                "正在使用 Windows 对比度主题。关闭后，此配色生效。",
             ),
             Self::SchemeFileSkipped => pick(lang, "Colour scheme skipped", "配色文件已跳过"),
 
@@ -3750,6 +3950,44 @@ impl Text {
                 "Folio could not work out where folio.exe is",
                 "Windows 没有说出 folio.exe 的位置",
             ),
+            Self::SignInOnToast => pick(
+                lang,
+                "Folio starts at sign-in.",
+                "Folio starts at sign-in.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::SignInOffToast => pick(
+                lang,
+                "Folio no longer starts at sign-in.",
+                "Folio no longer starts at sign-in.", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::SignInTookOverToast => pick(
+                lang,
+                "Folio now starts this copy at sign-in instead of the copy in another folder.",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "Folio now starts this copy at sign-in instead of the copy in another folder.",
+            ),
+            Self::SignInPathTooLong => pick(
+                lang,
+                "the path to folio.exe is longer than a startup entry holds",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "the path to folio.exe is longer than a startup entry holds",
+            ),
+            Self::SignInEntryNotOurs => pick(
+                lang,
+                "another program's startup entry is named Folio",
+                "another program's startup entry is named Folio", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
+            Self::SignInProgramNotStartable => pick(
+                lang,
+                "this copy of Folio is not in a place that can be started at sign-in",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "this copy of Folio is not in a place that can be started at sign-in",
+            ),
+            Self::SignInReadBackDiffers => pick(
+                lang,
+                "the entry read back is not the one written",
+                "the entry read back is not the one written", // zh: pending T-START-AT-LOGON-SWITCH
+            ),
 
             // ── the first page of Windows 11's menu (§7.4a) ────────────────
             //
@@ -3817,6 +4055,9 @@ impl Text {
                 "This video did not finish loading",
                 "此视频未能加载完成",
             ),
+            Self::VideoPlayerDidNotStart => {
+                pick(lang, "The video player did not start", "视频播放器未启动")
+            }
             Self::VideoNoLength => pick(lang, "No length", "无时长"),
             Self::PreviewFlipToRendered => pick(lang, "View rendered", "查看渲染结果"),
             Self::PreviewFlipToPage => pick(lang, "View page", "查看页面"),
@@ -5184,6 +5425,12 @@ impl Text {
                 "Bounces the Dock icon when an agent finishes a turn in a window out of sight. Minimised windows get a desktop message.",
                 "agent 回合结束而窗口不可见时，跳动程序坞图标。窗口最小化时改为发送桌面通知。",
             ),
+            Self::RowResumeAgents => pick(lang, "Resume agents after restart", "重启后恢复 agent"),
+            Self::DescResumeAgents => pick(
+                lang,
+                "When Folio reopens, panes running Claude Code or Codex resume their sessions with their launch arguments.",
+                "Folio 重新打开时，运行过 Claude Code 或 Codex 的窗格按原启动参数恢复各自的会话。",
+            ),
             Self::ToastTurnFinished => pick(lang, "Turn finished", "回合结束"),
             Self::ToastWaitingForYou => pick(lang, "Waiting for you", "正在等你回答"),
             Self::NotifyRefusedTitle => {
@@ -5355,7 +5602,7 @@ impl Text {
             Self::CleanupMarkProfiles => pick(lang, "PowerShell profiles", "PowerShell 配置文件"),
             Self::CleanupMarkPsReadLine => pick(lang, "PSReadLine module", "PSReadLine 模块"),
             Self::CleanupMarkClaude => pick(lang, "Claude Code hooks", "Claude Code 钩子"),
-            Self::CleanupMarkCodex => pick(lang, "Codex notify", "Codex 通知"),
+            Self::CleanupMarkCodex => pick(lang, "Codex hooks", "Codex 通知"),
             Self::CleanupMarkCopilot => pick(lang, "Copilot hooks", "Copilot 钩子"),
             Self::CleanupMarkExplorer => pick(lang, "Explorer registrations", "资源管理器注册"),
             Self::CleanupMarkExplorerPackage => {
@@ -5409,6 +5656,12 @@ impl Text {
             Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
             Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
             Self::CleanupMarkRemoverHome => pick(lang, "Uninstaller staging", "卸载程序暂存"),
+            Self::CleanupMarkRestartRegistration => pick(lang, "Restart registration", "重启注册"),
+            Self::CleanupMarkServicesEntry => pick(lang, "Services menu entry", "服务菜单项"),
+            Self::CleanupMarkNotificationPermission => {
+                pick(lang, "Notification permission", "通知权限")
+            }
+            Self::CleanupMarkUpdateJournal => pick(lang, "Update journal", "更新事务记录"),
             Self::CleanupKindPerCopy => pick(lang, "per-copy", "按副本"),
             Self::CleanupKindPerAccount => pick(lang, "per-account", "按账户"),
             Self::CleanupKindData => pick(lang, "data", "数据"),
@@ -5472,6 +5725,27 @@ impl Text {
                 lang,
                 "left (not Folio's files):",
                 "已保留（非 Folio 的文件）：",
+            ),
+            Self::CleanupUpdateHomeInFlight => pick(
+                lang,
+                "left (an update is unfinished)",
+                "已保留（更新尚未完成）",
+            ),
+            Self::CleanupUpdateHomeUnchecked => pick(
+                lang,
+                "left (its app could not be checked)",
+                "已保留（无法检查它所属的应用）",
+            ),
+            Self::CleanupUpdateHomeInUse => pick(
+                lang,
+                "left (another copy is using it)",
+                "已保留（另一份 Folio 正在使用）",
+            ),
+            Self::CleanupSignInUnchecked => pick(
+                lang,
+                "left (its program could not be checked)",
+                // zh: pending T-START-AT-LOGON-SWITCH
+                "left (its program could not be checked)",
             ),
             Self::CleanupRefused => pick(lang, "refused", "未能移除"),
             Self::CleanupRoot => pick(
@@ -5744,21 +6018,21 @@ impl Text {
             // 「通知」, the same word as its two neighbours: what the reader is
             // switching on is a notification, and `notify` is the name of the
             // key it writes rather than a second kind of thing.
-            Self::RowCodexNotify => pick(lang, "Codex notify", "Codex 通知"),
-            Self::DescCodexNotify => pick(
+            Self::RowCodexHooks => pick(lang, "Codex hooks", "Codex 通知"),
+            Self::DescCodexHooks => pick(
                 lang,
-                "Marks the tab when Codex finishes a turn. Adds a notify program to your ~/.codex/config.toml, or CODEX_HOME.",
-                "Codex 回合结束时标记标签页。在 ~/.codex/config.toml 或 CODEX_HOME 中添加 notify 程序。",
+                "Marks the tab when Codex finishes a turn. Adds a hook to your ~/.codex/hooks.json, or CODEX_HOME.",
+                "Codex 回合结束时标记标签页。在 ~/.codex/hooks.json 或 CODEX_HOME 中添加 hook。",
             ),
             Self::CodexNotifyAddedToast => pick(
                 lang,
                 "Notify program added. Takes effect in a new Codex session.",
                 "已写入 ~/.codex/config.toml。新的 codex 会话开始生效。",
             ),
-            Self::CodexNotifyRemovedToast => pick(
+            Self::CodexEntryRemovedToast => pick(
                 lang,
-                "Codex notify program removed",
-                "已从 ~/.codex/config.toml 移除",
+                "Folio removed from Codex's configuration",
+                "已从 Codex 的配置中移除 Folio",
             ),
             Self::CodexNotifyFailedToast => pick(
                 lang,
@@ -6011,7 +6285,7 @@ impl Text {
             Self::FirstRunRowExplorer10 => pick(
                 lang,
                 "Open any folder in Folio under Show more options",
-                "在 Show more options 中用 Folio 打开文件夹",
+                "在「显示更多选项」中用 Folio 打开文件夹",
             ),
             // 「整合」 and not 「集成」, on `CapNone`'s ruling above and for its
             // reason: one object may only have one name.
@@ -6103,6 +6377,11 @@ impl Text {
                 lang,
                 "$PROFILE was changed elsewhere. Reload this page and try again.",
                 "$PROFILE 已在别处被改动。重新加载此页后重试。",
+            ),
+            Self::ShellProfileOutsideAppData => pick(
+                lang,
+                "Folio's data folder is not in %APPDATA%\\Folio, so $PROFILE cannot load its script.",
+                "Folio 的数据文件夹不在 %APPDATA%\\Folio 下，$PROFILE 无法加载它的脚本。",
             ),
             Self::ShellProfileChanged => pick(
                 lang,
@@ -6352,11 +6631,139 @@ impl Text {
                 "Changes made in Folio {version} were not kept.",
                 "在 Folio {version} 中所做的更改没有保留。",
             ),
+            Self::AgentHooksDuplicateKey => pick(
+                lang,
+                "This file names one key twice where Folio’s hooks go, so nothing was written.",
+                "此文件在 Folio 的 hook 所在位置重复使用了同一个键，因此未写入。",
+            ),
+            Self::AgentHooksSpliceRefused => pick(
+                lang,
+                "Folio could not change only its own lines in this file, so nothing was written.",
+                "Folio 无法只改动此文件中属于自己的行，因此未写入。",
+            ),
+            Self::AgentHooksUnreadable => pick(
+                lang,
+                "This file is in a form Folio cannot read. Folio does not change the file.",
+                "此文件的格式 Folio 无法读取。Folio 不改动此文件。",
+            ),
+            Self::AgentConfigNoBackup => pick(
+                lang,
+                "A copy of your own file could not be kept, so nothing was written.",
+                "无法为你的文件保留副本，因此未写入。",
+            ),
+            Self::AgentCodexNotifyTaken => pick(
+                lang,
+                "Codex already runs a notify program of your own.",
+                "Codex 已在运行你自己的 notify 程序。",
+            ),
+            Self::AgentCopilotFileTaken => pick(
+                lang,
+                "A hook file of your own already has this name.",
+                "已有一个同名的 hook 文件，属于你自己。",
+            ),
+            Self::AgentHooksOtherCopy => pick(
+                lang,
+                "These hooks run another Folio: {path}. On points the hooks at this Folio.",
+                "这些 hook 运行的是另一个 Folio：{path}。开启后 hook 改为指向这个 Folio。",
+            ),
+            Self::AgentHooksUnclassified => pick(
+                lang,
+                "An entry here looks like Folio’s, in a form Folio never wrote. Folio does not change the entry.",
+                "此处有一项看似属于 Folio，但格式不是 Folio 写过的。Folio 不改动这一项。",
+            ),
+            Self::AgentHooksRepairedClaude => pick(
+                lang,
+                "Claude Code hooks now point at this Folio.",
+                "Claude Code 的 hook 已改为指向这个 Folio。",
+            ),
+            Self::AgentHooksRepairedCodex => pick(
+                lang,
+                "Codex now notifies this Folio.",
+                "Codex 已改为通知这个 Folio。",
+            ),
+            Self::AgentHooksRepairedCopilot => pick(
+                lang,
+                "Copilot hooks now point at this Folio.",
+                "Copilot 的 hook 已改为指向这个 Folio。",
+            ),
+            Self::DescResumeAgentsNeedsHooks => pick(
+                lang,
+                "Resume needs this Folio’s hooks for: {agents}.",
+                "恢复会话需要此 Folio 的 hook：{agents}。",
+            ),
+            Self::AgentHooksDuplicateKeyRow => pick(
+                lang,
+                "This file names one key twice where Folio’s hooks go. Folio does not change the file.",
+                "此文件在 Folio 的 hook 所在位置重复使用了同一个键。Folio 不改动此文件。",
+            ),
+            Self::AgentHooksPlaced => pick(
+                lang,
+                "An entry of Folio’s under {events} is one Folio did not put there. Folio does not change it.",
+                "{events} 下有一项 Folio 的条目不是 Folio 放的。Folio 不改动这一项。",
+            ),
+            Self::AgentHooksRepairHeld => pick(
+                lang,
+                "Folio repairs these hooks once the update is confirmed.",
+                "更新确认后，Folio 会修复这些 hook。",
+            ),
+            Self::AgentHooksRepairRefused => pick(
+                lang,
+                "Folio could not repair these hooks: {reason}",
+                "Folio 未能修复这些 hook：{reason}",
+            ),
+            Self::AgentHooksBeingRepaired => pick(
+                lang,
+                "Folio is updating this file. Try again.",
+                "Folio 正在更新此文件，请重试。",
+            ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")
             }
             Self::ShellDidNotStart => pick(lang, "Shell not started", "Shell 未启动"),
             Self::ShellBirthDeath => pick(lang, "exited at birth", "启动即退出"),
+            Self::ShellEndedBySystem => {
+                pick(lang, "Ended by the system at shutdown", "关机时被系统结束")
+            }
+            Self::CodexHooksInToml => pick(
+                lang,
+                "Codex's hooks are in its config.toml. Folio adds its own only to hooks.json, so it changed nothing.",
+                "Codex 的 hook 写在 config.toml 中。Folio 只在 hooks.json 中添加自己的 hook，因此未做修改。",
+            ),
+            Self::CodexHooksFileIgnored => pick(
+                lang,
+                "Codex cannot read this hooks.json as it is, so a hook added to it would never run.",
+                "Codex 无法读取当前的 hooks.json，添加的 hook 不会运行。",
+            ),
+            Self::CodexHookPathBrackets => pick(
+                lang,
+                "Windows PowerShell cannot run Folio from this path because of the [ or ] in it, so Codex's hook would fail. Move Folio to a folder without [ or ].",
+                "路径中的 [ 或 ] 使 Windows PowerShell 无法运行 Folio，Codex 的 hook 会失败。请将 Folio 移到不含 [ 或 ] 的文件夹。",
+            ),
+            Self::CodexConfigUnreadable => pick(
+                lang,
+                "Codex's config.toml is in a form Folio cannot read. Folio does not change the file.",
+                "Codex 的 config.toml 格式 Folio 无法读取。Folio 不改动此文件。",
+            ),
+            Self::CodexHookAddedToast => pick(
+                lang,
+                "Hook added. Codex asks once to trust it, the next time it starts.",
+                "已添加 hook。Codex 下次启动时会请你确认一次是否信任它。",
+            ),
+            Self::CodexHookRemovedConfigLeft => pick(
+                lang,
+                "Folio's hook was removed from hooks.json, and config.toml was left as it was",
+                "已从 hooks.json 移除 Folio 的 hook，config.toml 保持原样",
+            ),
+            Self::CodexNoHookConfigLeft => pick(
+                lang,
+                "hooks.json held no hook of Folio's, and config.toml was left as it was",
+                "hooks.json 中没有 Folio 的 hook，config.toml 保持原样",
+            ),
+            Self::AgentHooksRepairedCodexHook => pick(
+                lang,
+                "Codex's hook now points at this Folio. Codex asks once to trust the new path.",
+                "Codex 的 hook 已改为指向这个 Folio。Codex 会请你确认一次是否信任新路径。",
+            ),
         }
     }
 
@@ -6505,6 +6912,20 @@ impl Text {
         Self::ContextMenuAddedToast,
         Self::ContextMenuRemovedToast,
         Self::ContextMenuNoExecutable,
+        // — the sign-in switch (0.4.10 plan row 22a), which `settings::visible_rows_for` offers on
+        //   Windows only until its macOS half (row 22b), and what its press says
+        Self::RowStartAtSignIn,
+        Self::DescStartAtSignIn,
+        Self::DescStartAtSignInElsewhere,
+        Self::DescStartAtSignInTurnedOff,
+        Self::DescStartAtSignInNotOurs,
+        Self::SignInOnToast,
+        Self::SignInOffToast,
+        Self::SignInTookOverToast,
+        Self::SignInPathTooLong,
+        Self::SignInEntryNotOurs,
+        Self::SignInProgramNotStartable,
+        Self::SignInReadBackDiffers,
         Self::ExplorerFirstPageAddedToast,
         Self::ExplorerFirstPageAddedRestartToast,
         Self::ExplorerFirstPageUnreadable,
@@ -6517,6 +6938,14 @@ impl Text {
         Self::LegacyPsReadLineRemovedToast,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
+        // Enable's refusal of a data root outside `%APPDATA%` (0.4.10 plan row 68c, R3(b)): it is
+        // asked only after the `$PROFILE` probe answered, which it does on Windows alone; off
+        // Windows the carry may write it only into `diagnostics.log`, which no page shows.
+        Self::ShellProfileOutsideAppData,
+        // — the Theme and scheme rows' sentences while a Windows contrast theme is on, which
+        //   only the Windows reader of `SPI_GETHIGHCONTRAST` can put in force (T-HIGH-CONTRAST)
+        Self::DescThemeHighContrast,
+        Self::DescSchemeHighContrast,
         // — the Acrylic row's reason, which only a Windows with no backdrop
         //   reads: off Windows this build has no backdrop to ask for and
         //   `settings::visible_rows_for` does not offer the row at all (§13.32
@@ -6540,10 +6969,43 @@ impl Text {
         //   halves, because a card is a surface and not a sentence.
         Self::WebFailRuntimeSay,
         Self::WebFailRuntimeVerb,
+        // — the Codex hook's refusal of a path Windows PowerShell cannot call, which
+        //   `attention_codex::apply_resolved` raises only on Windows (row 69, re-review R1)
+        Self::CodexHookPathBrackets,
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // zh: pending T-START-AT-LOGON-SWITCH — the sign-in switch's title, its four lines, its
+        // cards and its refusals, and the uninstall's unchecked line (0.4.10 plan row 22a, R13 and
+        // the review's N2, N3; the title's draft is 登录时启动); a later Chinese pass takes them.
+        (Self::RowStartAtSignIn, HostPlatform::Windows),
+        (Self::RowStartAtSignIn, HostPlatform::MacOs),
+        (Self::DescStartAtSignIn, HostPlatform::Windows),
+        (Self::DescStartAtSignIn, HostPlatform::MacOs),
+        (Self::DescStartAtSignInElsewhere, HostPlatform::Windows),
+        (Self::DescStartAtSignInElsewhere, HostPlatform::MacOs),
+        (Self::DescStartAtSignInTurnedOff, HostPlatform::Windows),
+        (Self::DescStartAtSignInTurnedOff, HostPlatform::MacOs),
+        (Self::DescStartAtSignInNotOurs, HostPlatform::Windows),
+        (Self::DescStartAtSignInNotOurs, HostPlatform::MacOs),
+        (Self::SignInOnToast, HostPlatform::Windows),
+        (Self::SignInOnToast, HostPlatform::MacOs),
+        (Self::SignInOffToast, HostPlatform::Windows),
+        (Self::SignInOffToast, HostPlatform::MacOs),
+        (Self::SignInTookOverToast, HostPlatform::Windows),
+        (Self::SignInTookOverToast, HostPlatform::MacOs),
+        (Self::SignInPathTooLong, HostPlatform::Windows),
+        (Self::SignInPathTooLong, HostPlatform::MacOs),
+        (Self::SignInEntryNotOurs, HostPlatform::Windows),
+        (Self::SignInEntryNotOurs, HostPlatform::MacOs),
+        (Self::SignInProgramNotStartable, HostPlatform::Windows),
+        (Self::SignInProgramNotStartable, HostPlatform::MacOs),
+        (Self::SignInReadBackDiffers, HostPlatform::Windows),
+        (Self::SignInReadBackDiffers, HostPlatform::MacOs),
+        (Self::CleanupSignInUnchecked, HostPlatform::Windows),
+        (Self::CleanupSignInUnchecked, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6551,6 +7013,31 @@ impl Text {
 // A separate family rather than a `Text` variant with holes in it, because these
 // return `String` and every one of the table's entries is `&'static str`. Mixing
 // the two would make the whole table allocate to serve fifteen of its members.
+
+/// **The line a pane opens with when its agent's session did not come back** (0.4.9 plan row
+/// 195): the vendor's title and the first eight characters of the session id, so two panes that
+/// say it can be told apart.
+#[must_use]
+pub fn could_not_resume_text(title: &str, id: &str) -> String {
+    match current() {
+        Lang::English => format!("{title} session {id} could not be resumed."),
+        Lang::Chinese => format!("{title} 会话 {id} 无法恢复。"),
+    }
+}
+
+/// **The line a resumed pane opens with when its launch did not all come back** (0.4.10 plan row
+/// 74): the vendor's title and the flags it was started with that the resume was not handed, by
+/// name and never with a value — or, with none named, that the launch could not be read. The
+/// Chinese is a draft (`zh pending`).
+#[must_use]
+pub fn resumed_without_text(title: &str, flags: &[String]) -> String {
+    match (current(), flags.is_empty()) {
+        (Lang::English, true) => format!("{title} resumed without its launch arguments."),
+        (Lang::English, false) => format!("{title} resumed without {}.", flags.join(", ")),
+        (Lang::Chinese, true) => format!("{title} 恢复时未带启动参数。"),
+        (Lang::Chinese, false) => format!("{title} 恢复时未带 {}。", flags.join("、")),
+    }
+}
 
 /// The refused address's fact line when its scheme is why it was refused
 /// (§7.7 ④; the card's headline since 2026-10-09 is `Cannot open`). The scheme comes from `webnav::scheme_of` and from nowhere else —
@@ -6947,6 +7434,51 @@ pub fn context_menu_failed(message: &str) -> String {
     }
 }
 
+/// **The card raised when the sign-in switch's press changed nothing** (0.4.10 plan row 22a),
+/// carrying why: Folio's own sentence, or the registry's in its own words.
+#[must_use]
+pub fn sign_in_not_changed(reason: &str) -> String {
+    match current() {
+        Lang::English => format!("Not changed: {reason}"),
+        // zh: pending T-START-AT-LOGON-SWITCH
+        Lang::Chinese => format!("Not changed: {reason}"),
+    }
+}
+
+/// **The card raised when the registry refused a step of the sign-in switch's press** (0.4.10
+/// plan row 22a, review N2): the step the entry could not take, and the system's words — never
+/// the door's module name.
+#[must_use]
+pub fn sign_in_entry_failed(stage: bt_platform::sign_in_entry::EntryStage, words: &str) -> String {
+    use bt_platform::sign_in_entry::EntryStage;
+    let english = match stage {
+        EntryStage::Read => "Could not read the startup entry",
+        EntryStage::Write | EntryStage::ReadBack => "Could not write the startup entry",
+        EntryStage::Remove | EntryStage::SwitchRemove => "Could not remove the startup entry",
+    };
+    match current() {
+        Lang::English => format!("{english}: {words}"),
+        // zh: pending T-START-AT-LOGON-SWITCH
+        Lang::Chinese => format!("{english}: {words}"),
+    }
+}
+
+/// **The card raised when the sign-in switch's On wrote the entry and the Startup-apps value of
+/// its name could not be removed** (0.4.10 plan row 22a, review N2): a fact, with the system's
+/// words — the entry is there, and Windows' Startup apps still shows it turned off.
+#[must_use]
+pub fn sign_in_still_turned_off(words: &str) -> String {
+    match current() {
+        Lang::English => format!(
+            "Folio's startup entry is written, but Startup apps still shows it turned off: {words}"
+        ),
+        // zh: pending T-START-AT-LOGON-SWITCH
+        Lang::Chinese => format!(
+            "Folio's startup entry is written, but Startup apps still shows it turned off: {words}"
+        ),
+    }
+}
+
 /// **The sentence a change whose worker did not run to its end is answered with**
 /// (T-PROFILE-INSTALL-REFUSED-START), `started` saying whether the worker ran at all
 /// (`lane::WorkerEnd::started`): a worker the thread door refused changed nothing, and one that
@@ -7006,13 +7538,71 @@ pub fn first_run_tip_claude(path: &str) -> String {
     }
 }
 
-/// The Codex row's tooltip, naming the file this machine will write.
+/// The Codex row's tooltip, naming the file this machine will write: `hooks.json`, where the hook
+/// goes from codex 0.148 (0.4.10 plan row 69c).
 #[must_use]
 pub fn first_run_tip_codex(path: &str) -> String {
+    match current() {
+        Lang::English => format!("Takes a dated copy of {path}, then writes the hook."),
+        Lang::Chinese => format!("先做带日期的副本，再写入 {path}"),
+    }
+}
+
+/// The same, on a codex below 0.148, whose file is `config.toml` and whose entry is the `notify`
+/// line.
+#[must_use]
+pub fn first_run_tip_codex_notify(path: &str) -> String {
     match current() {
         Lang::English => format!("Takes a dated copy of {path}, then writes the notify program."),
         Lang::Chinese => format!("先做带日期的副本，再写入 {path}"),
     }
+}
+
+/// **The Codex row's sentence on a codex below 0.148** (0.4.10 plan row 69c): it names the version,
+/// and the `notify` line written there in place of a hook. Interned ([`intern`]): one per version
+/// per language. The Chinese is a draft for the Chinese pass.
+pub(crate) fn codex_row_old_version(version: &str) -> &'static str {
+    intern(match current() {
+        Lang::English => format!(
+            "Marks the tab when Codex finishes a turn. Codex {version} is older than 0.148, so this adds a notify program to your ~/.codex/config.toml, or CODEX_HOME."
+        ),
+        Lang::Chinese => format!(
+            "Codex 回合结束时标记标签页。Codex {version} 低于 0.148，因此在 ~/.codex/config.toml 或 CODEX_HOME 中添加 notify 程序。"
+        ),
+    })
+}
+
+/// **`[features] hooks = false` (or `codex_hooks`) in codex's `config.toml`** (row 69's review N6):
+/// codex runs no hook, so Folio writes none, and says it as the row's line — naming the file that
+/// says so, which is under `CODEX_HOME` when that is set (the 69c review's C6). Interned
+/// ([`intern`]): one per path per language. The Chinese is a draft for the Chinese pass.
+pub(crate) fn codex_hooks_off(path: &str) -> &'static str {
+    intern(codex_hooks_off_in_lang(current(), path))
+}
+
+/// [`codex_hooks_off`] with the language named — [`Text::in_lang`]'s split, so a test reads both
+/// columns without switching the process's one language under every other test.
+pub(crate) fn codex_hooks_off_in_lang(lang: Lang, path: &str) -> String {
+    match lang {
+        Lang::English => {
+            format!("Hooks are switched off in {path}, so a hook added here would not run.")
+        }
+        Lang::Chinese => format!("{path} 中已关闭 hook，此处添加的 hook 不会运行。"),
+    }
+}
+
+/// **Somebody else's program on codex's one `notify` key, on a codex below 0.148** (row 69's
+/// report §1b.6, R12): the refusal names the version and their program, and what a newer codex
+/// lets Folio do instead. Interned ([`intern`]). The Chinese is a draft for the Chinese pass.
+pub(crate) fn codex_notify_held_old_version(version: &str, program: &str) -> &'static str {
+    intern(match current() {
+        Lang::English => format!(
+            "Codex {version} runs {program} when a turn ends, and its notify line takes one program. Codex 0.148 or later lets Folio add a hook of its own instead."
+        ),
+        Lang::Chinese => format!(
+            "Codex {version} 在回合结束时运行 {program}，而它的 notify 只能设一个程序。Codex 0.148 或更高版本允许 Folio 另加自己的 hook。"
+        ),
+    })
 }
 
 /// The Copilot CLI row's tooltip, naming the file this machine will write.
@@ -7039,6 +7629,60 @@ pub(crate) fn agent_owner_notice(install: bool, owners: &[std::path::PathBuf]) -
             .map(|p| p.display().to_string())
             .collect::<Vec<_>>()
             .join("\n")
+    )
+}
+
+/// **The Agents row's line over hooks a living other copy runs** (0.4.10 plan row 67b, R5): that
+/// copy's program, named, because "another Folio" without a path is a sentence nobody can act on.
+///
+/// Interned ([`intern`]): one entry per language per distinct set of other copies this process is
+/// told about, which is the number of copies on the machine.
+pub(crate) fn agent_hooks_other_copy_line(owners: &[std::path::PathBuf]) -> &'static str {
+    let paths = owners
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    intern(Text::AgentHooksOtherCopy.text().replace("{path}", &paths))
+}
+
+/// **The row's line over entries of this copy's that no install put where they stand** (0.4.10
+/// plan row 67b, ruling N1): `events` are the events they stand under, in the file's order. Read
+/// off the person's file, so the pool holds one line per distinct list said.
+pub(crate) fn agent_hooks_placed_line(events: &[String]) -> &'static str {
+    let separator = match current() {
+        Lang::English => ", ",
+        Lang::Chinese => "、",
+    };
+    intern(
+        Text::AgentHooksPlaced
+            .text()
+            .replace("{events}", &events.join(separator)),
+    )
+}
+
+/// **The row's line over a due repair its writer refused** (0.4.10 plan row 67b, review N4):
+/// `reason` is the writer's sentence.
+pub(crate) fn agent_hooks_repair_refused_line(reason: &str) -> &'static str {
+    intern(
+        Text::AgentHooksRepairRefused
+            .text()
+            .replace("{reason}", reason),
+    )
+}
+
+/// **The resume row's line while resume is on and some agents' hooks are not this copy's** (0.4.10
+/// plan row 67b): `agents` are their product names, in the row order. At most three distinct
+/// lists per language, so the pool stays small.
+pub(crate) fn resume_needs_hooks_line(agents: &[&str]) -> &'static str {
+    let separator = match current() {
+        Lang::English => ", ",
+        Lang::Chinese => "、",
+    };
+    intern(
+        Text::DescResumeAgentsNeedsHooks
+            .text()
+            .replace("{agents}", &agents.join(separator)),
     )
 }
 
@@ -7664,7 +8308,9 @@ pub fn picture_refused(error: &bt_term::InlineImageDecodeError) -> String {
     match error {
         Refusal::FileTooLarge { .. } => Text::PreviewFailedFileTooLarge.text().to_owned(),
         Refusal::TooManyPixels => Text::PreviewFailedTooManyPixels.text().to_owned(),
-        Refusal::Io(reason) | Refusal::Decode(reason) => preview_failed(reason),
+        Refusal::Io(reason) | Refusal::HeldElsewhere(reason) | Refusal::Decode(reason) => {
+            preview_failed(reason)
+        }
         Refusal::InvalidBase64
         | Refusal::TooLarge
         | Refusal::InvalidPath
@@ -7792,8 +8438,14 @@ fn refusal_in_lang(lang: Lang, file: &str, error: &bt_term::BackgroundImageError
             format!("{file} is not a picture file this window can open")
         }
         (Lang::Chinese, Refusal::InvalidPath) => format!("{file} 不是这扇窗能打开的图片文件"),
-        (Lang::English, Refusal::Io(reason)) => format!("{file} could not be read: {reason}"),
-        (Lang::Chinese, Refusal::Io(reason)) => format!("{file} 无法读取：{reason}"),
+        // A held file says what an unreadable one says, in the operating system's own words: no
+        // sentence of its own (T-HELD-FILE-IN-THE-OTHER-PICTURE-LANES).
+        (Lang::English, Refusal::Io(reason) | Refusal::HeldElsewhere(reason)) => {
+            format!("{file} could not be read: {reason}")
+        }
+        (Lang::Chinese, Refusal::Io(reason) | Refusal::HeldElsewhere(reason)) => {
+            format!("{file} 无法读取：{reason}")
+        }
         (Lang::English, Refusal::TooLarge { bytes, limit }) => format!(
             "{file} is {} and a background picture may be up to {}",
             bt_term::mebibytes(*bytes),
@@ -9227,7 +9879,8 @@ mod tests {
                 first_run_tip_claude as fn(&str) -> String,
                 "~/.claude/settings.json",
             ),
-            (first_run_tip_codex, "~/.codex/config.toml"),
+            (first_run_tip_codex, "~/.codex/hooks.json"),
+            (first_run_tip_codex_notify, "~/.codex/config.toml"),
             (first_run_tip_copilot, "~/.copilot/hooks/folio.json"),
         ] {
             assert!(built(default).contains(default));
@@ -9373,6 +10026,8 @@ mod tests {
             Text::PasteClipboardRead,
             Text::PasteClipboardBusy,
             Text::PasteClipboardPicture,
+            Text::PasteClipboardPictureUnread,
+            Text::PasteClipboardPromiseTooLarge,
             Text::PasteProfileOverride,
         ];
         let width = toast::TOAST_WINDOW_WIDTH_LOGICAL_PX
@@ -10122,6 +10777,7 @@ mod tests {
         for error in [
             Refusal::InvalidPath,
             Refusal::Io("access is denied".to_owned()),
+            Refusal::HeldElsewhere("being used by another process".to_owned()),
             Refusal::TooLarge {
                 bytes: 200 * 1024 * 1024,
                 limit: bt_term::MAX_BACKGROUND_IMAGE_BYTES,

@@ -29,6 +29,13 @@
 //! terminal default out of the scheme handed to
 //! [`crate::theme::set_schemes`], so a high-contrast reading enters by
 //! substituting the scheme at that one call and by nowhere else.
+//!
+//! **Implemented 2026-10-28 (T-HIGH-CONTRAST), through that door.** The reading
+//! is a [`SystemContrast`], put in force by [`crate::set_high_contrast`] beside
+//! the stored pair rather than in place of it; while a contrast theme is on both
+//! canvases wear [`SystemContrast::scheme_over`] and its chrome is
+//! [`ChromePalette::derive_high_contrast`]. Off, the pair and its derivation are
+//! the ones above, to the byte.
 
 use crate::theme::{
     ChromePalette, DARK_ACCENT_RGB, DARK_ANSI_16_RGB, DEFAULT_BACKGROUND_RGB, DEFAULT_CURSOR_RGB,
@@ -95,6 +102,11 @@ pub const FOLIO_LIGHT: ColourScheme = ColourScheme {
 /// `--ink` the two ladders are .632/.437 and .650/.450, three levels apart over
 /// a 198-level range, so one ladder cannot reproduce both palettes and the
 /// asymmetry is the design's rather than an accident to be smoothed away.
+///
+/// A third is built at run time under a contrast theme
+/// ([`high_contrast_canvas`]): one of these two with its ink ladder and its
+/// lines at full strength, which is why this is `Copy`.
+#[derive(Clone, Copy)]
 struct Canvas {
     /// `--ink`, `--ink2`, `--ink3` as thousandths of the ink source.
     ink: i32,
@@ -270,6 +282,99 @@ fn unmix(canvas: [u8; 3], result: [u8; 3], alpha: i32) -> [u8; 3] {
     out
 }
 
+/// The canvas a scheme stands on: the one dark/light decision, at the one
+/// threshold.
+fn canvas_of(scheme: &ColourScheme) -> &'static Canvas {
+    if background_is_light(scheme.background) {
+        &PAPER
+    } else {
+        &NIGHT
+    }
+}
+
+/// **The canvas a contrast theme draws on**: `base` with its ink ladder at full
+/// strength, its three planes on the canvas itself, and its lines struck solid in
+/// the theme's Text. What is not a surface (the fixed hues and the lifts) is
+/// `base`'s.
+fn high_contrast_canvas(base: &Canvas, system: &SystemContrast) -> Canvas {
+    Canvas {
+        ink: 1000,
+        ink2: 1000,
+        ink3: 1000,
+        win: [0; 3],
+        panel: [0; 3],
+        menu: [0; 3],
+        border: 1000,
+        border_soft: 1000,
+        shade: system.window_text,
+        thumb: 1000,
+        thumb_hover: 1000,
+        divider_hover: 1000,
+        ..*base
+    }
+}
+
+/// **The colours of the Windows contrast theme in force** (T-HIGH-CONTRAST,
+/// `docs/DESIGN.md` §7.1.6: 「高对比度模式跟随系统调色」), in this crate's own
+/// vocabulary: `bt_platform::HighContrastColours`, translated by the application.
+///
+/// Five of the theme's colours: Background and Text, Selected text's ground and
+/// ink, and Inactive text. Read from the system every time and never written
+/// here, because the four themes Windows ships are each editable by their owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SystemContrast {
+    /// Background (`COLOR_WINDOW`).
+    pub window: [u8; 3],
+    /// Text (`COLOR_WINDOWTEXT`).
+    pub window_text: [u8; 3],
+    /// Selected text's ground (`COLOR_HIGHLIGHT`).
+    pub highlight: [u8; 3],
+    /// Selected text's ink (`COLOR_HIGHLIGHTTEXT`).
+    pub highlight_text: [u8; 3],
+    /// Inactive text (`COLOR_GRAYTEXT`).
+    pub gray_text: [u8; 3],
+}
+
+impl SystemContrast {
+    /// **The scheme both canvases wear while the theme is on** (owner ruling
+    /// 2026-10-28, row 90 ③ and ⑤).
+    ///
+    /// Background, foreground and caret are the theme's Background and Text; the
+    /// selection fill and the accent (links, focus rings, the dragged divider, a
+    /// search's current hit) are its Selected-text ground. The sixteen ANSI
+    /// colours are the reader's own, from the stored scheme whose canvas the
+    /// theme's Background stands on (the dark one under Aquatic, Dusk and Night
+    /// sky, the light one under Desert), so `ls` and `git` keep their colours;
+    /// the contrast floor, at least [`crate::MinimumContrast::Ratio45`] while the
+    /// theme is on, holds each of them to 4.5:1 against the cell it is printed on.
+    #[must_use]
+    pub fn scheme_over(&self, light: &ColourScheme, dark: &ColourScheme) -> ColourScheme {
+        let ansi = if background_is_light(self.window) {
+            light.ansi
+        } else {
+            dark.ansi
+        };
+        ColourScheme {
+            background: self.window,
+            foreground: self.window_text,
+            cursor: self.window_text,
+            selection: self.highlight,
+            ansi,
+            accent: self.highlight,
+        }
+    }
+
+    /// The ink a chrome surface's words take on `ground`: `ink` everywhere but on
+    /// the Selected-text ground, where it is Selected text's own ink.
+    fn ink_on(&self, ground: [u8; 3], ink: [u8; 3]) -> [u8; 3] {
+        if ground == self.highlight {
+            self.highlight_text
+        } else {
+            ink
+        }
+    }
+}
+
 impl ChromePalette {
     /// Every colour the window's chrome wears, computed from a scheme.
     ///
@@ -300,12 +405,37 @@ impl ChromePalette {
     /// header for why a scheme does not get a vote on them.
     #[must_use]
     pub fn derive(scheme: &ColourScheme) -> Self {
-        let canvas: &Canvas = if background_is_light(scheme.background) {
-            &PAPER
-        } else {
-            &NIGHT
-        };
+        Self::derive_on(scheme, canvas_of(scheme), None)
+    }
 
+    /// **The chrome under a Windows contrast theme** (T-HIGH-CONTRAST, owner
+    /// ruling 2026-10-28, row 90 ④): [`Self::derive`]'s every sum, on a canvas
+    /// whose ink ladder and lines are at full strength.
+    ///
+    /// The plain derivation is not enough there, and the reason is arithmetic:
+    /// on Night sky's black, `--ink3` at .38 of white is `#616161`, 3.4:1, and a
+    /// `--border` at .094 is a line nobody can find. So the ladder's top two
+    /// rungs are the theme's Text and its third rung its Inactive text; every
+    /// plane is the theme's Background, told apart from the next by a solid
+    /// line, which is how a contrast theme draws planes; and every wash a
+    /// pointer or a selection lays down is its Selected-text ground, with its
+    /// Selected-text ink on top. The status four, the lanes, the syntax inks, the
+    /// shadows and the destructive close keep their fixed hues (ruling ⑨; their
+    /// measurement against the four themes is plan row 100).
+    #[must_use]
+    pub fn derive_high_contrast(scheme: &ColourScheme, system: &SystemContrast) -> Self {
+        Self::derive_on(
+            scheme,
+            &high_contrast_canvas(canvas_of(scheme), system),
+            Some(system),
+        )
+    }
+
+    fn derive_on(
+        scheme: &ColourScheme,
+        canvas: &Canvas,
+        contrast: Option<&SystemContrast>,
+    ) -> Self {
         let termbg = scheme.background;
         let win = step(termbg, canvas.win);
         let panel = step(termbg, canvas.panel);
@@ -313,12 +443,29 @@ impl ChromePalette {
         let source = unmix(termbg, scheme.foreground, canvas.ink);
         let accent = scheme.accent;
 
-        // `--ink`/`--ink2`/`--ink3` over a named ground, and the two washes.
-        let ink = |ground: [u8; 3]| ink_over(ground, source, canvas.ink);
-        let ink2 = |ground: [u8; 3]| ink_over(ground, source, canvas.ink2);
-        let ink3 = |ground: [u8; 3]| ink_over(ground, source, canvas.ink3);
-        let hover = |ground: [u8; 3]| ink_over(ground, source, HOVER);
-        let active = |ground: [u8; 3]| ink_over(ground, source, ACTIVE);
+        // `--ink`/`--ink2`/`--ink3` over a named ground, and the two washes. Under
+        // a contrast theme each is the theme's own colour for the role, and an ink
+        // laid on the Selected-text ground is Selected text's own ink.
+        let ink = |ground: [u8; 3]| match contrast {
+            None => ink_over(ground, source, canvas.ink),
+            Some(system) => system.ink_on(ground, system.window_text),
+        };
+        let ink2 = |ground: [u8; 3]| match contrast {
+            None => ink_over(ground, source, canvas.ink2),
+            Some(system) => system.ink_on(ground, system.window_text),
+        };
+        let ink3 = |ground: [u8; 3]| match contrast {
+            None => ink_over(ground, source, canvas.ink3),
+            Some(system) => system.ink_on(ground, system.gray_text),
+        };
+        let hover = |ground: [u8; 3]| match contrast {
+            None => ink_over(ground, source, HOVER),
+            Some(system) => system.highlight,
+        };
+        let active = |ground: [u8; 3]| match contrast {
+            None => ink_over(ground, source, ACTIVE),
+            Some(system) => system.highlight,
+        };
         // `--border` and `--border-soft`, which are the shade and not the ink.
         let border = |ground: [u8; 3]| ink_over(ground, canvas.shade, canvas.border);
         let border_soft = |ground: [u8; 3]| ink_over(ground, canvas.shade, canvas.border_soft);
@@ -439,7 +586,10 @@ impl ChromePalette {
             // struck line is 53 and 233, and the line the product draws is the
             // one this has to reproduce.
             divider: border(win),
-            divider_hover: ink_over(win, source, canvas.divider_hover),
+            divider_hover: contrast.map_or_else(
+                || ink_over(win, source, canvas.divider_hover),
+                |system| system.highlight,
+            ),
             divider_active: accent,
             collapse_bar: panel,
             // The neutral shade at `--hover`'s alpha, not the ink at it: on
@@ -447,7 +597,10 @@ impl ChromePalette {
             // over `--panel`, where the ink at .055 would be (236, 236, 234).
             // On night the two sources are the same white, so the canvas that
             // can tell them apart is the one that decides.
-            collapse_bar_hover: ink_over(panel, canvas.shade, HOVER),
+            collapse_bar_hover: contrast.map_or_else(
+                || ink_over(panel, canvas.shade, HOVER),
+                |system| system.highlight,
+            ),
             caption_hover: hovered_tab,
             // `.capbtn.close-w:hover { background: #E5484D; color: #fff }` —
             // written once, overridden by neither canvas, and a destructive
@@ -474,7 +627,12 @@ impl ChromePalette {
             command_tick_crest: ink_over([0x00, 0x00, 0x00], accent, 860),
             command_tick_fail_crest: canvas.err_deep,
             command_tick_search_crest: ink2(termbg),
-            scroll_thumb: ink_over(termbg, source, canvas.thumb),
+            // Under a contrast theme the bar at rest is Inactive text and under the
+            // pointer Text, so its two states stay two.
+            scroll_thumb: contrast.map_or_else(
+                || ink_over(termbg, source, canvas.thumb),
+                |system| system.gray_text,
+            ),
             scroll_thumb_hover: ink_over(termbg, source, canvas.thumb_hover),
             menu_surface: menu,
             menu_border: canvas.shade,
@@ -552,7 +710,10 @@ impl ChromePalette {
             // Half of `--ink3` over the same ground — the ladder
             // `.pv-nav.off`'s `opacity: .22` walks down, said as a colour
             // because the thing walking it is a run of text. See the field.
-            menu_item_unavailable_text: ink_over(menu, source, canvas.ink3 / 2),
+            menu_item_unavailable_text: contrast.map_or_else(
+                || ink_over(menu, source, canvas.ink3 / 2),
+                |system| system.gray_text,
+            ),
             status_err,
             status_warn,
             status_pause,
@@ -625,10 +786,164 @@ pub fn selection_from_accent(background: [u8; 3], accent: [u8; 3]) -> [u8; 3] {
     ink_over(background, accent, 300)
 }
 
+/// **Four readings shaped like the contrast themes Windows 11 ships** (Aquatic,
+/// Desert, Dusk, Night sky), for the tests: their Background, Text, Selected text
+/// and Inactive text as the stock themes set them. Test data and nothing else. The
+/// product reads the system every time and holds no palette, because each theme is
+/// editable by its owner.
+#[cfg(test)]
+pub(crate) mod contrast_themes {
+    use super::SystemContrast;
+
+    pub(crate) const AQUATIC: SystemContrast = SystemContrast {
+        window: [0x20, 0x20, 0x20],
+        window_text: [0xff, 0xff, 0xff],
+        highlight: [0x8e, 0xe3, 0xf0],
+        highlight_text: [0x26, 0x3b, 0x50],
+        gray_text: [0xa6, 0xa6, 0xa6],
+    };
+    pub(crate) const DESERT: SystemContrast = SystemContrast {
+        window: [0xff, 0xfa, 0xef],
+        window_text: [0x3d, 0x3d, 0x3d],
+        highlight: [0x90, 0x39, 0x09],
+        highlight_text: [0xff, 0xf5, 0xe3],
+        gray_text: [0x67, 0x67, 0x67],
+    };
+    pub(crate) const DUSK: SystemContrast = SystemContrast {
+        window: [0x2d, 0x32, 0x36],
+        window_text: [0xff, 0xff, 0xff],
+        highlight: [0xa1, 0xbf, 0xde],
+        highlight_text: [0x21, 0x2d, 0x3b],
+        gray_text: [0xa6, 0xa6, 0xa6],
+    };
+    pub(crate) const NIGHT_SKY: SystemContrast = SystemContrast {
+        window: [0x00, 0x00, 0x00],
+        window_text: [0xff, 0xff, 0xff],
+        highlight: [0xd6, 0xb4, 0xfd],
+        highlight_text: [0x2b, 0x2b, 0x2b],
+        gray_text: [0xa6, 0xa6, 0xa6],
+    };
+    pub(crate) const ALL: [(&str, SystemContrast); 4] = [
+        ("Aquatic", AQUATIC),
+        ("Desert", DESERT),
+        ("Dusk", DUSK),
+        ("Night sky", NIGHT_SKY),
+    ];
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contrast_ratio;
     use crate::theme::{DARK_CHROME, LIGHT_CHROME};
+
+    /// RED (T-HIGH-CONTRAST) — **under every contrast theme the chrome's words clear
+    /// WCAG 2's 4.5:1 for body text (SC 1.4.3) on the ground each is drawn on, and its lines
+    /// and focus marks clear 3:1 for non-text (SC 1.4.11).**
+    ///
+    /// The pairs are the chrome's reading surfaces, each word token beside the ground it is
+    /// struck over: the strip and its pills, the files column and a float's rows in all
+    /// three states, a menu, a dialog, a pane's head, the rail and a focus card. The
+    /// inactive ink (Inactive text) is held to the same floor, and every theme Windows
+    /// ships clears it on its own Background.
+    ///
+    /// MUTATION (observed red): make `derive_high_contrast` the plain `derive` of the same
+    /// scheme. On Aquatic the muted title ink is the ladder's .38 of white over #202020,
+    /// about 3.1:1, and a divider is `--border` at .094, about 1.4:1.
+    #[test]
+    fn a_contrast_themes_chrome_holds_its_words_and_lines_to_the_wcag_floors() {
+        for (name, system) in contrast_themes::ALL {
+            let worn = system.scheme_over(&FOLIO_LIGHT, &FOLIO_DARK);
+            let p = ChromePalette::derive_high_contrast(&worn, &system);
+            let words = [
+                ("title_text", p.title_text, p.title_bar),
+                ("title_text_muted", p.title_text_muted, p.title_bar),
+                (
+                    "tab_close_glyph_on_active_tab",
+                    p.tab_close_glyph_on_active_tab,
+                    p.active_tab,
+                ),
+                (
+                    "tab_close_glyph_on_pill_over_active_tab",
+                    p.tab_close_glyph_on_pill_over_active_tab,
+                    p.tab_close_pill_on_content,
+                ),
+                ("files_row_text", p.files_row_text, p.seat_body),
+                ("files_row_muted", p.files_row_muted, p.seat_body),
+                (
+                    "files_row_text_hover",
+                    p.files_row_text_hover,
+                    p.files_row_hover,
+                ),
+                (
+                    "files_row_text_selected",
+                    p.files_row_text_selected,
+                    p.files_row_selected,
+                ),
+                (
+                    "files_row_muted_selected",
+                    p.files_row_muted_selected,
+                    p.files_row_selected,
+                ),
+                (
+                    "float_row_text_selected",
+                    p.float_row_text_selected,
+                    p.float_row_selected,
+                ),
+                ("menu_item_text", p.menu_item_text, p.menu_surface),
+                ("menu_item_hint_text", p.menu_item_hint_text, p.menu_surface),
+                ("dialog_title_text", p.dialog_title_text, p.dialog_surface),
+                (
+                    "dialog_secondary_text",
+                    p.dialog_secondary_text,
+                    p.dialog_surface,
+                ),
+                ("dialog_muted_text", p.dialog_muted_text, p.dialog_surface),
+                ("pane_title", p.pane_title, p.pane_head),
+                ("pane_title_focus", p.pane_title_focus, p.pane_head),
+                (
+                    "rail_tab_active_text",
+                    p.rail_tab_active_text,
+                    p.rail_tab_active,
+                ),
+                ("focus_card_title", p.focus_card_title, p.focus_card),
+                (
+                    "focus_card_title_staged",
+                    p.focus_card_title_staged,
+                    p.focus_card_staged,
+                ),
+                ("git_row_text_hover", p.git_row_text_hover, p.git_row_hover),
+                ("body_hint_text", p.body_hint_text, p.dialog_surface),
+                ("preview_body_text", p.preview_body_text, p.seat_body),
+            ];
+            for (token, ink, ground) in words {
+                let ratio = contrast_ratio(ink, ground);
+                assert!(
+                    ratio >= 4.5,
+                    "{name}: {token} {ink:02x?} on {ground:02x?} is {ratio:.2}:1, under 4.5:1"
+                );
+            }
+            let lines = [
+                ("divider", p.divider, p.dialog_surface),
+                ("rail_seam", p.rail_seam, p.title_bar),
+                ("pane_head_edge", p.pane_head_edge, p.pane_head),
+                ("focus_card_edge", p.focus_card_edge, p.title_bar),
+                ("focus_mini_edge", p.focus_mini_edge, p.seat_body),
+                ("git_pill_border", p.git_pill_border, p.seat_body),
+                ("accent", p.accent, p.seat_body),
+                ("divider_active", p.divider_active, p.dialog_surface),
+                ("scroll_thumb", p.scroll_thumb, p.seat_body),
+                ("files_row_selected", p.files_row_selected, p.seat_body),
+            ];
+            for (token, line, ground) in lines {
+                let ratio = contrast_ratio(line, ground);
+                assert!(
+                    ratio >= 3.0,
+                    "{name}: {token} {line:02x?} on {ground:02x?} is {ratio:.2}:1, under 3:1"
+                );
+            }
+        }
+    }
 
     /// PIN — the derivation **is** the dark palette.
     ///

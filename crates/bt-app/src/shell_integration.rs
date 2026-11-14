@@ -63,11 +63,16 @@ pub use language::{LanguageAsked, begin_language_question};
 #[cfg(test)]
 #[path = "shell_integration_psreadline_tests.rs"]
 mod psreadline_tests;
+/// The carry pass's member for Folio's old `$PROFILE` lines (0.4.10 plan row 68c).
+pub(crate) use profile_runtime::run_profile_lines_step;
 pub use profile_runtime::{
-    Migrated, ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
-    begin_profile_observation_for, begin_removal, begin_startup_migration, profile_installs_for,
-    remove_shell_integration, remove_shell_integration_at, take_profile_installs, take_removal,
+    ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
+    begin_profile_observation_for, begin_removal, profile_installs_for, remove_shell_integration,
+    remove_shell_integration_at, take_profile_installs, take_removal,
 };
+/// The member's once-a-process step and its carry, for the pass's start test (row 68c).
+#[cfg(test)]
+pub(crate) use profile_runtime::{ProfileLinesStep, carry_profile_lines};
 
 /// The script, compiled in.
 ///
@@ -162,7 +167,7 @@ const CMD_DEFAULT_PROMPT: &str = "$P$G";
 /// both terminators are accepted (`osc_7_reports_its_working_directory_uri_…`).
 ///
 /// **The URI is Win32-spelled, and that is forced rather than chosen.** `$P`
-/// expands to `D:\Developer\folio-terminal`, and `PROMPT` has no substitution,
+/// expands to `D:\Developer\lunar-workshop`, and `PROMPT` has no substitution,
 /// no loop and no escape hatch that could turn those separators into `/` or
 /// percent-encode a space — measured, not assumed: `cmd.exe` under ConPTY puts
 /// `file:///C:\Program Files` on the wire for a directory with a space in it. So
@@ -3198,6 +3203,19 @@ fn asks_for_no_profile(program: &Path, arguments: &[OsString]) -> bool {
     })
 }
 
+/// Whether a PowerShell argv is a one-shot that runs no profile and no line editor: `-NoProfile`,
+/// `-NonInteractive` and a `-Command`, without `-NoExit` — the shape a test's last-resort retry
+/// is held to (plan row 182, `pty_door::Retry`).
+#[cfg(all(test, windows))]
+pub(crate) fn is_a_profile_free_one_shot(program: &Path, arguments: &[OsString]) -> bool {
+    asks_for_no_profile(program, arguments)
+        && classify_powershell_arguments(program, arguments).is_some_and(|parsed| {
+            parsed.non_interactive
+                && !parsed.no_exit
+                && matches!(parsed.terminal, PowerShellTerminal::Command { .. })
+        })
+}
+
 /// The Profiles page's row model, kept pure apart from reading the latest
 /// worker-published edition fact.
 #[must_use]
@@ -4111,6 +4129,15 @@ impl ProbeEnvironment {
                 Self::Inherited
             }
         }
+    }
+
+    /// **The account's `%APPDATA%`, as this environment says it**: the logon block's, or this
+    /// process's own where the probe runs in the inherited one — what the account's PowerShell
+    /// expands `$env:APPDATA` to in the line Folio writes, so what names that line's target
+    /// (0.4.10 plan row 68c, the review's N2: never Folio's own, which a sealed run points at a
+    /// scratch folder).
+    pub(crate) fn account_appdata(&self) -> Option<PathBuf> {
+        self.var_os("APPDATA").map(PathBuf::from)
     }
 
     /// The account's block, when this is one: what [`ordinary_process_scope`] reads (Windows
@@ -5503,7 +5530,7 @@ fn add_profile_with_forms(
     let changed = profile_marks::rewrite(original, forms, profile_marks::Action::Migrate)?;
     let bytes = if let Some(bytes) = changed {
         bytes
-    } else if decoded.text.lines().any(|text| forms.owns(text)) {
+    } else if decoded.holds_an_owned_line(forms) {
         return Ok(ProfileWrite {
             profile: profile.to_path_buf(),
             backup: None,
@@ -5526,7 +5553,7 @@ fn add_profile_with_forms(
         } else if !text.is_empty() && !text.ends_with('\n') {
             text.push_str(newline);
         }
-        text.push_str(line);
+        text.push_str(&decoded.as_held(line));
         text.push_str(newline);
         decoded.encode(&text)
     };
@@ -6364,73 +6391,6 @@ mod tests {
     #[test]
     fn a_removal_waits_longer_for_a_quiet_powershell_than_a_probe_does() {
         assert!(REMOVAL_PROBE_PATIENCE.quiet > POWERSHELL_PROBE_PATIENCE.quiet);
-    }
-
-    /// RED (T-HEADLESS-RUNTIME-SEAM round 2) — **a startup observation the thread door refuses is
-    /// said once, and the next asking tries again.** The startup's latch is set by a start, not by
-    /// an attempt: two askings that are both refused are two attempts, each said in the voice the
-    /// startup was handed, and the latch is still open after them. Before, the refusal was thrown
-    /// away (`let _ =`) and the latch taken first, so one refused start meant no startup
-    /// observation until the Profiles page was opened.
-    ///
-    /// MUTATIONS: drop the `latch.store(false, ..)` after a refused start in
-    /// `begin_startup_migration_through` — the second asking returns at the latch and only one
-    /// refusal is said; say nothing in `lane::Answered::worker_ended` — the refusals are thrown
-    /// away again; hand `spawn_profile_observation` a row from the startup (T-OBSERVATION-REFUSAL-
-    /// ON-THE-PAGE review) — its refusal is filed on a page nobody opened.
-    #[test]
-    fn a_refused_startup_observation_is_said_and_asked_again() {
-        // The edition no other test files, and Windows PowerShell's held in turn, so a filing
-        // numbered between `before` and `after` could only be the startup's.
-        let _turn = WINDOWS_POWERSHELL_OBSERVATIONS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let before = next_observation();
-        let gate = std::sync::Arc::new(crate::lane::Gate::default());
-        let executor = crate::lane::Executor::scripted(std::sync::Arc::clone(&gate));
-        let latch = std::sync::atomic::AtomicBool::new(false);
-        let said = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let data = temp_dir("startup-observation 观察");
-        for _ in 0..2 {
-            gate.refuse_next_start();
-            let lines = std::sync::Arc::clone(&said);
-            profile_runtime::begin_startup_migration_through(
-                &latch,
-                &executor,
-                || data.clone(),
-                move |line| lines.lock().unwrap().push(line.to_owned()),
-            );
-        }
-        let after = next_observation();
-        let filed = PROFILE_OBSERVATIONS
-            .get_or_init(Default::default)
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .iter()
-            .filter(|(_, (number, _))| (before..after).contains(number))
-            .map(|(edition, (number, _))| (*edition, *number))
-            .collect::<Vec<_>>();
-        let said = said.lock().unwrap().clone();
-        let _ = std::fs::remove_dir_all(&data);
-        assert_eq!(
-            filed,
-            Vec::new(),
-            "the startup's asking names no rows, so nothing is filed on the page"
-        );
-        assert_eq!(
-            said.len(),
-            2,
-            "each refused start is said once, and the second asking tries again: {said:?}"
-        );
-        assert!(
-            said.iter()
-                .all(|line| line.contains(crate::lane::REFUSED_START)),
-            "what is said is the door's refusal: {said:?}"
-        );
-        assert!(
-            !latch.load(std::sync::atomic::Ordering::Acquire),
-            "the latch stays open on a refused start"
-        );
     }
 
     /// RED (T-OBSERVATION-REFUSAL-ON-THE-PAGE review) — **a worker that panicked after it started
@@ -9469,16 +9429,17 @@ mod tests {
         assert_eq!(
             owners,
             [
+                "Runtime::bear_successor",
                 "Runtime::land_pane_birth",
                 "Runtime::pop_out_preview",
-                "Runtime::restart_shell",
                 "Runtime::split_seat",
                 "create_leaf_session",
                 "create_tab_state",
             ],
-            "new tab, restore, Recent and Duplicate enter through create_tab_state; split, \
-             Restart shell and preview stand-in enter directly; every terminal birth still \
-             reaches the constructor that composes PowerShell"
+            "new tab, restore, Recent and Duplicate enter through create_tab_state; split and \
+             preview stand-in enter directly, and Restart shell and an ended agent's hand-back \
+             through their one successor; every terminal birth still reaches the constructor \
+             that composes PowerShell"
         );
     }
 
@@ -10538,6 +10499,218 @@ mod tests {
                 "{id}: the login file's PATH reached the pane: {seen:?}"
             );
             session.shutdown().unwrap();
+        }
+    }
+
+    /// RED (T-AGENT-RESUME-ON-MACOS, ruling R6) — **a resume through the pane's own shell is the
+    /// vendor's own process, found on the `PATH` the person's startup files build; a vendor that
+    /// shell cannot find ends the resume before any hook, which hands the pane its shell with the
+    /// line**.
+    ///
+    /// The real producer end to end, on this Mac: the macOS seed's zsh and bash rows through
+    /// [`shell_command`] and `crate::compose_resume`, spawned over a real pty with the real scripts
+    /// in a `bt_pty::test_shell::Hygiene` sandbox. The vendor is a stand-in: a script named
+    /// `claude` that prints its arguments, its folder, its configuration folder and its pid, then
+    /// exits 7. Its folder reaches `PATH` only through a startup file of the sandbox's home, the one
+    /// each shell reads as the person's own: zsh's `.zshrc`, which only an interactive zsh reads,
+    /// and bash's `.bash_profile`, the login chain `folio.bash` replays (and which shows that bash
+    /// reads its init file although it is handed `-c`). That file sets the whole `PATH` — the
+    /// stand-in's folder and the system's four — rather than adding to the one the test inherited,
+    /// so a machine with a real `claude` installed cannot start it here (ruling R6, review N2). No
+    /// vendor, no account and no file of the account running the test is used.
+    ///
+    /// The stand-in's pid is the pty child's (the shell `exec`ed it), and the child's exit code is
+    /// the stand-in's. With no stand-in, the shell's `exec` says the vendor was not found — zsh
+    /// `command not found: claude`, bash `exec: claude: not found` (review N1) — and the child
+    /// exits 127 before anything could have spoken from it, which is a failed resume
+    /// (`AgentAccount::child_ended`): the pane's shell, in the session's folder, with the line.
+    /// Each wait names its case, so a red first wait of `bash (vendor present)` is the finding that
+    /// bash did not read its init file under `-c`, and nothing else.
+    ///
+    /// MUTATION (plant `plant-15-login-only.py`): the interactive flag dropped, and zsh never reads
+    /// `.zshrc`: the stand-in is not found and the first wait goes red.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_resume_through_the_shell_is_the_vendors_process_and_a_missing_vendor_hands_back_the_shell()
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Mac;
+        impl ShellEnvironment for Mac {
+            fn var_os(&self, key: &str) -> Option<OsString> {
+                (key == "SHELL").then(|| OsString::from("/bin/zsh"))
+            }
+            fn is_file(&self, path: &Path) -> bool {
+                bt_pty::SystemShellEnvironment.is_file(path)
+            }
+        }
+
+        const SESSION: &str = "0b9c7e1a-4f3d-4c2b-9a8e-5d6f7a8b9c0d";
+        let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
+        for (id, startup_file) in [("zsh", ".zshrc"), ("bash", ".bash_profile")] {
+            for present in [true, false] {
+                let hygiene = bt_pty::test_shell::Hygiene::new().reading_startup_files();
+                let home = hygiene.home();
+                let zdotdir = hygiene.root().join("zdotdir");
+                let vendors = hygiene.root().join("vendors");
+                let folder = hygiene.root().join("work");
+                let configuration = hygiene.root().join("claude-configuration");
+                for directory in [&zdotdir, &vendors, &folder] {
+                    std::fs::create_dir_all(directory).unwrap();
+                }
+                for name in ZDOTDIR_FILES {
+                    std::fs::write(zdotdir.join(name), SCRIPT_ZSH).unwrap();
+                }
+                let script = hygiene.root().join(SCRIPT_FILE);
+                std::fs::write(&script, SCRIPT).unwrap();
+                std::fs::write(
+                    home.join(startup_file),
+                    format!(
+                        "export PATH=\"{}:/usr/bin:/bin:/usr/sbin:/sbin\"\n",
+                        vendors.display()
+                    ),
+                )
+                .unwrap();
+                if present {
+                    let stand_in = vendors.join("claude");
+                    std::fs::write(
+                        &stand_in,
+                        "#!/bin/sh\nprintf 'folio-stand-in argv=[%s] cwd=[%s] home=[%s] \
+                         pid=[%s] end\\n' \"$*\" \"$(pwd -P)\" \"${CLAUDE_CONFIG_DIR-}\" \"$$\"\n\
+                         exit 7\n",
+                    )
+                    .unwrap();
+                    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+                let row = rows
+                    .iter()
+                    .find(|row| row.id == id)
+                    .unwrap_or_else(|| panic!("the macOS table ships {id}"));
+                let profiles::ProgramSource::Path(program) = &row.program else {
+                    panic!("{id} names one path");
+                };
+                let seed = crate::LeafSeed {
+                    profile: id.to_owned(),
+                    cwd: Some(profiles::SeedPlace::Carried(folder.clone())),
+                    agent: crate::agent_resume::SeedAgent::Resume(crate::agent_resume::Resume {
+                        record: bt_persist::AgentRecordV1 {
+                            vendor: crate::attention_map::CLAUDE_CODE.to_owned(),
+                            resume_id: SESSION.to_owned(),
+                            cwd: folder.display().to_string(),
+                            home: Some(configuration.display().to_string()),
+                            // Row 74: launch words a shell would split or run if they were
+                            // handed to it bare — a `;`, a space.
+                            launch: Some(Box::new(bt_persist::AgentLaunchV1 {
+                                args: vec![
+                                    "--model".to_owned(),
+                                    "opus; exit 3".to_owned(),
+                                    "--add-dir".to_owned(),
+                                    "/work/a b".to_owned(),
+                                ],
+                                dropped: Vec::new(),
+                                unread: false,
+                            })),
+                        },
+                        hand_back: Some(id.to_owned()),
+                    }),
+                    ..crate::LeafSeed::default()
+                };
+                let scripts = Scripts {
+                    bash: Some(&script),
+                    zdotdir: Some(&zdotdir),
+                };
+                let mut command = shipped_command(row, &[], scripts, &bare());
+                assert!(
+                    crate::compose_resume(
+                        &mut command,
+                        &seed,
+                        &crate::Started::AsAsked,
+                        row,
+                        program
+                    ),
+                    "{id}: the birth is a resume"
+                );
+                command
+                    .environment
+                    .push((OsString::from("HOME"), home.clone().into_os_string()));
+                let mut session = bt_pty::test_shell::TestShell::spawn_shell_in(
+                    hygiene,
+                    program.clone(),
+                    &command.arguments,
+                    &|| last_resort_arguments(false),
+                    &command.environment,
+                    bt_pty::PtySize::cells(
+                        std::num::NonZeroU16::new(200).unwrap(),
+                        std::num::NonZeroU16::new(24).unwrap(),
+                    ),
+                    Some(folder.clone()),
+                )
+                .unwrap();
+                // The whole phrase each case is judged by, so a reply the pty splits mid-message
+                // (zsh writes `command not found: ` and `claude` apart) is read to its end
+                // (re-review R1).
+                let spoke = |seen: &str| {
+                    if present {
+                        seen.contains(" end")
+                    } else {
+                        seen.contains("not found: claude") || seen.contains("claude: not found")
+                    }
+                };
+                let case = format!(
+                    "{id} (vendor {})",
+                    if present { "present" } else { "absent" }
+                );
+                let mut seen = String::new();
+                crate::lane::wait_until(&format!("{case}: the resume's first words"), || {
+                    seen.push_str(&String::from_utf8_lossy(&session.read_output()));
+                    spoke(&seen)
+                });
+                let mut status = None;
+                crate::lane::wait_until(&format!("{case}: the resume's end"), || {
+                    status = session.try_wait().expect("the child is reaped");
+                    status.is_some()
+                });
+                let code = status.expect("it ended").exit_code();
+                if present {
+                    let folder = std::fs::canonicalize(&folder).unwrap();
+                    let pid = session.child_id().expect("the child has a pid");
+                    for fact in [
+                        format!(
+                            "argv=[--resume {SESSION} --model opus; exit 3 --add-dir /work/a b]"
+                        ),
+                        format!("cwd=[{}]", folder.display()),
+                        format!("home=[{}]", configuration.display()),
+                        format!("pid=[{pid}]"),
+                    ] {
+                        assert!(seen.contains(&fact), "{id}: {fact} in {seen:?}");
+                    }
+                    assert_eq!(code, 7, "{id}: the child's end is the vendor's own");
+                } else {
+                    assert!(
+                        seen.contains("not found: claude") || seen.contains("claude: not found"),
+                        "{case}: the shell names the vendor it did not find: {seen:?}"
+                    );
+                    assert_eq!(code, 127, "{id}: the shell found no vendor");
+                    let mut account = crate::agent_resume::AgentAccount::born(&seed.agent, true);
+                    let crate::agent_resume::Ended::HandBack {
+                        profile,
+                        cwd,
+                        failed: Some(could),
+                    } = account.child_ended()
+                    else {
+                        panic!("{id}: an exit before any hook is a failed resume");
+                    };
+                    assert_eq!(profile.as_deref(), Some(id), "the pane's own shell");
+                    assert_eq!(cwd, folder, "in the session's folder");
+                    assert!(
+                        could.text().contains("Claude Code session 0b9c7e1a"),
+                        "{}",
+                        could.text()
+                    );
+                }
+                session.shutdown().unwrap();
+            }
         }
     }
 
@@ -11800,7 +11973,7 @@ mod tests {
             profile_marks::MANAGED_LINE
         ));
         assert!(profile_suppresses_integration_offer(
-            r". 'D:\Developer\folio-terminal\scripts\shell-integration\FOLIO.PS1'"
+            r". 'D:\Developer\lunar-workshop\scripts\shell-integration\FOLIO.PS1'"
         ));
         for user in ["# my note about folio.ps1", "\r\n", ""] {
             assert!(!profile_suppresses_integration_offer(user), "{user}");
@@ -12423,7 +12596,7 @@ mod tests {
     /// machine delivers the same bytes further apart, and a shell that falls silent fails by name.
     #[cfg(windows)]
     fn feed_leaf_until(
-        leaf: &mut crate::LeafSession,
+        leaf: &mut crate::ShellSession,
         wakes: &std::sync::mpsc::Receiver<()>,
         marker: &str,
     ) {
@@ -12448,14 +12621,14 @@ mod tests {
     /// RED (T-CWD-FROM-PROCESS) — **a Command Prompt pane with no integration stands where its
     /// process stands, and the verbs that start a shell from it start there**: `cmd.exe` with a
     /// plain `PROMPT` (`$P$G`, no OSC 7), started in a folder whose name is not ASCII, read through
-    /// the pane's own road (`LeafSession::folder`, the shell's pid and its output count off the
+    /// the pane's own road (`ShellSession::folder`, the shell's pid and its output count off the
     /// real pseudoconsole) at the first prompt and again after `cd` into a subfolder. The pane
     /// never reports a folder. After the `cd`, the place Split with, Duplicate pane, Duplicate tab
     /// and Restart shell start a shell in (`seed_place_for_a_new_shell`, the one reader each of
     /// them calls) and the one a new tab beside carries (`place_for_a_new_tab_beside`) are the
     /// subfolder.
     ///
-    /// MUTATIONS (observed red): `LeafSession::folder` hands the ladder no shell (`None`) — at the
+    /// MUTATIONS (observed red): `ShellSession::folder` hands the ladder no shell (`None`) — at the
     /// first prompt the pane answers `Opened`, the folder it was opened in, not its process; the
     /// memo keyed by the shell alone (output not counted) — after `cd` the first read, the
     /// starting folder, is answered again; `place_where_the_pane_stands` reading the old ladder
@@ -12492,13 +12665,15 @@ mod tests {
         .unwrap();
         let (pty, hygiene) = shell.into_session();
         let mut leaf = crate::test_support::leaf_saying("");
-        leaf.session.set_spawn_directory(Some(start.clone()));
-        leaf.launch.spawn_place = Some(start.clone());
-        leaf.life.land(Some(pty));
+        leaf.session
+            .session
+            .set_spawn_directory(Some(start.clone()));
+        leaf.session.launch.spawn_place = Some(start.clone());
+        leaf.session.life.land(Some(pty));
         let door = crate::pane_folder::SystemProcessFolders;
 
-        feed_leaf_until(&mut leaf, &wakes, "start>");
-        match leaf.folder(&door) {
+        feed_leaf_until(&mut leaf.session, &wakes, "start>");
+        match leaf.session.folder(&door) {
             crate::pane_folder::PaneFolder::Process(folder) => assert!(
                 bt_platform::same_file(&folder, &start),
                 "at the first prompt the process stands in {folder:?}, not {start:?}"
@@ -12506,9 +12681,18 @@ mod tests {
             other => panic!("at the first prompt: {other:?}"),
         }
 
-        leaf.life.pty().unwrap().write(b"cd moved-here\r").unwrap();
-        feed_leaf_until(&mut leaf, &wakes, "moved-here>");
-        assert_eq!(leaf.session.working_directory(), None, "no report was made");
+        leaf.session
+            .life
+            .pty()
+            .unwrap()
+            .write(b"cd moved-here\r")
+            .unwrap();
+        feed_leaf_until(&mut leaf.session, &wakes, "moved-here>");
+        assert_eq!(
+            leaf.session.session.working_directory(),
+            None,
+            "no report was made"
+        );
 
         // **A folder nobody can say keeps today's behaviour**: with the process refusing, the
         // verbs start where the pane was opened and a new tab beside carries nothing.
@@ -12522,40 +12706,40 @@ mod tests {
             }
         }
         assert_eq!(
-            leaf.seed_place_for_a_new_shell_through(&Refusing),
+            leaf.session.seed_place_for_a_new_shell_through(&Refusing),
             Some(profiles::SeedPlace::Carried(start.clone())),
             "an unknown folder: a shell is started where the pane was opened, as before"
         );
         assert_eq!(
-            leaf.place_for_a_new_tab_beside_through(&Refusing),
+            leaf.session.place_for_a_new_tab_beside_through(&Refusing),
             None,
             "an unknown folder: a new tab beside carries nothing, as before"
         );
         // That refusal is this moment's read; one more prompt is a new moment for the real door.
-        leaf.life.pty().unwrap().write(b"\r").unwrap();
-        feed_leaf_until(&mut leaf, &wakes, "moved-here>");
-        match leaf.folder(&door) {
+        leaf.session.life.pty().unwrap().write(b"\r").unwrap();
+        feed_leaf_until(&mut leaf.session, &wakes, "moved-here>");
+        match leaf.session.folder(&door) {
             crate::pane_folder::PaneFolder::Process(folder) => assert!(
                 bt_platform::same_file(&folder, &moved),
                 "after cd the process stands in {folder:?}, not {moved:?}"
             ),
             other => panic!("after cd: {other:?}"),
         }
-        match leaf.seed_place_for_a_new_shell() {
+        match leaf.session.seed_place_for_a_new_shell() {
             Some(profiles::SeedPlace::Carried(folder)) => assert!(
                 bt_platform::same_file(&folder, &moved),
                 "after cd a split, a duplicate or a restart starts in {folder:?}, not {moved:?}"
             ),
             other => panic!("after cd, the place a shell is started in: {other:?}"),
         }
-        match leaf.place_for_a_new_tab_beside() {
+        match leaf.session.place_for_a_new_tab_beside() {
             Some(profiles::SeedPlace::Carried(folder)) => assert!(
                 bt_platform::same_file(&folder, &moved),
                 "after cd a new tab beside carries {folder:?}, not {moved:?}"
             ),
             other => panic!("after cd, what a new tab beside carries: {other:?}"),
         }
-        let mut pty = leaf.life.retire().unwrap();
+        let mut pty = leaf.session.life.retire().unwrap();
         pty.write(b"exit\r").unwrap();
         pty.shutdown().unwrap();
         drop(pty);

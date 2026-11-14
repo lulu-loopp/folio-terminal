@@ -3,29 +3,32 @@
 
 use super::pointer::{Ending, Gone, Leaving, OwnerGone};
 use crate::runtime::attention::expire_leaf_attention;
+use crate::runtime::clipboard::PasteFrom;
 use crate::runtime::floats::{file_menu_powers, float_dock_label};
 use crate::runtime::frame::trace_unchanged_present;
 use crate::runtime::preview::picture_channel_owner;
 use crate::runtime::preview::preview_image_placement;
 use crate::runtime::tabs::pane_can_become_a_tab;
+use crate::runtime::tabs::{closing_this_pane_closes_the_tab, pane_into_new_tab};
+use crate::runtime::terminal::write_pty_input;
 use crate::runtime::windows::dirty_gate_names;
 use crate::window_seam::prelude::*;
 use crate::{
     BirthAt, BirthDue, BirthWait, EASE, HoverFloat, LeafResizeTarget, LeafSeed, LeafView,
-    PaneBirth, PaneMotion, PlanInputs, SuccessorLanding, TextScale, born_in_tab, cardhint,
-    conpty_source_of, cubic_bezier, decided_birth, deliver_held_input, diagnostics,
-    exit_diagnostics, i18n, icons, land_shell_birth, pane_into_new_tab, resolved_birth_seed, seed,
-    split_axis, tabs_a_close_loses, toast,
+    PaneBirth, PaneMotion, PlanInputs, PtyTarget, SuccessorLanding, TextScale, born_in_tab,
+    cardhint, conpty_source_of, cubic_bezier, decided_birth, diagnostics, exit_diagnostics,
+    finish_leaf_birth, i18n, icons, profile_banner_name, pty_door, pty_size, resolved_birth_seed,
+    seed, split_axis, tabs_a_close_loses, toast,
 };
 use crate::{
     CardAim, ColumnNotch, CommandFlash, DividerDrag, DividerGrip, Drag, DragCarry, DragHandover,
     DragSource, DropLanding, FilesFocusArrival, FlashBand, FolderPick, FormulaSwitches,
-    FrameImageReferences, FrameTraces, GridChange, HandoverInto, LeafId, LeafOnStage, LeafSession,
+    FrameImageReferences, FrameTraces, GridChange, HandoverInto, LeafId, LeafOnStage,
     MathHoverExit, MenuPaint, Motion, NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState,
     PaneTransform, PeekCache, PeekCacheEntry, PopoverTrigger, Popup, PopupOwner, PresentIntent,
     PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY, RAIL_TRANSITION, RevealTween,
-    RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed, TabId, TabState, TabSurface,
-    TearOut, attention_trace, auto_split_axis, card_trace, closing_this_pane_closes_the_tab,
+    RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, ShellSession, SplitSeed, TabId,
+    TabState, TabSurface, TearOut, TerminalPane, attention_trace, auto_split_axis, card_trace,
     cmdrail, create_leaf_session, files, float, focus_thumb, glyph_trace, hang_watch, marks,
     mouse_trace, notice, notify, palette, present_diagnostics, presentation_physical_size, preview,
     preview_trace, profiles, restore, restore_row_seed, row_verb, scrollback_quota, seats,
@@ -35,6 +38,7 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{Axis, SeatId, SeatKind, SeatLayout, SeatMetrics, SizePolicy};
 use bt_persist::LayoutNodeV1;
+use bt_platform::admission::doors;
 use bt_render::{
     ChromePalette, FrameSource, FrameTrigger, GridSize, PresentOutcome, PresentPhase, Travel,
 };
@@ -72,7 +76,7 @@ impl<B: Backend> Runtime<'_, B> {
             let birth_death_due: Vec<SeatId> = self.window.tabs[tab_index]
                 .sessions
                 .iter()
-                .filter_map(|(seat, leaf)| {
+                .filter_map(|(seat, TerminalPane { session: leaf, .. })| {
                     leaf.life
                         .falling_back()
                         .is_some_and(|pending| pending.landing.shell.answered())
@@ -148,7 +152,7 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         };
         let refusal = land_shell_birth(leaf, diagnostics::note)?;
-        let source = landed_source(leaf, refusal.is_some());
+        let source = landed_source(&leaf.session, refusal.is_some());
         if let (Some(shells), Some(source)) = (self.app.startup_shells.as_mut(), source) {
             shells.born(tab_id, seat, source);
             if let Some(lines) = shells.lines_if_born() {
@@ -158,12 +162,12 @@ impl<B: Backend> Runtime<'_, B> {
                 self.app.startup_shells = None;
             }
         }
-        if let Some(fallback) = leaf.life.take_spawn_fallback() {
+        if let Some(fallback) = leaf.session.life.take_spawn_fallback() {
             exit_diagnostics::say_spawn_fallback(seat.0, &fallback, diagnostics::note);
         } else if let Some(refusal) = refusal.as_ref() {
             exit_diagnostics::say_spawn_failure(
                 seat.0,
-                leaf.launch.program.as_deref(),
+                leaf.session.launch.program.as_deref(),
                 &format!("{refusal:#}"),
                 diagnostics::note,
             );
@@ -183,10 +187,13 @@ impl<B: Backend> Runtime<'_, B> {
         let requested = leaf
             .successor
             .as_deref()
-            .and_then(|successor: &LeafSession| successor.launch.program.clone());
+            .and_then(|successor: &TerminalPane| successor.session.launch.program.clone());
         match land_successor(leaf, diagnostics::note)? {
             SuccessorLanding::Waiting => Ok(()),
             SuccessorLanding::Refused(refusal) => {
+                // A hand-back's shell that was refused leaves its pane to end as an exited pane
+                // ends (row 195).
+                leaf.session.agent.end_hand_back();
                 exit_diagnostics::say_spawn_failure(
                     seat.0,
                     requested.as_deref(),
@@ -196,13 +203,13 @@ impl<B: Backend> Runtime<'_, B> {
                 self.say_shell_refusal(&refusal)
             }
             SuccessorLanding::Landed(mut successor) if tab_index == self.window.active_tab => {
-                if let Some(fallback) = successor.life.take_spawn_fallback() {
+                if let Some(fallback) = successor.session.life.take_spawn_fallback() {
                     exit_diagnostics::say_spawn_fallback(seat.0, &fallback, diagnostics::note);
                 }
                 self.replace_restarted_shell(seat, *successor)
             }
             SuccessorLanding::Landed(mut successor) => {
-                if let Some(fallback) = successor.life.take_spawn_fallback() {
+                if let Some(fallback) = successor.session.life.take_spawn_fallback() {
                     exit_diagnostics::say_spawn_fallback(seat.0, &fallback, diagnostics::note);
                 }
                 self.window.tabs[tab_index]
@@ -245,7 +252,7 @@ impl<B: Backend> Runtime<'_, B> {
             BirthAt::Successor => leaf
                 .successor
                 .as_deref()
-                .map_or(leaf.view.text_scale, |successor: &LeafSession| {
+                .map_or(leaf.view.text_scale, |successor: &TerminalPane| {
                     successor.view.text_scale
                 }),
         };
@@ -294,11 +301,11 @@ impl<B: Backend> Runtime<'_, B> {
             .get(&seat)
             .and_then(|leaf| leaf.birth_at(at))
         {
-            deliver_held_input(birth, born.input_target(), diagnostics::note)?;
+            deliver_held_input(birth, born.session.input_target(), diagnostics::note)?;
         }
         match at {
             BirthAt::Pane => {
-                let source = conpty_source_of(Some(&born));
+                let source = conpty_source_of(Some(&born.session));
                 self.window.tabs[tab_index].sessions.insert(seat, born);
                 if let (Some(shells), Some(source)) = (self.app.startup_shells.as_mut(), source) {
                     shells.born(tab_id, seat, source);
@@ -313,7 +320,7 @@ impl<B: Backend> Runtime<'_, B> {
             // A successor made again stays beside the shell it replaces until its own shell
             // lands; one with no shell to wait for takes the pane's place now, as
             // `restart_shell` does with one.
-            BirthAt::Successor if born.life.birth().is_some() => {
+            BirthAt::Successor if born.session.life.birth().is_some() => {
                 if let Some(leaf) = self.window.tabs[tab_index].sessions.get_mut(&seat) {
                     leaf.await_successor(Box::new(born));
                 }
@@ -491,7 +498,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// canvas. What the alternate screen suspends is not the data, it is the
     /// picture.
     pub(crate) fn command_rail_body(&self, seat: SeatId) -> Option<[f32; 4]> {
-        let leaf = self.sessions.get(&seat)?;
+        let TerminalPane { session: leaf, .. } = self.sessions.get(&seat)?;
         let scale = self.window.renderer.scale_factor() as f32;
         let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
         cmdrail::host_rect(
@@ -523,7 +530,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// counts hits* — and it is what stops a `grep` output, where every line
     /// matches several times, from drawing a rail nobody can read.
     fn command_rail_stack(&self, seat: SeatId) -> cmdrail::Stack {
-        let Some(leaf) = self.sessions.get(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) = self.sessions.get(&seat) else {
             return cmdrail::Stack::default();
         };
         let marks = leaf.session.command_marks();
@@ -621,7 +628,7 @@ impl<B: Backend> Runtime<'_, B> {
             .into_iter()
             .filter_map(|seat| {
                 let body = self.command_rail_body(seat)?;
-                let leaf = self.sessions.get(&seat)?;
+                let TerminalPane { session: leaf, .. } = self.sessions.get(&seat)?;
                 let key = cmdrail::RailKey {
                     revision: leaf.session.command_marks_revision(),
                     body,
@@ -782,7 +789,7 @@ impl<B: Backend> Runtime<'_, B> {
             position.x as f32,
             position.y as f32,
         )?;
-        let leaf = self.sessions.get(&seat)?;
+        let TerminalPane { session: leaf, .. } = self.sessions.get(&seat)?;
         let scale = self.window.renderer.scale_factor() as f32;
         let resolved = cmdrail::resolve(
             body,
@@ -970,7 +977,9 @@ impl<B: Backend> Runtime<'_, B> {
         }
         self.sessions
             .get(&seat)
-            .is_some_and(|leaf| !leaf.session.terminal_modes().alternate_screen)
+            .is_some_and(|TerminalPane { session: leaf, .. }| {
+                !leaf.session.terminal_modes().alternate_screen
+            })
     }
 
     /// Whether the tab in front holds a page on that seat.
@@ -1686,9 +1695,9 @@ impl<B: Backend> Runtime<'_, B> {
             // Where the source stands, the one `Restart shell` reads: its report, else its shell
             // process's folder (T-CWD-FROM-PROCESS), else where it was put down — never its
             // profile's default.
-            .map(|leaf| {
+            .map(|TerminalPane { session: leaf, .. }| {
                 seed.applied(
-                    &leaf.launch.profile,
+                    leaf.own_profile(),
                     leaf.seed_place_for_a_new_shell().as_ref(),
                 )
             })
@@ -1874,7 +1883,7 @@ impl<B: Backend> Runtime<'_, B> {
         if self.refresh_overlay() {
             self.present_chrome_change()?;
         }
-        if self.leaf(seat).view.projection.horizontal().x_origin() == before {
+        if self.pane(seat).view.projection.horizontal().x_origin() == before {
             return Ok(());
         }
         self.repaint_pane_change(seat)
@@ -2251,7 +2260,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(selection) = self
             .sessions
             .get(&seat)
-            .and_then(|leaf| leaf.session.select_all_selection())
+            .and_then(|TerminalPane { session: leaf, .. }| leaf.session.select_all_selection())
         else {
             return Ok(());
         };
@@ -2294,7 +2303,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// everything cleared is still there to be scrolled back to and still there
     /// to be searched. That is exactly what the row below it is not.
     pub(in crate::runtime) fn clear_pane_screen(&mut self, seat: SeatId) -> Result<()> {
-        let Some(leaf) = self.sessions.get_mut(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
         let alternate = leaf.session.terminal_modes().alternate_screen;
@@ -2336,7 +2345,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// deleting history means — and the first thing to fall off it would be
     /// whichever structure the next slice adds.
     pub(in crate::runtime) fn clear_pane_scrollback(&mut self, seat: SeatId) -> Result<()> {
-        let Some(leaf) = self.sessions.get_mut(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
         leaf.session
@@ -2497,10 +2506,12 @@ impl<B: Backend> Runtime<'_, B> {
         // `position_of` and not `index_of_id`: the tick names a row of the table
         // being drawn, and a pane whose profile has been deleted has no row to
         // tick rather than the fallback's.
-        let current = self
-            .sessions
-            .get(&seat)
-            .and_then(|leaf| profiles::position_of(&leaf.launch.profile));
+        let current =
+            self.sessions
+                .get(&seat)
+                .and_then(|TerminalPane { session: leaf, .. }| {
+                    profiles::position_of(&leaf.launch.profile)
+                });
         let windows = self.other_window_rows();
         let programs = &self.app.profile_programs;
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
@@ -3042,15 +3053,18 @@ impl<B: Backend> Runtime<'_, B> {
     /// is a popup nothing can dismiss: it takes no input while the dialog owns
     /// the loop, and the click that dismisses the dialog is spent on the dialog.
     ///
-    /// The chooser opens where the pane is standing (`LeafSession::folder`: its
+    /// The chooser opens where the pane is standing (`ShellSession::folder`: its
     /// shell's last report, else its shell process's folder, else the folder it
     /// was opened in) — the same courtesy `browse_for_root` shows a column, and
     /// the same one I88 asks of every arriving shell.
     fn browse_for_split_root(&mut self, seat: SeatId) {
-        let start = self.sessions.get(&seat).and_then(|leaf| {
-            leaf.folder(&crate::pane_folder::SystemProcessFolders)
-                .into_folder()
-        });
+        let start = self
+            .sessions
+            .get(&seat)
+            .and_then(|TerminalPane { session: leaf, .. }| {
+                leaf.folder(&crate::pane_folder::SystemProcessFolders)
+                    .into_folder()
+            });
         match self.window.folder_picker.request(start.as_deref()) {
             Ok(true) => self.window.folder_pick = Some(FolderPick::SplitInto(seat)),
             // Already queued or already open: a second request while one is up
@@ -3401,7 +3415,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// **The geometry is the same sentence for all of them**: a leaf's grid is
     /// [`seats::pane_body_viewport`] of *that leaf's* seat, and of nothing else.
     /// **So is the timing.** Every leaf goes through
-    /// [`crate::LeafSession::propose_size`]: its actor reflows in this turn, and its
+    /// [`crate::ShellSession::propose_size`]: its actor reflows in this turn, and its
     /// child hears the last word of the gesture at the shared 200 ms quiet
     /// boundary. The siblings used to be told at once instead — "they have no
     /// drag to coalesce" was never true of them, only unnoticed, because the
@@ -3470,9 +3484,9 @@ impl<B: Backend> Runtime<'_, B> {
             let Some(leaf) = self.window.tabs[active].sessions.get_mut(&seat) else {
                 continue;
             };
-            // This leaf's own metrics (ticket 37), through `LeafSession::grid_for`.
-            let next_grid = leaf.grid_for(body);
-            leaf.propose_size(GridChange {
+            // This leaf's own metrics (ticket 37), through `ShellSession::grid_for`.
+            let next_grid = leaf.session.grid_for(&leaf.view.metrics, body);
+            leaf.session.propose_size(GridChange {
                 next: next_grid,
                 physical,
                 observed_at,
@@ -3504,8 +3518,8 @@ impl<B: Backend> Runtime<'_, B> {
         // reservation at window scale first and divides by this pane's cell after, which is
         // `cmdrail::terminal_grid_for`'s own order. A tab with no shell has no pane metrics
         // either, and its grid is traced at the window's base size.
-        let next_grid = match self.window.tabs[active].focused() {
-            Some(leaf) => leaf.grid_for(body),
+        let next_grid = match self.window.tabs[active].focused_pane() {
+            Some(leaf) => leaf.session.grid_for(&leaf.view.metrics, body),
             None => cmdrail::terminal_grid_for(&self.window.renderer.base_metrics(), body, false),
         };
         self.schedule_grid_change(
@@ -3548,7 +3562,7 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// **And one reflow per pane per gesture, which is the half this arrived
     /// without** (user report 2026-09-09). A tree walk is pure and cheap; the
-    /// `resize_at` at the end of [`crate::LeafSession::propose_size`] is a full vendor
+    /// `resize_at` at the end of [`crate::ShellSession::propose_size`] is a full vendor
     /// reflow of that pane's grid on the window thread, and taking it per hidden
     /// pane per OS event put the frame the visible pane owes the glass behind
     /// eleven of them on a twelve-tab window. So every leaf here is `Behind`:
@@ -3582,7 +3596,7 @@ impl<B: Backend> Runtime<'_, B> {
                         let leaf = tab.sessions.get(&target.seat)?;
                         Some((
                             target.seat,
-                            leaf.grid_for(target.body),
+                            leaf.session.grid_for(&leaf.view.metrics, target.body),
                             PhysicalSize::new(target.body.width, target.body.height),
                         ))
                     })
@@ -3592,7 +3606,7 @@ impl<B: Backend> Runtime<'_, B> {
             tab.seat_overflow = overflow;
             let tab_id = tab.id;
             for (seat, next_grid, physical) in sized {
-                let Some(leaf) = tab.sessions.get_mut(&seat) else {
+                let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get_mut(&seat) else {
                     continue;
                 };
                 leaf.propose_size(GridChange {
@@ -3693,7 +3707,7 @@ impl<B: Backend> Runtime<'_, B> {
     ) -> bt_transcript::paths::PrintedPathNamespace {
         self.sessions
             .get(&seat)
-            .map(|leaf| leaf.session.printed_path_namespace())
+            .map(|TerminalPane { session: leaf, .. }| leaf.session.printed_path_namespace())
             .unwrap_or_default()
     }
 
@@ -3722,7 +3736,7 @@ impl<B: Backend> Runtime<'_, B> {
         seat: SeatId,
         path: &Path,
     ) -> Option<bt_term::PathVerdict> {
-        self.sessions.get(&seat)?.session.path_verdict(path)
+        self.sessions.get(&seat)?.session.session.path_verdict(path)
     }
 
     /// [`Self::seat_path_verdict`] for the pane the pointer is standing in, for
@@ -3787,7 +3801,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// from here writes focus either — reading is not taking.
     pub(in crate::runtime) fn hovered_leaf(
         &self,
-    ) -> Option<(SeatId, &LeafSession, bt_render::GridHit)> {
+    ) -> Option<(SeatId, &TerminalPane, bt_render::GridHit)> {
         let (seat, position, frame) = self.pane_hit_context()?;
         let hit = self
             .pane_frame_metrics(seat)?
@@ -3830,7 +3844,7 @@ impl<B: Backend> Runtime<'_, B> {
         };
         leaf.view.frame_image_references = FrameImageReferences {
             columns: frame.columns.get(),
-            references: leaf.session.frame_image_references(frame),
+            references: leaf.session.session.frame_image_references(frame),
         };
     }
 
@@ -4543,7 +4557,7 @@ impl<B: Backend> Runtime<'_, B> {
                     // the seat of the `PasteTarget` the two readings agreed on
                     // — never the hover-time seat, and never whichever pane
                     // happens to be holding the keyboard.
-                    if self.paste_paths_into(target, vec![path], "write dragged path to PTY")? {
+                    if self.paste_paths_into(target, vec![path], PasteFrom::Drag)? {
                         self.focus_the_pane_a_path_landed_in(target.seat)?;
                     }
                     return Ok(true);
@@ -6265,7 +6279,7 @@ impl<B: Backend> Runtime<'_, B> {
                         ),
                         rows,
                         source: focus_thumb::SeatSource::Terminal {
-                            session: &leaf.session,
+                            session: &leaf.session.session,
                             skip: leaf.view.card_skip,
                         },
                     };
@@ -6729,17 +6743,120 @@ impl<B: Backend> Runtime<'_, B> {
     }
 }
 
+/// **A pane's held bytes, delivered to what it was born as** — the shell, or, for a pane born with
+/// no shell (a program this machine does not have, `Started::Nothing`, or a shell that did not
+/// start), nowhere: then the bytes are dropped and `note` is told once how many.
+pub(crate) fn deliver_held_input(
+    birth: &PaneBirth,
+    target: PtyTarget<'_>,
+    mut note: impl FnMut(&str),
+) -> Result<()> {
+    birth.deliver(|held| match target {
+        PtyTarget::Nowhere => {
+            note(&format!(
+                "a pane born with no shell (no program here, or its shell did not start) dropped \
+                 the {} byte(s) typed into it while it waited",
+                held.len()
+            ));
+            Ok(())
+        }
+        target => write_pty_input(
+            target,
+            held,
+            "deliver what was typed while the shell was being born",
+        ),
+    })
+}
+
+/// Tell a shell that has just landed the last pane size released after its birth was asked for.
+/// Both an ordinary pane birth and a birth-death fallback spend [`crate::ShellLanding::owed_physical`]
+/// here, through the same admitted PTY-resize door.
+pub(crate) fn apply_owed_shell_resize(
+    leaf: &mut ShellSession,
+    born_grid: GridSize,
+    owed_physical: Option<PhysicalSize<u32>>,
+) -> Result<()> {
+    if let (Some(pty), Some(physical)) = (leaf.life.pty_mut(), owed_physical)
+        && leaf.conpty_grid != born_grid
+    {
+        // The same admitted door every released resize takes (`doors::PtyResize`, row 12).
+        let grid = leaf.conpty_grid;
+        bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
+            pty_door::resize(token, pty, pty_size(grid, physical)).map_err(anyhow::Error::from)
+        })
+        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+        .context("tell a landed shell the grid its pane moved to while it was being born")?;
+    }
+    Ok(())
+}
+
+/// **A pane's shell has answered: land it** (T-BIRTH-OFF-WINDOW). The pane's birth is finished
+/// from the answer exactly as a pane with its shell in hand is ([`finish_leaf_birth`]); a resize
+/// released while the shell was being born is told to it; what was typed meanwhile is written to
+/// it first, in order. Answers the refusal to say when the birth failed — the pane is then a pane
+/// with no shell, and what was typed into it is said dropped. `None` and nothing changed while
+/// the shell has not answered.
+pub(crate) fn land_shell_birth(
+    leaf: &mut TerminalPane,
+    mut note: impl FnMut(&str),
+) -> Result<Option<anyhow::Error>> {
+    let Some(mut held) = leaf.session.life.take_birth() else {
+        return Ok(None);
+    };
+    let BirthWait::Shell(landing) = &mut held.waiting else {
+        leaf.session.life.begin_birth(held);
+        return Ok(None);
+    };
+    let Some(pty_door::Born {
+        session: answer,
+        folder_gone,
+    }) = landing.shell.take()
+    else {
+        leaf.session.life.begin_birth(held);
+        return Ok(None);
+    };
+    // Read off the birth that has left the pane; it is spent only below, in the delivery of what
+    // it holds, so nothing a birth carries can be dropped on the way.
+    let decision = match (&answer, folder_gone) {
+        (None, _) => landing.decision.clone().with_resume_not_started(&mut note),
+        (Some(_), true) => landing.decision.clone().with_folder_gone(&mut note),
+        (Some(_), false) => landing.decision.clone(),
+    };
+    let (born_grid, owed_physical) = (landing.born_grid, landing.owed_physical);
+    let (pty, refusal) = match answer {
+        // **A resume whose folder is gone started nothing** (row 195, review F3): the pane is
+        // handed its shell with the could-not-resume line at the reaper's next turn.
+        None => {
+            leaf.session.agent.not_started();
+            (None, None)
+        }
+        Some(Ok(pty)) => (Some(pty), None),
+        Some(Err(error)) => (
+            None,
+            Some(anyhow::Error::from(error).context(format!(
+                "spawn the {} profile in ConPTY",
+                profile_banner_name(&decision.spawn_profile)
+            ))),
+        ),
+    };
+    let seed = held.seed.clone();
+    finish_leaf_birth(leaf, pty, &decision, &seed, None, false)?;
+    apply_owed_shell_resize(&mut leaf.session, born_grid, owed_physical)?;
+    deliver_held_input(&held, leaf.session.input_target(), note)?;
+    Ok(refusal)
+}
+
 /// Apply the whole rows spent by `CardAim` to the leaf's card window.
 ///
 /// `site` names the card and says the notch is what ran the aim —
 /// `BT_CARD_TRACE` and nothing else (§7.1.6b′).
 pub(crate) fn aim_card_window(
-    leaf: &mut LeafSession,
+    leaf: &mut TerminalPane,
     rows: usize,
     steps: i32,
     site: card_trace::Card,
 ) -> bool {
-    focus_thumb::aim_card_skip(&leaf.session, &mut leaf.view.card_skip, rows, steps, site)
+    leaf.aim_card_skip(rows, steps, site)
 }
 
 /// **The F2 budget's own probe** — see [`super::floats::dump_chrome_frame`], which it copies
@@ -6823,7 +6940,9 @@ pub(crate) fn card_picture_in<'a>(
             width_px: *width_px,
             height_px: *height_px,
         }),
-        PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
+        PeekCacheEntry::Pending { .. }
+        | PeekCacheEntry::Unanswered { .. }
+        | PeekCacheEntry::Failed(_) => None,
     }
 }
 
@@ -7271,7 +7390,7 @@ fn birth_due(
 /// and a *Restart shell* successor's — in each of its waits, so no birth is one no landing pass
 /// looks at.
 pub(crate) fn births_due(
-    leaf: &LeafSession,
+    leaf: &TerminalPane,
     rows_decide: &dyn Fn(&LeafSeed) -> bool,
     locale_settled: bool,
 ) -> Vec<(BirthAt, BirthDue)> {
@@ -7288,13 +7407,13 @@ pub(crate) fn births_due(
 /// Land the successor's shell, if it answered ([`land_shell_birth`]); a landed or refused
 /// successor leaves the pane, which then has no restart in flight.
 pub(crate) fn land_successor(
-    leaf: &mut LeafSession,
+    leaf: &mut TerminalPane,
     note: impl FnMut(&str),
 ) -> Result<SuccessorLanding> {
     let Some(successor) = leaf.successor_mut() else {
         return Ok(SuccessorLanding::Waiting);
     };
-    if !successor.shell_answered() {
+    if !successor.session.shell_answered() {
         return Ok(SuccessorLanding::Waiting);
     }
     let refusal = land_shell_birth(successor, note)?;
@@ -7310,7 +7429,7 @@ pub(crate) fn land_successor(
 /// **The ConPTY source the startup trace records for a pane that has just landed** — its
 /// shell's, or `not-started` for a birth that failed (round 2: a failed identity shell is a
 /// launch shell the trace no longer waits for, and is not a probe's direct input).
-pub(crate) fn landed_source(leaf: &LeafSession, refused: bool) -> Option<String> {
+pub(crate) fn landed_source(leaf: &ShellSession, refused: bool) -> Option<String> {
     if refused {
         return Some("not-started".to_owned());
     }
@@ -7625,7 +7744,7 @@ pub(crate) fn rail_overlay_layer(rail: &seats::ChromeGroup, fold: f32) -> marks:
 /// still in birth included — is handed `LeafGone` and then has its shell retired, in that order.
 ///
 /// **Exactly once** is two rules, both kept here. A leaf a walk has already ended is not handed
-/// `LeafGone` again ([`LeafSession::attention_ended`]): a window closed and then retired by a quit
+/// `LeafGone` again ([`ShellSession::attention_ended`]): a window closed and then retired by a quit
 /// before it is reaped is walked twice. And a leaf `moving` names — the cargo of a cross-window
 /// handover from this window that is decided and not yet performed — is not ending, so its place
 /// stays; its `LeafGone` comes from whichever road ends it in the window it lands in. Its shell is

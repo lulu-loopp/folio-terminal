@@ -5,8 +5,9 @@ use crate::profiles;
 use crate::shell_integration;
 use crate::window_seam::prelude::*;
 use crate::{
-    Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
-    diagnostics, explorer_menu, first_run, i18n, install_channel, restore, toast, tooltip,
+    Announce, Runtime, agent_hooks_step, attention_codex, attention_copilot, attention_hooks,
+    attention_ownership, diagnostics, explorer_menu, first_run, i18n, install_channel, restore,
+    toast, tooltip,
 };
 use anyhow::Result;
 use winit::keyboard::{Key, NamedKey};
@@ -106,24 +107,40 @@ impl<B: Backend> Runtime<'_, B> {
     /// The one that matters is a settings file this build cannot read: it is left exactly as it is,
     /// because it belongs to somebody who wrote it.
     pub(crate) fn apply_claude_hooks(&mut self, install: bool, announce: Announce) -> Result<bool> {
+        // **A press and the start-time repair of this family never write together, and neither
+        // waits for the other** (0.4.10 plan row 67b, review N2): the press holds the family's
+        // latch across its write, a repair that finds it taken writes nothing, and a press that
+        // finds the repair holding it writes nothing either — it says so and asks for the pass,
+        // whose answer redraws the row. Taken before the decision, so a take-over's consent is
+        // not spent on a press that wrote nothing.
+        let Some(press) = agent_hooks_step::AGENT_HOOKS.take_latch(0) else {
+            return self.press_beside_a_repair(0, i18n::Text::ClaudeHooksFailedToast);
+        };
         let config = attention_hooks::settings_path();
         let decision = attention_ownership::next_decision(
             &mut self.app.agent_takeovers[0],
             install,
             config.as_deref(),
+            std::time::Instant::now(),
         );
-        let exe = std::env::current_exe().ok();
+        let exe = attention_ownership::this_copy();
         let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
             Ok(exe) => attention_hooks::apply(decision, exe),
             Err(reason) => attention_hooks::Outcome::Refused(reason),
         };
+        drop(press);
         if let attention_hooks::Outcome::TakeOverRequired(owners) = &outcome {
-            self.app.agent_takeovers[0] = attention_ownership::Pending::new(config, owners.clone());
+            self.app.agent_takeovers[0] = attention_ownership::Pending::new(
+                config,
+                owners.clone(),
+                std::time::Instant::now(),
+            );
         }
         (
             self.app.claude_hooks_installed,
             self.app.agent_config_refusals[0],
         ) = attention_hooks::row_state();
+        crate::agent_row_asked_again(self.app, 0);
         match outcome {
             attention_hooks::Outcome::Installed | attention_hooks::Outcome::Removed
                 if announce == Announce::OnlyFailures =>
@@ -151,6 +168,17 @@ impl<B: Backend> Runtime<'_, B> {
             // The file already said what the press asked for. Nothing was written, and a card
             // saying so would be a card about this build's bookkeeping.
             attention_hooks::Outcome::Unchanged => Ok(true),
+            // The switch is off, and a file beside the one it was pressed on was left as it
+            // was because it could not be read: said, whoever asked.
+            attention_hooks::Outcome::LeftUnread { reason, .. } => {
+                self.toast(
+                    toast::ToastKind::Info,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::agent_install_refused(i18n::Text::ClaudeHooksRemovedToast.text(), reason),
+                )?;
+                Ok(true)
+            }
             attention_hooks::Outcome::TakeOverRequired(owners)
             | attention_hooks::Outcome::LeftOther(owners) => {
                 self.toast(
@@ -173,36 +201,54 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
-    /// Write Folio's `notify` program into the user's own codex configuration, or take it back out.
+    /// Write Folio's `Stop` hook into the user's own codex `hooks.json`, or take it back out
+    /// (0.4.10 plan row 69).
     ///
-    /// [`Self::apply_claude_hooks`]'s verb over a second upstream and a second file format, and
-    /// every clause of that one's note holds here: the row is redrawn from the file either way, so
-    /// a refusal leaves the switch standing where the machine actually is; nothing is written
-    /// anywhere but the one user-level file; and a refusal carries a sentence, because on the
-    /// machine where it fires nobody else can see it.
+    /// [`Self::apply_claude_hooks`]'s verb over a second upstream, and every clause of that one's
+    /// note holds here: the row is redrawn from the files either way, so a refusal leaves the
+    /// switch standing where the machine actually is; nothing is written anywhere but the user's
+    /// own codex folder; and a refusal carries a sentence, because on the machine where it fires
+    /// nobody else can see it.
     ///
-    /// The refusal this one has that the other does not is **somebody else's `notify`**. There is
-    /// one such key in that file, so installing over it would delete a program this build cannot
-    /// give back — see `attention_codex`'s header.
+    /// The second file it may write is `config.toml` beside it, and only to take out the `notify`
+    /// line an earlier Folio wrote there — see `attention_codex`'s header. On a codex below 0.148
+    /// an install writes that line instead (0.4.10 plan row 69c).
     pub(crate) fn apply_codex_notify(&mut self, install: bool, announce: Announce) -> Result<bool> {
-        let config = attention_codex::config_path();
+        // **A press and the start-time repair of this family never write together, and neither
+        // waits for the other** (0.4.10 plan row 67b, review N2): the press holds the family's
+        // latch across its write, a repair that finds it taken writes nothing, and a press that
+        // finds the repair holding it writes nothing either — it says so and asks for the pass,
+        // whose answer redraws the row. Taken before the decision, so a take-over's consent is
+        // not spent on a press that wrote nothing.
+        let Some(press) = agent_hooks_step::AGENT_HOOKS.take_latch(1) else {
+            return self.press_beside_a_repair(1, i18n::Text::CodexNotifyFailedToast);
+        };
+        // The take-over's consent is keyed by the file the press writes Folio's entry in.
+        let config = attention_codex::pressed_path(install);
         let decision = attention_ownership::next_decision(
             &mut self.app.agent_takeovers[1],
             install,
             config.as_deref(),
+            std::time::Instant::now(),
         );
-        let exe = std::env::current_exe().ok();
+        let exe = attention_ownership::this_copy();
         let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
             Ok(exe) => attention_codex::apply(decision, exe),
             Err(reason) => attention_codex::Outcome::Refused(reason),
         };
+        drop(press);
         if let attention_codex::Outcome::TakeOverRequired(owners) = &outcome {
-            self.app.agent_takeovers[1] = attention_ownership::Pending::new(config, owners.clone());
+            self.app.agent_takeovers[1] = attention_ownership::Pending::new(
+                config.clone(),
+                owners.clone(),
+                std::time::Instant::now(),
+            );
         }
         (
             self.app.codex_notify_installed,
             self.app.agent_config_refusals[1],
         ) = attention_codex::row_state();
+        crate::agent_row_asked_again(self.app, 1);
         match outcome {
             attention_codex::Outcome::Installed | attention_codex::Outcome::Removed
                 if announce == Announce::OnlyFailures =>
@@ -214,7 +260,9 @@ impl<B: Backend> Runtime<'_, B> {
                     toast::ToastKind::Ok,
                     toast::ToastAnchor::Window,
                     None,
-                    i18n::Text::CodexNotifyAddedToast.text().to_owned(),
+                    attention_codex::added_toast(config.as_deref())
+                        .text()
+                        .to_owned(),
                 )?;
                 Ok(true)
             }
@@ -223,12 +271,29 @@ impl<B: Backend> Runtime<'_, B> {
                     toast::ToastKind::Ok,
                     toast::ToastAnchor::Window,
                     None,
-                    i18n::Text::CodexNotifyRemovedToast.text().to_owned(),
+                    i18n::Text::CodexEntryRemovedToast.text().to_owned(),
                 )?;
                 Ok(true)
             }
             // The file already said what the press asked for.
             attention_codex::Outcome::Unchanged => Ok(true),
+            // The switch is off, and `config.toml` beside the file it was pressed on was left as
+            // it was — one Folio could not read, or will not edit: said, whoever asked, and
+            // whether a hook of Folio's was there to take out (re-review R4).
+            attention_codex::Outcome::LeftUnread { removed, reason } => {
+                let head = if removed {
+                    i18n::Text::CodexHookRemovedConfigLeft
+                } else {
+                    i18n::Text::CodexNoHookConfigLeft
+                };
+                self.toast(
+                    toast::ToastKind::Info,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::agent_install_refused(head.text(), reason),
+                )?;
+                Ok(true)
+            }
             attention_codex::Outcome::TakeOverRequired(owners)
             | attention_codex::Outcome::LeftOther(owners) => {
                 self.toast(
@@ -271,24 +336,40 @@ impl<B: Backend> Runtime<'_, B> {
         install: bool,
         announce: Announce,
     ) -> Result<bool> {
+        // **A press and the start-time repair of this family never write together, and neither
+        // waits for the other** (0.4.10 plan row 67b, review N2): the press holds the family's
+        // latch across its write, a repair that finds it taken writes nothing, and a press that
+        // finds the repair holding it writes nothing either — it says so and asks for the pass,
+        // whose answer redraws the row. Taken before the decision, so a take-over's consent is
+        // not spent on a press that wrote nothing.
+        let Some(press) = agent_hooks_step::AGENT_HOOKS.take_latch(2) else {
+            return self.press_beside_a_repair(2, i18n::Text::CopilotHooksFailedToast);
+        };
         let config = attention_copilot::hooks_path();
         let decision = attention_ownership::next_decision(
             &mut self.app.agent_takeovers[2],
             install,
             config.as_deref(),
+            std::time::Instant::now(),
         );
-        let exe = std::env::current_exe().ok();
+        let exe = attention_ownership::this_copy();
         let outcome = match attention_ownership::stable_executable(exe.as_deref()) {
             Ok(exe) => attention_copilot::apply(decision, exe),
             Err(reason) => attention_copilot::Outcome::Refused(reason),
         };
+        drop(press);
         if let attention_copilot::Outcome::TakeOverRequired(owners) = &outcome {
-            self.app.agent_takeovers[2] = attention_ownership::Pending::new(config, owners.clone());
+            self.app.agent_takeovers[2] = attention_ownership::Pending::new(
+                config,
+                owners.clone(),
+                std::time::Instant::now(),
+            );
         }
         (
             self.app.copilot_hooks_installed,
             self.app.agent_config_refusals[2],
         ) = attention_copilot::row_state();
+        crate::agent_row_asked_again(self.app, 2);
         self.app.copilot_readiness = attention_copilot::readiness();
         match outcome {
             attention_copilot::Outcome::Installed | attention_copilot::Outcome::Removed
@@ -316,6 +397,20 @@ impl<B: Backend> Runtime<'_, B> {
             }
             // The directory already said what the press asked for.
             attention_copilot::Outcome::Unchanged => Ok(true),
+            // The switch is off, and a file beside the one it was pressed on was left as it
+            // was because it could not be read: said, whoever asked.
+            attention_copilot::Outcome::LeftUnread { reason, .. } => {
+                self.toast(
+                    toast::ToastKind::Info,
+                    toast::ToastAnchor::Window,
+                    None,
+                    i18n::agent_install_refused(
+                        i18n::Text::CopilotHooksRemovedToast.text(),
+                        reason,
+                    ),
+                )?;
+                Ok(true)
+            }
             attention_copilot::Outcome::TakeOverRequired(owners)
             | attention_copilot::Outcome::LeftOther(owners) => {
                 self.toast(
@@ -338,13 +433,30 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **A press on agent row `family` while the start-time repair is writing the same file**
+    /// (0.4.10 plan row 67b, review N2): nothing is written, the press says why under the row's
+    /// own failure (`failed`), and the pass is asked again so the row is said from what the
+    /// repair left.
+    fn press_beside_a_repair(&mut self, family: usize, failed: i18n::Text) -> Result<bool> {
+        crate::agent_row_asked_again(self.app, family);
+        self.toast(
+            toast::ToastKind::Error,
+            toast::ToastAnchor::Window,
+            None,
+            i18n::agent_install_refused(failed.text(), i18n::Text::AgentHooksBeingRepaired.text()),
+        )?;
+        Ok(false)
+    }
+
     /// Put the first-run card up, once, on a machine that has never run Folio
     /// (§7.56).
     ///
     /// Polled from the event loop — raising a modal is a change to the window
-    /// and the window is this thread's — and for one more reason of its own: the copilot row cannot be offered
-    /// until the version question has been answered, and that answer arrives on
-    /// another thread.
+    /// and the window is this thread's — and for two more reasons of its own: the
+    /// copilot row cannot be offered until the version question has been
+    /// answered, and the agent rows are said from the carry pass's answer about
+    /// the agents' files (0.4.10 plan row 73); both arrive from other threads.
+    /// **Nothing here reads a file**: every question below is of memory.
     ///
     /// **`Shown` is written the moment it goes up, not when it is answered.** A
     /// crash, an `Alt+F4`, or a process killed while the card is on screen must
@@ -375,16 +487,6 @@ impl<B: Backend> Runtime<'_, B> {
         {
             return Ok(());
         }
-        // Nor, for one turn, where they keep their configuration (T-FRESH-FACTS): the rows it
-        // offers write hooks into the folders the walk read out of the account's environment,
-        // which arrive with the walk's end, after the rows. After that turn the card reads the
-        // folders it has — the launch environment's, when no walk has answered.
-        if !first_run::agent_folders_settled(
-            &mut self.app.first_run_waited_for_agent_folders,
-            attention_hooks::AGENT_HOMES.answered(),
-        ) {
-            return Ok(());
-        }
         // The one row whose offer depends on a version, and the version comes
         // off another process. Starting the probe here rather than waiting for
         // the Agents page is what makes the wait finite; the card holds until it
@@ -396,14 +498,41 @@ impl<B: Backend> Runtime<'_, B> {
             attention_copilot::begin_probe();
         }
         let copilot_ready = !copilot_on_path || attention_copilot::probe_settled();
+        // **The agent rows are the carry pass's answer, never a read here** (0.4.10 plan row 73).
+        // The pass reads the agents' files on its worker once the walk has named the folders the
+        // account keeps them in (T-FRESH-FACTS), with codex's version settled, and the window
+        // adopts what it found (`adopt_agent_hooks_snapshot`). So a card that could offer an agent
+        // row waits for that answer — and, where copilot is on the path, for one whose readiness
+        // was read after the probe came back — and is then built in one piece from it: nothing is
+        // drawn before, and nothing of it changes after (rulings R3, R6). No timer of its own
+        // (R4): a pass that never answers leaves the card for the next launch, and only while this
+        // run writes no `settings.json` (`first_run::due`); a round that hangs is not run again by
+        // a later request, as the latch only marks a round to follow one that ends.
+        let platform = bt_platform::host_platform();
+        let found = [
+            (first_run::RowKind::Claude, "claude"),
+            (first_run::RowKind::Codex, "codex"),
+            (first_run::RowKind::Copilot, "copilot"),
+        ]
+        .map(|(kind, id)| kind.offered_on(platform) && self.agent_is_on_this_machine(id));
+        // A copy whose program cannot be named is scanned by no pass, and every agent row's press
+        // would be refused: the card offers none and waits for nothing (R5).
+        let copy_named = attention_ownership::this_copy().is_some();
+        let agents_answered = !first_run::card_waits_for_the_agents(
+            found,
+            std::array::from_fn(|index| self.app.agent_hooks_found[index].is_some()),
+            self.app.copilot_read_after_probe,
+            copy_named,
+        );
+        let ready = copilot_ready && agents_answered;
         // **How this copy was installed decides whether the Explorer row
         // arrives on** (U-3), and it lands on its own worker. Read at start and
         // in milliseconds, so it is almost always here; when it is not, the card
         // waits one turn for it — the worker's wake brings that turn round — and
-        // then reads a still-missing answer as unknown. Only once the copilot
-        // wait is over, so the one turn is not spent while something else is
+        // then reads a still-missing answer as unknown. Only once the agents'
+        // waits are over, so the one turn is not spent while something else is
         // holding the card anyway.
-        if copilot_ready
+        if ready
             && !first_run::install_channel_settled(
                 &mut self.app.first_run_waited_for_channel,
                 install_channel::channel().is_some(),
@@ -411,31 +540,39 @@ impl<B: Backend> Runtime<'_, B> {
         {
             return Ok(());
         }
-        // The machine questions below include file reads. Consume readiness
-        // once, before asking them, even if this platform offers no card rows.
-        if !first_run::take_ready_edge(&mut self.app.first_run_attempted, copilot_ready) {
+        // One attempt per readiness, even on a platform that offers no card rows.
+        if !first_run::take_ready_edge(&mut self.app.first_run_attempted, ready) {
             return Ok(());
         }
-        let machine = first_run::Machine {
-            // Both halves of the first page: a Windows that shows one, and the
-            // file that can be registered on it shipped beside the executable.
-            // Through `first_page_offered` and not spelled again here, because
-            // the Settings row asks the same question through the same function
-            // and the card's switch has to mean what that row's switch means.
-            explorer_first_page_available: explorer_menu::first_page_offered(
-                explorer_menu::supported(),
-                explorer_menu::package_file().is_some(),
-            ),
-            claude_found: self.agent_is_on_this_machine("claude"),
-            claude_installable: attention_hooks::state() == attention_hooks::State::Absent,
-            codex_found: self.agent_is_on_this_machine("codex"),
-            codex_installable: attention_codex::state() == attention_codex::State::Absent,
-            copilot_found: copilot_on_path,
-            copilot_installable: attention_copilot::state() == attention_copilot::State::Absent
-                && attention_copilot::readiness() == attention_copilot::Readiness::Ready,
-            install_channel: install_channel::channel()
-                .unwrap_or(install_channel::Channel::Unknown),
-        };
+        // What a press of each agent row would do, said from the adopted answer (R1), and every
+        // other field of the card's machine, in one pure function (the review's N3).
+        let machine = first_run::card_machine(
+            first_run::CardBase {
+                // Both halves of the first page: a Windows that shows one, and the
+                // file that can be registered on it shipped beside the executable.
+                // Through `first_page_offered` and not spelled again here, because
+                // the Settings row asks the same question through the same function
+                // and the card's switch has to mean what that row's switch means.
+                explorer_first_page_available: explorer_menu::first_page_offered(
+                    explorer_menu::supported(),
+                    explorer_menu::package_file().is_some(),
+                ),
+                install_channel: install_channel::channel()
+                    .unwrap_or(install_channel::Channel::Unknown),
+                resume_agents: self.app.settings_store.loaded().resume_agents,
+            },
+            first_run::AdoptedAgents {
+                on_path: [
+                    self.agent_is_on_this_machine("claude"),
+                    self.agent_is_on_this_machine("codex"),
+                    copilot_on_path,
+                ],
+                answers: &self.app.agent_hooks_found,
+                codex_install_refused: self.app.codex_install_refused,
+                copilot_readiness: self.app.copilot_readiness,
+                copy_named,
+            },
+        );
         let rows = first_run::rows(&machine);
         let shape = first_run::explorer_shape(&machine);
         // **Written down only if it went up** (macOS plan M3-6). The rows are
@@ -447,6 +584,7 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         self.record_first_run_card(bt_persist::FirstRunCardV1::Shown);
+        diagnostics::stderr_line(first_run::card_opened_line(self.app.carry_answers_adopted));
         self.rebuild_first_run_tip_anchors();
         if self.refresh_overlay() {
             self.present_chrome_change()?;

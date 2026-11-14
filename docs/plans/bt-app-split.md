@@ -2,7 +2,7 @@
 
 2026-09-15, revised four times the same day after four adversarial reviews.
 Written against `main` at `76ca0788`, in the worktree
-`D:\Developer\bt-wt\bt-app-split-plan`; the caller references in §5 are
+`X:\<pre-rename worktrees>\bt-app-split-plan`; the caller references in §5 are
 refreshed against `main` at `ee771130`, which is where the tickets will be cut.
 
 **Revision 5.** Four read-only adversarial reviews have been answered, and the

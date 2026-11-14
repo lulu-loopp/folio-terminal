@@ -10,12 +10,12 @@ use crate::test_support::{
 #[test]
 fn card_restore_alternate_screen_excludes_primary_history() {
     let mut leaf = card_restore_fixture();
-    leaf.session.feed(b"\x1b[?1049h").unwrap();
+    leaf.session.session.feed(b"\x1b[?1049h").unwrap();
     let text = (1..=20)
         .map(|number| format!("A{number:03}"))
         .collect::<Vec<_>>()
         .join("\r\n");
-    leaf.session.feed(text.as_bytes()).unwrap();
+    leaf.session.session.feed(text.as_bytes()).unwrap();
     // The card sees only alternate rows, never primary history: the stored
     // 130 (a place among the primary's 120 rows) is *drawn* at the alternate
     // screen's own 36, and the top of that screen is the blank the twenty
@@ -34,7 +34,7 @@ fn card_restore_alternate_screen_excludes_primary_history() {
     assert_eq!(card_restore_first(&leaf), "A007");
     card_restore_settle(&mut leaf);
     assert_eq!(card_restore_first(&leaf), "A007");
-    let assembled = focus_thumb::transcript_tail(&leaf.session, 40, 200, 0).0;
+    let assembled = focus_thumb::transcript_tail(&leaf.session.session, 40, 200, 0).0;
     let nonblank = assembled
         .iter()
         .filter(|line| !line.is_empty())

@@ -1545,7 +1545,7 @@ mod tests {
         );
 
         // A path breaks at its joints, not between letters, when a joint fits.
-        let path = "D:/Developer/folio-terminal/.claude/worktrees/t1-tab-basics";
+        let path = "D:/Developer/lunar-workshop/.claude/worktrees/t1-tab-basics";
         let broken = wrap(path, 200.0, ten_per_char);
         assert!(broken.iter().all(|line| ten_per_char(line) <= 200.0));
         assert_eq!(broken.concat(), path);

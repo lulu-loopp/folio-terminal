@@ -255,6 +255,53 @@ the per-door arm tests in `bt-platform`. When it is red, move the platform fact
 behind the platform crate/module boundary or update the declared arm and its
 cross-platform contract together; never scatter a new local cfg to silence it.
 
+What every source guard calls product is `bt_source::Occurrence::in_the_product`. Since
+2026-10-29 (T-CFG-TEST-USE-IS-NOT-PRODUCT, plan row 77) it reads, beside the file, the item and
+the inline module, the `cfg` written on any node (`Index::test_gates`: a `use`, a `const`, an
+`impl` header, a macro, a `let`, an expression, a match arm, a parameter), and the index refuses
+a `cfg` whose predicate is not a name, a name-value or `all`/`any`/`not` of them, a `cfg_attr`
+that writes a `cfg`, and a `cfg` on a parsed node where it reads no gate (`tests/index.rs`
+`a_cfg_is_read_wherever_it_stands`, `a_cfg_the_reading_cannot_read_is_refused_by_its_line`); the
+literal `cfg(true)` and `cfg(false)` are refused as unreadable. Inside a macro's tokens, which
+`syn` does not parse (2026-10-30, T-CFG-INSIDE-MACRO-TOKENS, plan row 109; it replaces row 77's
+stated limit): the index reads one body — a `macro_rules!` that no `cfg` conditions, with one arm
+taking `$( $(#[$a:meta])* $v:ident, )*` whose transcriber's top-level items are each gated, or an
+`enum` whose whole body is `$( $(#[$a])* $v, )*`, or name neither variable (so no name lands
+inside another macro's tokens, `stringify!` and the like, where its attributes gate nothing), and
+an invocation that resolves to it: one-segment path, the nearest earlier definition in the same
+file in a scope holding the invocation, and no hazard between them — a macro invocation in item or
+statement position, an item carrying an attribute macro, a `derive` other than the language's own,
+`macro_use`, or a `cfg_attr` writing one of those (2026-10-30 review fold). Each entry's `cfg` is
+read as a variant's, and the
+definition's items as items; the tree's one such macro is `bt-app`'s `text_entries!`. Every other
+`cfg` (or `cfg`-writing `cfg_attr`) in any macro's tokens, invocation or definition, refuses the
+index by its line, the attribute as written and the innermost macro's path
+(`Rejection::CfgInMacroTokens`), and a read-shape invocation whose
+body is not that list is refused as unreadable (`Rejection::UnreadableMacroBody`). So a new macro
+carrying a `cfg` shows up as a red index, never as a silent product count; the read shape grows
+only by a row with its grammar, a fixture and a pin (`tests/index.rs`
+`a_cfg_in_a_read_macro_body_is_a_gate`, `a_cfg_in_any_other_macro_body_is_refused_by_its_line`;
+`tests/contract.rs` `the_test_only_texts_are_not_product`). Not reached, a limit older than the
+row: a macro in an attribute's value (`#[doc = m!(…)]`) and `syn`'s unparsed `Verbatim` tokens,
+where a `cfg` is neither read nor refused; the tree has no `cfg` there. Under an attribute macro
+(2026-10-31, T-GATE-WALK-UNDER-ATTRIBUTE-MACROS, plan row 122; the review of row 109, R-N2): an
+attribute macro receives its item's tokens and may emit anything, so every `cfg` (or
+`cfg`-writing `cfg_attr`) inside an item, `impl` item, `trait` item or foreign item that carries
+one refuses the index by its line and the attribute macro as written
+(`Rejection::CfgUnderAttributeMacro`), at any depth and inside macro tokens too; the item itself
+is not refused, and its own `cfg`s are read as before (the compiler applies them first). Inert,
+and read through: the language's own attributes, `rustfmt::`, `clippy::` and `diagnostic::` (not
+`::`-led, which names a crate), a `derive` of anything, a derive helper beside a derive that
+declares it, spelt as written (a closed table: `serde` for `Serialize`/`Deserialize` or
+`serde::Serialize`/`serde::Deserialize`; `error`, `from`, `source`, `backtrace` for `Error` or
+`thiserror::Error`), and a `cfg_attr` writing only those. Every other attribute may rewrite,
+`cfg_attr(…, attr_macro)` whatever its predicate, and a helper beside a derive spelt any other way
+(`other_crate::Error`). Not reached: a `use` that replaces a built-in attribute macro (`use
+test_log::test;`) — the allow-list is keyed by name; none in the tree. Such `impl`, `trait` and foreign items are hazards too, like items
+(`tests/index.rs` `a_cfg_under_an_attribute_macro_is_refused_by_its_line`,
+`a_cfg_under_inert_attributes_is_a_gate`). The tree's one attribute macro on items is
+windows-rs's `#[implement]` (three structs in `bt-platform`), with no `cfg` inside.
+
 ## Ownership census
 
 The rule: the asking/telling fields of `Runtime`, `App`, `WindowState`, and
@@ -319,6 +366,16 @@ the rules on a fixture. When red, regenerate with
 `target/depmap/`) and commit the files with the change that moved them; never
 edit a row. A header count that grows (reads not attributed, calls not
 followed) means the map sees less; the change that regenerates it says why.
+Since 2026-10-29 (T-GENERATED-STAMP-REFUSES-DIRTY-TREES, plan row 99)
+`scripts/ci/check-generated-stamps.ps1` (CI `logic`; its cases in
+`check-generated-stamps-tests.ps1`) reads the `# measured at <sha>` line the
+test skips and refuses a file without exactly one, a line off the grammar, the
+` with uncommitted changes` suffix, a sha that is no commit or not an ancestor
+of HEAD, and four files naming different commits; a shallow clone exits 2.
+When red: commit everything, run the generator, commit its output. Since
+2026-11-02 (T-DOC-LINK-DEBT, plan row 78) it reads `docs/plans/DOC-LINK-DEBT.tsv`'s
+stamp by the same rules, as a set of its own: it may name another commit than
+the map's.
 
 ## Call graph
 
@@ -366,7 +423,10 @@ and their methods are reachable only as `Ambiguous` candidates.
 **The unfollowed edges, by site.** `docs/plans/UNFOLLOWED-EDGES.tsv` lists every `Dynamic` edge
 and every `Ambiguous` edge with other than one candidate met walking from every product callable
 of bt-app — the calls the door reach does not follow — keyed by file, item, kind and the call's
-name, with `sites` (the calls behind the key) and a `reason`.
+name, with `sites` (the calls behind the key) and a `reason`. Since 2026-10-28 (plan row 84) its
+header also states how many `Ambiguous` calls have exactly one candidate
+(`Unresolved::sole_candidate`, the rule the census test's callers count by), held equal to the tree
+by the same test, so a rename that takes an edge off the list moves that count.
 `the_unfollowed_edges_are_the_committed_list` holds the list equal to the tree;
 `scripts/ci/check-unfollowed-edges.ps1` holds it to the merge base's, refusing a key added or
 grown unless its reason is `YYYY-MM-DD: <why>` — for a grown key, a reason other than the one the
@@ -475,7 +535,9 @@ widen the grammar in its own change with a planted case.
 before `parse`, and in the claim after the update pass, after `parse`; and
 `explorer_menu::settle_package` (T-EXPLORER-MENU-PROBE-OFF-THE-WINDOW-THREAD,
 2026-10-25) in the loop's process once the running image is resolved, after
-`hand_over`. Every
+`hand_over`, and `settings::settle_notices`
+(T-NOTICES-DESTINATION-OFF-THE-WINDOW-THREAD, 2026-11-02) on the line after it,
+after `hand_over`. Every
 pinned writer is spelled only as the call through its pin's module path,
 `module::writer(…)` (`admission::` for the role and phase writers): an import, a
 value or a rename is refused by name and path
@@ -486,14 +548,21 @@ had. A pin is one call: the calls are counted per (writer, owner, landmark), and
 a second call matching a pin already met is reported as a surplus
 (`a_second_call_matching_a_pin_is_a_surplus`).
 
-A statement's `cfg` is refused, not read (T-WINDOW-WAITS-STATEMENT-CFG,
-2026-10-26). The index reads a file's, an item's and a module's `cfg`, never a
-statement's, so a gated call would count on a build it is not in:
-`#[cfg(test)] admission::exiting();` after `run_app` would meet the tail's pin.
-One reader (`window_waits_tests::under_statement_cfg`) serves every pin table:
-a call or a landmark that stands under a `#[cfg…]` or `#[cfg_attr(…)]` — the
-statement, block, match arm or list element an outer one governs, or the block an
-inner `#![…]` one opens — is refused by what is called, line and owner. That
+A statement's platform or feature `cfg` is refused, not read
+(T-WINDOW-WAITS-STATEMENT-CFG, 2026-10-26). Since 2026-10-29
+(T-CFG-TEST-USE-IS-NOT-PRODUCT, plan row 77) the index reads a `cfg` wherever it
+stands, and a statement gated to tests or to nothing (`#[cfg(test)]`,
+`#[cfg(any())]`, an inner `#![cfg(test)]`, a test-gated match arm) is out of the
+product: its call is not counted, so alone it leaves its pin "not there" and
+beside the real call it is no surplus; a `cfg_attr` that writes a `cfg` is the
+index's own refusal. A statement under a platform or feature `cfg` stays in the
+product, since some product build compiles it, so a gated call would count on a
+build it is not in: `#[cfg(windows)] admission::exiting();` after `run_app` would
+meet the tail's pin. One reader (`window_waits_tests::under_statement_cfg`)
+serves every pin table: a call that stands under such a `#[cfg…]` or
+`#[cfg_attr(…)]`, or a landmark under any (a landmark is read from the text) —
+the statement, block, match arm or list element an outer one governs, or the
+block an inner `#![…]` one opens — is refused by what is called, line and owner. That
 covers a pinned writer's call, an `enter_callback` entry, a remover helper's call
 (`deferred_removal::copy_new`, `failure_without_plan`), a pinned door's call
 (below), and a landmark of `LANDMARKS`. A gated landmark is refused through the
@@ -550,11 +619,12 @@ inside a macro's arguments or a nested `fn`, and a rename `admitted as …` in a
 on the pin's receiver, matched by spelling — a same-name method of another type
 called through a rebound `trace_shutdown` would count as the road — outside any
 macro's arguments and nested `fn`. A pinned door's call that stands under a
-statement's `#[cfg…]` or `#[cfg_attr(…)]` (the statement or block an outer one
-governs, or the block an inner `#![…]` one opens) is refused: the index reads a
-file's, an item's and a module's `cfg` but never a statement's, so a gated call
-would meet its pin on a build it is not in — the same reader, and the same
-refusal, as the writer table's and the landmarks' (above). Not read: closures
+statement's platform or feature `#[cfg…]` (the statement or block an outer one
+governs, or the block an inner `#![…]` one opens) is refused: some product build
+compiles the statement, so the call would meet its pin on a build it is not in —
+the same reader, and the same refusal, as the writer table's and the landmarks'
+(above); one gated to tests is out of the product (plan row 77, above), so its
+pin is "not there". Not read: closures
 and run-time-dead branches — a call in a closure's body, or in a branch that
 never runs (`if cfg!(…)`, `if false`), is placed where it is written, as a
 landmark is, and is still in the build, so a closure written after `run_app`
@@ -664,6 +734,37 @@ behind it takes only `violation`). A `const`'s and a plain `static`'s initialize
 `LazyLock`'s or `OnceLock`'s is. A key in any cell names one item per `cfg` arm (one per
 platform's module); two items on one arm (a bare name two modules declare) are refused, and so is
 a first-party `# vocabulary` or `# entrances` path naming nothing.
+Since 2026-10-29 (T-WINDOW-WAITS-STALE-KEY-REFUSED, plan row 76, and its review) an `# effects`
+row names exactly one item on its arm (`-` for an item on no predicate, else its predicates as
+`[p]` joined by a space) with a kind from the registry's closed list, and each key of a `follows`
+verdict in the list names one item per `cfg` arm; a key that names nothing, or two items on one
+arm, is refused by its row's line (`window_waits.tsv:<line>`, `REQUEST-DOOR-SITES.tsv:<line>`),
+as every other refusal of the registry's cells is.
+Since 2026-11-02 (T-GESTURE-DOORS-ANSWER-OFF-THE-GESTURE, 0.4.9 plan row 52, the owner's ruling)
+a gesture door whose road goes on past its enqueue (it answers, draws, closes a tab) is cut one level
+down by a row of `window_waits.tsv`'s `# request-door-cuts` (`door`, `enqueue`, `beside`, `reason`):
+`Runtime::hand_off`, `Runtime::ask_for_a_paste`, `Runtime::paste_from_clipboard_into`,
+`Runtime::reap_exited_tabs` and `Runtime::close_pane`. Every direct first-party callee of the door's
+body is named in `enqueue` (walked under C1 to the row's boundary) or in `beside` (the gesture's own
+window work, not entered by the C1 walk), or is already a stop; an enqueue is called in the body
+itself, never only inside a closure literal, and a closure handed to a `beside` call is beside's;
+every other shape, a stale name and an undated reason are refused by the registry's line and the
+call's `file:line`. The `beside` side is walked once more, and what it meets stays listed when it
+is a breach whatever is read (an effect, a blocking primitive, a door-level finding) or a row
+already read; an `unreviewed` unresolved edge met only beside a cut is counted in the list's header
+and rendered in `target/request-door-sites/beside.tsv`. A foreign boundary entry may name the
+standard library's thread spawns' closure argument (`std::thread::spawn@0`,
+`std::thread::Builder::spawn@0`, the guard's closed `STD_SPAWNS` table), so the PTY retirement
+thread's body is the thread's, not the door's. `Runtime::submit_clipboard_write` and
+`Runtime::save_clipboard_picture` stay walked whole: their whole road is the enqueue's, and the
+picture save's refusal is answered on the next turn through its own inbox. **Since 2026-11-04**
+(the first real-tree run, coordinator's ruling) the two walks read the door's one
+`# request-doors` row and owe its boundary together: an entry is `Unmet` only when neither walk
+meets it, since the road beside an enqueue starts lanes and threads of its own (close_pane's and
+reap's `close_tab` reaches the computation lane), stopped and excused by the same cells; and a cut
+whose `enqueue` meets none of its boundary is refused, since it has cut the enqueue away. The
+list's comment lines, which carry that header count, are held equal to the tree with its rows
+(2026-11-04, review N1), so a landing that moves a beside key regenerates the count.
 
 **The sites, by site.** `docs/plans/REQUEST-DOOR-SITES.tsv` lists every failure keyed by file,
 item, kind and name (no line), with `sites`, a verdict and a reason: `std` or `follows <key>; …`
@@ -775,6 +876,138 @@ yet. Since S-8 every lane keeps every claim and the list's `# rows` holds only
 its header — the shrink's end, which the script accepts. When red, repair the
 lane (a repair removes its row in the same change), or restore the behaviour the
 claim caught; do not add a row to quiet it.
+
+## Lane drains read their mark once
+
+The rule: a lane that delivers in admission order (`Delivery::Submission`)
+drains under one mark, read once before any asker is asked, and every asker
+takes only below it (T-LANE-DRAIN-MARK-GUARD, row 110 of the 0.4.9 plan; ruled
+2026-10-31). The type carries half of it: `lane::Request::take` takes a
+`&lane::Mark` and refuses an id at or past it, a `Mark` is minted only by its
+ledger (`Ledger::drain_mark`; its fields are private to `lane`) and is neither
+`Clone` nor `Copy`, and in a debug build the take asserts that the mark came
+from the request's own ledger. The guard carries the other half — where the
+mark is read, and how often — and holds the type's own properties, which
+nothing else pins: no derive but `Debug`, no trait by hand, no `Self { … }`
+outside the minting fns, no fn of the mark but `&self` ones.
+
+The guard is `crates/bt-source/tests/lane_drains.rs`
+(`every_lane_drain_reads_its_mark_once_and_keeps_none`, run by
+`cargo test -p bt-source`). Its registry, `LANE_DRAINS`, names each drain:
+the contracts it drains, their delivery, the drain, the per-target takes, the
+contract adapters' drains and whether it merges several askers.
+`lane::Coalescing::ended` is one shared row for the `NewestAdopted` lanes
+(font, taskbar, programs): outside the `Submission` promise, under the same
+discipline. `EXCEPTIONS` names the three doors that take otherwise, each with
+its one caller: `Ledger::mark_after_the_worker_ended` (through
+`StorageLane::mark_after_the_worker_ended`, for
+`PreviewSaves::answered_at_the_stop`), `Queue::supersede_and_take` (for
+`ClipboardLane::supersede`) and `Request::take_superseded_past` (for
+`ShareOf::ended`).
+
+Its grammar:
+
+- **D1** — every `Contract` const of `lane` (the contract suite's table) is in
+  exactly one row, with the delivery its literal writes; every row's
+  contracts exist.
+- **D2** — `drain_mark` is called exactly once in each registered drain, as the
+  initializer of a `let` binding a plain name written directly in the drain's
+  block: never in a loop, a closure, an async block, a nested `fn` or a
+  macro's arguments. The standard library's expression macros (`vec!`,
+  `format!`, the assertions), written bare or under `std`, `core` or `alloc`
+  and not shadowed by a `macro_rules!` of the tree's under the same name, are
+  read as the expressions they are; any other macro's tokens are a shape. A
+  forwarder's body is that one call. The name is called nowhere else in the
+  product, no other fn is named `drain_mark`, and each door is called by its
+  one caller and its forwarders alone. The door that mints a mark
+  (`mark_after_the_worker_ended`) is bound by its caller as a drain binds its
+  read: the initializer of a `let` of a plain name in its block.
+- **D3** — every path the rules name resolves to exactly one fn.
+- **D4** — each contract adapter's drain reaches one of its row's takes over
+  `bt_source::call_graph` (every `cfg` arm, an untyped call with one
+  candidate followed, and the reviewed edges of `TREE.follows`). A reviewed
+  edge names its caller, the call's method and its callee — today one,
+  `GitMutationLane::ended` at `.ended()` → `Share::ended`, its UNFOLLOWED-EDGES
+  key `GitMutationLane::ended Ambiguous ended`, through a `MutexGuard` the
+  resolver does not type — and is followed only at an `Ambiguous` call of that
+  method listing that callee. An edge no adapter's walk used is stale, and a
+  finding.
+- **D5** — a mark is never kept, copied or changed. Its name is written only
+  as the referent of a whole `&` parameter type, as the whole type of a `let`,
+  as the return type of a minting fn or a forwarder, as a type alias's whole
+  right side (`persist::StorageMark`, then read as the name) and in `lane`'s
+  own declaration of it. A field, a `static`, a `const`, a generic argument,
+  another fn's return type or an expression path is a finding; so is a
+  `Mark { … }` outside the minting fns. In an `impl` of the mark `Self` is the
+  mark: `Self { … }` is a minting and `-> Self` a return type under the same
+  rules. The binding a drain reads its mark into, and the one the minting
+  door's caller binds, is used only borrowed — `&mark`, or as the receiver of a
+  method the mark's own `impl` declares — never moved: any mention of it in a
+  `move` closure or an `async move` block moves it, and so does a call of any
+  other method on it (`Into::into`, a trait's). The mark's declaration derives
+  `Debug` alone (`TREE.mark_derives`; a `cfg_attr` on it is a shape), no
+  trait is implemented for it by hand (`TREE.mark_traits` is empty), its
+  inherent `impl`s are written in `lane` alone, and each of its fns takes
+  `&self` — `self` by value would move a held mark through a receiver,
+  `&mut self` would change it.
+- **D6** — a drain of several askers calls `lane::in_admission_order`, or a
+  registered wrapper that does (`handoff_lane::in_press_order`), directly in
+  its body. The computation lanes, the git lane and the `NewestAdopted` row
+  are exempt by row.
+- **Shapes** — every product identifier token named `drain_mark`, a door, or
+  one of the mark's names (`Mark`, `StorageMark`) must be one the reading
+  classified; any other — a macro's tokens, an `impl` header's generics, an
+  associated type, a path call, a fn named as a value, a renamed import — is a
+  `shape` finding with its file and line. Each of the mark's names is the mark
+  unless the path reaches another type of that name: a module that declares
+  one of its own (today `uninstall` and `update_trial`, found from the index,
+  not listed), imports one or globs a module where it is one; a qualified path
+  whose prefix resolves to such a module (`crate::update_trial::Mark`), or,
+  unanchored, is that module's own name (`update_trial::Mark`). So no spelling
+  of `lane`'s mark reads as "not the mark": the spellings that would make one
+  the reading cannot follow to `lane` are shapes of their own — `lane`
+  imported under another name (`use crate::lane as l;`), the mark re-exported
+  (`pub(crate) use crate::lane::Mark;`), and a glob that carries it in from a
+  module other than `lane` (`use super::*;` under a module that imports it).
+
+Blind spots, stated: the guard proves the mark is read once and that an
+adapter reaches a take, not that a drain asks **every** target (a store left
+out of `App::storage_answers` keeps its answers with nothing out of order) —
+the contract suite's per-lane rows answer that. Two ledgers of one id type
+type-check each other's marks; only the take's `debug_assert` on the mark's
+ledger catches that, in a debug build that runs the take. Calls are matched by
+method name, not by receiver type: another type's `drain_mark` would be read
+as a mark read (a false finding, never a missed one), and a call on a held
+mark of a name the mark's `impl` declares (`below`, `owed`) is taken for the
+mark's own — a blanket trait of the tree's giving every type a by-value
+method of that name would be chosen first and move the mark unseen; no such
+trait exists, and one would be a trait written for the purpose. A macro's
+scope is not resolved: a standard expression macro's name that the tree also
+defines with `macro_rules!` is read as the tree's everywhere (a false shape at
+worst). An unanchored path to another module's `Mark` is told apart by that
+module's own name; an import that renamed `lane` to such a name would be read
+as that module, and is itself a shape. Unsafe code is not read: a byte copy of
+a borrowed mark (`std::ptr::read(&mark)`, `std::mem::transmute_copy(&mark)`)
+is a mark copied through a borrow the grammar accepts. What holds that is the
+compiler, not the guard: `bt-app` takes the workspace's `unsafe_code = "deny"`
+(`Cargo.toml`'s `[workspace.lints.rust]`, `[lints] workspace = true` in its
+manifest), so such a copy needs an `#[allow]` or `#[expect(unsafe_code,
+reason = "…")]` the owner rules on — either lifts `deny`; only `forbid` cannot
+be lifted. Inside `bt-app`'s own crate, the only one that can name the
+`pub(crate)` `Mark`, the one lift is the counting test allocator of
+`pointer_app_tests.rs`; its integration test `tests/macos_glyph_surface.rs`
+has another, in a crate of its own that cannot reach `Mark`, and the lifts in
+`bt-render` and `bt-platform` are outside it too.
+
+Where and what to do: when red, read the finding's check. A D2 read in a loop
+or a closure, or a second read for a later asker, is the bug the guard exists
+for — read the mark once at the top of the drain and hand every asker `&mark`.
+A new lane on the seam adds its row (and its `Contract` const) in the same
+change; a new way to take otherwise is a door of `EXCEPTIONS` with its one
+caller, ruled before it is written. A shape finding means the code left the
+grammar: rewrite it into a shape the guard reads (a `let … else` instead of
+the `.map(|app| app.lane.drain_mark())` closure is the case the tree had), or
+extend the grammar in a ticket of its own.
 
 ## Contained panics
 
@@ -907,6 +1140,243 @@ read and paused on `update_apply::WaitClock` (`Leaving::leave_on`; `leave` hands
 so a test counts its pauses with `CountedClock`; a road with no clock (a lock only tried, a mark
 only read) is proven by a signal awaited within the suite's patience, or by the state it leaves.
 
+2026-10-29 (T-ELAPSED-BOUNDS-ON-FLOODS-AND-TRACE-SINK): a bounded wait whose subject is that it
+gives up (`trace_sink::flush_sink` at its own budget) is proven the same way: by its return while
+the thread it would wait for is still held, awaited within the suite's patience, with the holder let
+go before the verdict — never by timing it. The hand-off lane's flood and the trace sink's producers
+are read the same way, so a press, an offer, a settle or a writer that waits is red, not a hang, in
+these tests and in the trace sink's, the log writer's and the watchdog's tests that meet a full queue,
+a held writer or a held ring (row 106), in the applier's (row 112, below), and in every test that
+holds a lane's worker — at the suite's gate or a fake's hold — and calls a door while it is held
+(row 111): the held worker lets go on its own at the suite's patience and counts it, and the release
+reads the count, so a door that waits is red, not a hang (the taskbar's held shell, a channel, is
+read by its reading's return on a thread of its own, awaited within the suite's patience, the shell
+let go before the verdict). The cap frees holds, not locks: a door that waits while it keeps a
+product lock the held worker takes next still hangs. The program walk's admission was one until row
+160: it kept the lane's lock across the ask (`ProgramsLane::request`), and row 111's planted wait
+there hung; it now keeps that lock only for its urgency read
+(`the_admission_keeps_the_lanes_lock_only_for_its_urgency_read`), so the same plant is red at the
+cap in the programs tests and the contract suite. That ask is also pinned apart from any lane's own
+lock (`a_coalescing_ask_never_waits_for_its_worker`, row 133): its worker stands in a held hold
+while the three roads of `Coalescing::ask` taken while a run is out are taken on the test's thread,
+so a wait planted there that lets the coalescing's book lock go is red at the cap (one that keeps
+the book lock is the suite watchdog's, row 113). A worker held at a `Barrier`, at a channel or
+behind a lock a parked thread keeps is read the same way (row 133): the shell's birth worker, the
+log's writer and the update's fetch stand in a hold; the stalled sink's fill, the session writer
+that never answers and a contender held inside the election are read by their door's return on a
+thread of its own, the holder let go before the verdict; and the trace sink's lines are offered and
+its queue closed on the writer's own thread after another thread has taken the process `stderr`
+lock, so an offer, a close or a write that waits for that lock is red with the writer, and nothing
+is called under it on the test's thread. A product lock kept across a door call (the program walk's
+was, until row 160), and a test-thread wait on something no gate or hold holds, are not read this
+way; wherever the suite runs through the suite watchdog (row 113, below), a hang of either kind ends
+the run red within 300 s of the test's start and names it (save the shapes that section says it
+cannot name). What such a verdict does not catch is a bounded wait, or a give-up that ignores its
+budget, shorter than the suite's patience.
+
+2026-10-31 (T-FLOATING-VIDEO-DOUBLE-CLICK-TIMING, plan row 124): a double click is decided by
+the window's multi-click counters (`ImageClicks`, `PreviewTextClicks`) on the moment a press is
+counted at, and that moment is read on the window's `PointerClock`: the product's is `Wall`, whose
+`moment(wall)` answers the instant the press site has just read with its own `Instant::now()`,
+unchanged, so the product counts every press at exactly the moment it did before. A test that
+needs two presses to be one double click, or not one, holds it
+(`HeadlessFolio::hold_the_pointer_clock`) and moves it (`pointer_clock_runs`); how long a loaded
+machine takes between the presses is never the verdict. Between a pair's presses such a test
+moves the playhead by a seek, never by playback: the Mac's engine has no media clock in a headless
+test process (`Engine::state_reaching`), so a wait for playback to advance is a Windows-only wait
+(row 124's Mac gate, 2026-10-31). Seven picture and recording tests and one
+rendered-page test were formed on the wall clock this way and are converted; the recording tests'
+verdicts are read behind a volume fence where the state before the gesture could satisfy the
+wait (the glance card's is not: its waits cannot be met by that state, and are unfenced by design). **The
+scan never listed them, and could not**: the clock that decided them is read in product code a
+test calls, which is the scan's stated blind spot (its header and `check-timing-bound.ps1` say so),
+not a fault in its grammar. Whether product real-time windows that tests race can be found by a
+scan at all is plan row 125's (T-TIMING-CENSUS-PRODUCT-WINDOWS); until it lands, review owns them.
+
+2026-10-31 (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): a road's wait for another thread or process that has no
+clock of the test's own is still timed by the product, and a loaded run turns that race the other way. The update
+applier's wait for a live trial's final decision after the commit (`note_unkept_after_trial_decision`) is
+read and paused on `Road::decision_clock`, and each held move of the Windows flip or rollback
+(`move_held_within`, through `Journaled::held_door`) on `Road::held_clock`. Both are `update_apply::WaitClock`,
+and `WallClock` in the product. The applier harnesses on both platforms hand a `CountedClock` whose first pause lasts until the
+trial's receipt is gone, within the suite's patience; the held-moment tests count the window's pauses. A product
+window raced by a test thread is not seen by the timing scan, which reads test bodies (plan row 125).
+
+2026-10-31 (T-UPDATE-APPLIER-LOCK-WAITS): the update applier's and recovery's give-ups behind a
+hold the test keeps — the transaction lock, the data directory's claim, the admission, the journal
+or a member held open, the election in flight, O alive — are awaited while the hold is still held,
+within the suite's patience (`ended_while_held` in `update_apply_windows_tests.rs` and
+`update_apply_macos_tests.rs`), and a road that waits past its deadline is red, not a hang; the hold
+is then kept for the life of the test process, so the road never runs on into the failed test's
+removed fixture (O alive, which the fixture ends, is the one hold a test cannot keep: there the
+election lock is taken and kept before the test is red, `ended_while_held_keeping`). A hold let
+go "once the road waits" is let go in the pause of the road's first refused ask: the window
+election's asks again and both platforms' waits for the claim pause on the road's `wait_clock`
+(`update_apply::WaitClock`; `WallClock` in the product, `WatchedWallClock` under test), and the
+wait for the transaction lock is reached as state (the election over: the mark names the
+applier and the election lock is free).
+
+2026-11-01 (T-LAUNCH-HANDOVER-BUDGET-ON-A-CLOCK): a kernel wait with a fixed bound in milliseconds is a
+product window as much as an `Instant` deadline is. TIMING-BOUND's census, which reads only a test's own
+body, sees neither; plan row 125's hand sweep found `Instant` deadlines (G13 among them) but not these. The launch wire's
+tests ran the client and the listener as two threads of one process, so the second launch's 2 s budget and
+the server's 250 ms steps were each a race against the other thread. Every wait for the other end, at both
+ends and on both platforms (the budget's reply read, and on Unix every frame; each server step; the Windows
+listener's first word), is now handed to `launch_conversation::LaunchClock::wait`, and the Windows busy
+retry's own waits are counted through `LaunchClock::spent`; `RealClock` makes the one wait the product always
+made, and `hand_over` and `LaunchPipe::start` are its doors. The one exception is the Windows writes:
+each is `attention_pipe::write_bounded`'s own real 250 ms, which buffering decides, not the peer (every frame
+fits the pipe's quota; noted in TIMING-BOUND). The tests hand
+a `CountedClock` that awaits the other end within the door suites' patience or spends the bound on its
+count, so "answered in time" is an event and "the budget ran out" is a count. The same shape elsewhere in
+bt-platform, starting with `attention_pipe`, is plan row 163.
+
+2026-11-01 (T-CLIPBOARD-PASTE-PAST-DESK-BUSY-NOTICE-FLAKE, plan row 172): a stamp the product reads
+and a later press compares is a product window too. `Runtime::ask_for_a_paste` stamped each paste with its
+own `Instant::now()` and settled what the window owed at it, so a paste held on the clipboard lane's worker
+since an earlier press was past `PASTE_DEADLINE` (1 s) at a later press whenever a loaded machine took that
+long between them, and said the clipboard was busy. Row 124's `PointerClock` is now `PressClock`, the one
+type for "the moment a press is counted at": the window keeps two, `pointer_clock` for the double-click
+counters and `paste_clock` for the paste press, both `Wall` in the product (`moment(wall)` answers the
+instant just read, unchanged). The three clipboard tests that press a paste again while one is held hold the
+paste clock (`HeadlessFolio::hold_the_paste_clock`); a test that means the deadline passes its own clock to
+`Runtime::settle_clipboard`. Row 125's sweep counted the read as a stamp handed down, and the comparison
+sits in a private function (`paste_withdrawn`); noted in TIMING-BOUND.
+
+2026-11-02 (T-FIXED-MILLISECOND-KERNEL-WAITS-IN-BT-PLATFORM, plan row 163): the timing scan's first shape
+reads the kernel's waits as it reads the standard library's. A test whose own body calls a Win32 object,
+pipe, port or sleep wait (`WaitForSingleObject`, `WaitForMultipleObjects`, `WaitNamedPipeW`,
+`GetQueuedCompletionStatus` and their kin), a debuggee's, a new process's input idle, a condition, address,
+COM or Winsock wait (`WSAPoll`), WinHTTP's timeouts, a macOS run loop run for a time
+(`CFRunLoop::run_in_mode`) or a std socket timeout (`set_read_timeout`, `set_write_timeout`,
+`connect_timeout`) is a row, matched by the called name whatever the bound (a literal, a constant,
+`INFINITE`, `0`); a `libc` wait (`libc::poll`, `select`, `kevent`, ...) or Winsock's `select` is matched by
+the call of its path (`libc::`, `WinSock::`), because bt-app declares a `poll` and `select`s of its own. A
+path wait named and not called (`libc::kevent`, a struct too, only where it is imported), a group, glob or
+rename of `libc` or `WinSock` (on a file's last line too), a renamed kernel wait and a kernel wait taken as
+a value are refused by file and line, anywhere in a package. The group and glob refusal is on purpose,
+product imports included: a wait-bearing module (`libc`, `WinSock`) is imported item by item under each
+item's own name, so the scan reads every kernel wait it brings in. The lists are closed: a wait not on them is
+review's, and joins them when it is first written. `GetOverlappedResult`, `waitpid` and `waitid` are not read: they wait for an event or not at all,
+and a test stuck in one is the watchdog's. The product half stays a hand sweep, as rows 125 and 153 ruled:
+row 163 judged bt-platform's product kernel waits at `f641b0064` and recorded them in TIMING-BOUND's
+`# noted` line (the attention endpoint's first word, `READ_DEADLINE` and busy wait are plan row 192;
+`deferred_removal`'s `READY_WITHIN` is plan row 193). A new product Win32 or `libc` wait is noticed by the
+window-thread bare-site gate, which every product call of those verbs answers to; a new socket or WinHTTP
+timeout in the product is review's.
+
+2026-11-04 (T-ATTENTION-ENDPOINT-WAITS-ON-A-CLOCK, 0.4.10 plan row 13, 0.4.9 row 192): the attention
+endpoint's three waits for the other end are `launch_conversation::LaunchClock`'s, its fifth user: the
+Windows listener's first word (`FIRST_WORD_WITHIN`, through `first_word_on`, which the launch endpoint
+shares), each attached caller's `READ_DEADLINE` on both platforms (the listener's one timed
+`WaitForMultipleObjects` or `poll` is a `LaunchClock::wait` while somebody is reading, and every reading of
+the deadline is the clock's, handed to the helpers as `now`), and the client's one wait past a busy
+endpoint inside `attention_pipe::open_client`. That last one is a kernel wait whose timeout is an argument,
+so the clock's bound goes inside `WaitNamedPipeW` (kept away from `0`, which is the pipe's default wait, and
+from `NMPWAIT_WAIT_FOREVER`) rather than a real 100 ms being counted around it: `LaunchClock::spent`, which
+counted the launch wire's busy waits after `open_client` had really made them (the 2026-11-01 paragraph
+above), is gone, and every caller of `open_client` (the attention verb, the launch handover, the elevated
+pane's host) passes its own clock. `AttentionPipe::start` and `send_line` are the real-clock doors over
+`start_on` and `send_line_on`, so their signatures, which are one on every arm, did not move. What stays on
+the real clock: the two 250 ms write deadlines (Windows `write_bounded`, Unix `WRITE_DEADLINE`), which
+buffering decides, not the endpoint; and bt-app's
+`attention_wire::tests::a_permission_request_crosses_the_endpoint_and_mints_an_episode`, which crosses the
+real endpoint from another crate and cannot be handed the crate-private clock without a product knob. Both
+are noted in TIMING-BOUND.
+
+2026-11-07 (T-LAUNCHCLOCK-OUT-OF-THE-PLATFORM-GATED-MODULE, 0.4.10 plan row 66): `LaunchClock`, `RealClock`
+and the test's `Turn` and `CountedClock` moved from `launch_conversation`, which is compiled only on Windows
+and Unix, to `launch_clock`, which has no gate; they are unchanged but for the trait doc's sixth-user
+paragraph, and the paragraphs above name the old path. That sixth user is the deferred remover's readiness
+wait (`deferred_removal::schedule_by`, every target), which row 14 had made on a closure of its own because
+the clock's module was gated.
+
+2026-11-12 (T-TIMING-GUARD-FOLLOWS-WAITING-HELPERS, 0.4.10 plan row 20): the third shape follows a wait as
+well as a measurement. A test is listed when it reaches, through resolved call-graph edges and at any depth,
+a test-only helper of its target whose own body waits as the first shape lists (a std, kernel or `libc`
+wait, a zero bound included), reads `elapsed()` (a stall timer that only compares included; an `elapsed()`
+the helper only prints, in a `println!` or a panic message, is no timer) or does clock
+arithmetic; its row says "waits in its helper" or, for a kept measurement, "measures in its helper". So
+moving a wait into a helper keeps its test listed. **A helper that is itself a row is a door**: the walk
+stops there and the tests that reach it are not rows through it. The suites' patience helpers and holds
+(`lane::receive`, `within_patience`, `while_progressing`, `Hold::pass`, `Gate::wait_for`,
+`door_skipped::received`, `persist`'s `on_a_worker`, the watch fakes' `FakeDoor::pass` and the rest, 37 in
+all) are doors, each row's text saying which kind it is (it waits, it measures, a harness-less test target's
+own run, or an example's run that no test makes), so a new test that awaits its event through one adds no row, while a new waiting helper
+makes every test that reaches it a row, refused by the ratchet unless it is a door the list admits. A door
+must still wait or measure and be reached from a test (through an edge, or as a candidate of a call the
+graph does not resolve) or run only by an implicit call, or its row is stale; a test-only impl that only an
+implicit call runs (a `Drop`, winit's `about_to_wait`) and that waits, or reaches a test-only helper that
+waits, is refused unless it or that helper is a door; a door among the candidates of a call the graph does
+not resolve does not excuse a candidate beside it that waits. An
+inline wait moved into a door call is a shrink, recorded on a `# shrunk` line naming the door. Not seen:
+test support another package compiles under a test feature (`bt_pty::test_shell`,
+`bt_platform::trust_harness`; 0.4.10 plan row 95 follows them), and a wait in a `static` or `const`
+initializer a test reads. 0.4.9 plan row 70 closes with this
+paragraph.
+
+## Suite watchdog
+
+The rule: a test that hangs ends its run red within 300 s of its start, and is named, wherever a
+suite runs through the watchdog (T-TEST-SUITE-WATCHDOG, plan row 113, 2026-10-31). libtest has no
+timeout on the stable toolchain (`--ensure-time` and `--report-time` are nightly-only, and judge a
+test only when it ends), so before this a hung test held a lane's run for hours and CI's until the
+step's clock cancelled it without a name.
+
+Where: `scripts/ci/cargo-test-watched.ps1` runs `cargo test <args>`, passes every line through as text, and
+reads libtest's own report: stable libtest names every test still running 60 s after it started
+(`test <name> has been running for over 60 seconds`) and names it again when it ends
+(`test <name> ... ok`). A named test not ended 300 s after its start, or a run that prints nothing
+for 300 s once its first test binary started, ends the whole process tree the script started, by its
+pid, with exit 124 and the names; the binaries a workspace run had not reached yet do not run. A
+`running N tests` line (libtest's report start, on the same stdout pipe as the test lines; cargo's
+`Running` comes on stderr, whose order against stdout is not kept, and only starts the silence clock:
+plan row 171, 2026-11-01) read while names are tracked means either that their binary ended without
+their result lines (a crash, an abort) or that a test's child process, which inherited the stdout,
+started a report of its own. Two bt-app tests re-run their own test binary that way
+(`hostile_math_is_refused_and_the_real_decoration_worker_survives`, and the Windows
+`a_real_update_handoff_is_not_probe_contained`, whose child runs `detached_handoff_helper_waits`), and
+stdout cannot tell the two cases apart. So the names are
+suspended (plan row 203, 2026-11-03): no longer timed, so a dead binary's test is never taken for a
+later binary's hang, and released without a word by their own later result line. Only names that never
+print a result line are said, at the end of the run ("ended with their binary, no result line"). The
+cost, accepted by ruling: a test still running when a child's report suspends it, which then really
+hangs, is not ended by its own 300 s clock but by the silence check, once the rest of its binary is
+done and 300 s pass with no line, and that red names the suspended tests. A binary that prints no
+`running N tests` line (`harness = false`, a crash before libtest starts, a doc-test binary still
+compiling) leaves the previous binary's unfinished names tracked until the next binary that prints
+one: a run that passes the limit meanwhile is red naming the dead test, and the silence check is off
+while any name is tracked. Named limits, all from stdout alone: an `--exact` child of a test prints a
+result line with its parent's own name, and that releases the parent's name too; a suspended name stays
+suspended for the rest of the run, not for its binary, so a dead binary's test is released by a later
+binary's test of the same name (the end note loses it, the slow list names it; cargo's non-zero exit for
+the dead binary still passes through), and a later silence red lists a dead earlier binary's suspended
+tests among those that may be the hang.
+300 s (30 x `lane::PATIENCE`) is the one limit, a default in that script and nowhere else.
+Measured 2026-10-31 on the watched runs: no bt-app test reaches 60 s on any CI runner, and the
+slowest watched test is about 61 s (bt-source on `logic`); unwatched, `core-linux`'s bt-source tests
+take about 110 s. The limit is re-derived, not bumped, if a watched test passes 150 s. Compiling is
+not timed: the clock starts at cargo's first `Running` line.
+
+Who runs through it: the lanes' bt-app and bt-source gates
+(the lane tools' `ccheck.sh scripts/ci/cargo-test-watched.ps1 -p bt-app --no-fail-fast`),
+`logic`'s `test` step (the whole workspace it tests) and `core-macos`'s `test the application`. Not
+yet: the owner's Mac mini gate, which has no pwsh (an owner's ruling is pending), and the `conpty` and
+`gpu` jobs (left as they are, by ruling).
+
+Shapes in which libtest prints no names to read are refused with exit 2, never run unwatched: `-q`
+(or `CARGO_TERM_QUIET=true`: cargo hands libtest `--quiet`, whose terse output has the 60 s line but no
+end-of-test names; a `term.quiet` in a cargo config file is not seen by the script and must not be set),
+`--format`, `--test-threads=1` (or `RUST_TEST_THREADS=1`; libtest's serial path has no 60 s line) and
+`--nocapture` (or `RUST_TEST_NOCAPTURE`). What it does not name: a hang that holds the process's real
+stdout lock (the harness cannot print either, so the run is red by silence, with no name), and a child
+process its parent test no longer waits for (it is no longer in the tree). A `harness = false` target
+prints no libtest lines, so it is watched by silence only. Its verdicts are planted
+against a stand-in in cargo's place by `scripts/ci/check-test-watchdog.ps1` on every run; that the
+pinned libtest prints the two lines it reads was observed on the real binary by the ticket (a planted
+`loop {}` and a planted blocked `recv`, both named and ended at 300 s), and is observed again when
+`rust-toolchain.toml` moves.
+
 ## Test order and shared fixtures
 
 The rule: a test's verdict does not hang on a file another build step made, on the
@@ -964,6 +1434,29 @@ reaches it, or add the row. **Not seen:** a global a test reaches only through p
 functions; the walk ends there, as `timing.rs`'s does. The CJK probe's `i18n` switch is
 one. `the_product_reach_of_the_tests_is_measured` prints `TEST_GLOBALS_PRODUCT_REACH` as
 a measure, not a gate.
+
+**A test does not end passed before it asserts anything** (T-INSTALL-TESTS-SILENT-PASS-OFF-WINDOWS,
+0.4.10 plan row 12, 2026-11-13). On the Mac, 84 of the Windows applier's tests opened with
+`let Some(install) = Install::new(tag) else { return; };` over a test root only Windows has, and
+libtest counted them passed. `crates/bt-source/tests/early_returns.rs` is the gate and
+`docs/plans/EARLY-RETURN-FIXTURES.tsv` its register. It reads every `#[test]` function's own body
+in every first-party package for a road out (`return;`, `return ();`, `return Ok(…);`). A road
+written after the test's first assertion is dropped (R: the test has checked something), and
+stands as a row of `docs/plans/EARLY-RETURN-DROPPED.tsv` with that assertion and a reason that
+opens with its date, so a new one lands in a diff where review reads what the assertion checks
+(one that checks only the host is the class, gated). Every other road stands in one of four
+shapes or is refused by name: G1 the else of a `let`, G2 an `if` with no `else`, G3 a `match` arm,
+each judged by the callee of its expression (or the expression's whole text), and G4 the child
+half, whose expression reads only variables its own file sets on a started command. A G1–G3
+site needs a row: file, test (`*` for a function named by its path, else the one test function,
+as for a read of the environment G4 does not hold), callee, hosts in one of five spellings
+(`other-unix`, `other-platform`, `environment: <fact>`, `parent-half`, `child-half`; never
+Windows or macOS, where every suite runs) and a reason. The rows equal the sites both ways. When
+red, gate the test with `#[cfg]` on the hosts it needs (CONVENTIONS H1 rule 2), make the fixture
+answer on every host the suite runs on, rewrite a refused road into a shape, or add the row with
+where the road is taken and why. **Not seen:** a road inside a helper the test calls (four of
+the 84 were that shape; plan row 96), a `continue`/`break` past every assertion, and, but for
+the dropped list's reasons, whether the assertion before a dropped road checks enough.
 
 ## Raw-effect and thread-door exceptions
 
@@ -1101,8 +1594,7 @@ documented stand-in answer in `headless::PlatformAnswers`) in the headless one.
 
 **The startup order is a shared function, not native code** (T-STARTUP-ORDER-SHARED):
 `crate::startup::begin` (the removal verbs, the command line, the hand-over) and
-`crate::startup::resume` (the startup migration, the script's
-preparation, the window, the PowerShell questions, the first tab) are generic
+`crate::startup::resume` (the script's preparation, the carry pass, the window, the PowerShell questions, the first tab) are generic
 over the steps they are handed, and name no holder. `main` and `Runtime::create`
 hand them their steps as closures written in their own bodies, which is why the
 order needed no native-list row; the headless start hands them recording
@@ -1258,16 +1750,16 @@ are none. The shapes read: a path in an expression, a type, a pattern, an `impl`
 or a generic argument (G1); a module-level `use` in any tree shape, by its
 `bt_source::UseRecord` names and globs (G2); a `use` inside a body (G3); a macro's
 arguments, counted with their candidate certainty (G4). Doc comments and literals are
-not code and not read (G5). Product is `Occurrence::in_the_product` and, for a
-module-level `use`, the `use`'s own `cfg` (`UseRecord::variant`), so a
-`#[cfg(test)] use` at the root is out of the product by its own gate (plan row 77's
-blind spot is not inherited). Refused by their line, never passed: a `use` that names
+not code and not read (G5). Product is `Occurrence::in_the_product`, whose gate grain
+reads a module-level `use`'s own `cfg`, so a `#[cfg(test)] use` at the root is out of the
+product by its own gate (the guard read `UseRecord::variant` itself until plan row 77, 2026-10-29). Refused by their line, never passed: a `use` that names
 `runtime` under another name or opens it by a glob, a group, glob or rename after
 `runtime::` inside a body, a path into a topic whose head is not `crate`, `self` or
 `super` (in a path, a module-level `use` and a body group alike), a comment inside a
 path into a topic (the search compares the path's bytes), and a path under a `#[cfg]` on
-a statement or a match arm inside an item (no grain reads that gate; a field's gate is
-the field item's own and is read). The road itself is read too: a `use` in
+a statement or a match arm inside an item that a product build may compile (a test-only
+one is out of the product by the query's gate grain since plan row 77, 2026-10-29; a
+field's gate is the field item's own and is read). The road itself is read too: a `use` in
 `runtime/mod.rs` that re-exports a module (`pub(crate) use pointer::touch;`), or any glob
 there, would open a module under a new name and is refused by its line; an item
 re-export is the road (ruled 2026-10-27, the row's review, F4). There is no allow list. Its fixture (`tests/fixtures/root_topic_paths/`) plants
@@ -1352,6 +1844,44 @@ expansion of a macro on `MACROS`, an item a derive or an attribute macro generat
 blanket impl (`impl<T: Bound> Trait for T`, whose self type no body names, so an
 implicit call running one is never taken in), and
 what a foreign function or a foreign macro's expansion does with the words.
+
+## Doc-link debt
+
+The rule: no broken intra-doc link is added to bt-app's documentation, and the
+ones that predate the rule only go (T-DOC-LINK-DEBT, 0.4.9 plan row 78, from
+row 59's judgement). `docs/plans/DOC-LINK-DEBT.tsv` holds each, one row per
+rustdoc warning: `owner`, `target`, `shape`, then `module` (where the owner is
+written, for the move rule) and `file` (where it is written today: the `docs`
+job compares it, the shrink check does not). No line numbers.
+
+Two halves. The `docs` CI job runs `scripts/ci/measure-doc-links.ps1`:
+`cargo doc -p bt-app --no-deps --locked --message-format=json` on Windows,
+keeping the warnings whose lint code is `rustdoc::broken_intra_doc_links`, then
+bt-source's `doc_link_debt` target (`test = false`, run by name), which keys
+each to the item whose documentation holds it through the index and fails on a
+broken link the list does not hold and on a row no broken link is. Its module
+doc is the grammar: three message forms (`unresolved`, `ambiguous`,
+`incompatible`), the positions it reads (an item, field, variant, `const`,
+`static`, alias, `impl` or trait declaration; the variant for a doc inside a
+struct-like variant's braces, whose fields the index does not record;
+`<module> (outside any item)` for a doc in no record), and the positions it
+refuses by name (a macro's tokens, a function body, a tuple variant's
+parentheses, a type's, `impl`'s or trait's braces outside any recorded member,
+a byte in no doc comment, a file reached twice or not at all). The other rustdoc
+lints are counted and printed, not gated. `scripts/ci/check-doc-link-debt.ps1`
+(CI `logic`; its cases in `check-doc-link-debt-tests.ps1`; a planted row in
+`gates-can-fail`) refuses a row the merge base did not have, with
+`moved-rows.ps1`'s rule for an owner moved to another module and no rename arm.
+
+When red in `docs`: a new broken link is fixed (a path that resolves where the
+doc is, a code span for a name that is no item, or words), never listed; a
+fixed link's row leaves the list; an owner that moved module is regenerated
+with `scripts/dev/generate-doc-link-debt.ps1` (a lane only; commit first, it
+stamps the commit), and a renamed owner's links are fixed in the renaming
+commit. A `(outside any item)` row is never moved: when its module moves, or
+its doc changes from an outer doc to a `//!`, the moving commit fixes that
+link, as a renaming one does. When the list is empty, `[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"` replaces both halves (a later row).
 
 ## Machine-independent paths
 

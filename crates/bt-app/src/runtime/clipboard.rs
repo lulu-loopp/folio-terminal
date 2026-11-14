@@ -4,17 +4,17 @@
 use crate::PtyTarget;
 use crate::TermViewPorts;
 use crate::clipboard_lane::{
-    Ask, ClipboardRequest, ClipboardTerminal, Declined, Held, OwedCopy, OwedPaste, PASTES_OWED,
-    PasteHold, PasteInto, Reply,
+    Answered, Ask, ClipboardId, ClipboardRequest, ClipboardTerminal, Declined, Held, OwedCopy,
+    OwedPaste, PASTES_OWED, PasteHold, PasteInto, Reply,
 };
-use crate::lane::Terminal;
+use crate::lane::{self, Terminal};
 use crate::runtime::keyboard::ime_owner;
 use crate::window_seam::prelude::*;
 use crate::{
-    ClipboardWriteEffect, Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey,
-    PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, Runtime, StagedPaste,
-    TextFieldSeat, UserInputKind, i18n, menubar, offer_pty_input, profile_banner_name, restore,
-    seats, text_field, toast,
+    ClipboardWriteEffect, Drag, DropLanding, FolioApp, PasteAnswer, PasteBody, PasteCardKey,
+    PasteOffer, PasteTarget, PreparedClipboardPaste, PreviewSurface, PtyInput, Runtime,
+    ShellSession, StagedPaste, TerminalPane, TextFieldSeat, UserInputKind, hang_watch, i18n,
+    menubar, profile_banner_name, restore, seats, text_field, toast,
 };
 use crate::{
     GlassHere, ImeOwner, PasteFacts, PasteRoad, PendingPaste, TabId, TabState, input, quit,
@@ -22,13 +22,59 @@ use crate::{
 };
 use anyhow::Result;
 use bt_layout::SeatId;
-use bt_pty::PSREADLINE_PASTE_INPUT;
+use bt_pty::{PSREADLINE_PASTE_INPUT, PtyError};
 use bt_render::{FrameSource, FrameTrigger};
 use bt_term::DualPlaneSession;
 use bt_viewport::{MathBlockAnchor, ViewportProjection};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use winit::event::Ime;
+
+impl<B: Backend> FolioApp<B> {
+    /// **Every window takes what the clipboard lane answered it, in admission order across the
+    /// windows** — on the turn the lane's wake brings (`AppEvent::ClipboardAnswered`), the one
+    /// place its answers are taken (`clipboard_lane`'s *Ordering*).
+    ///
+    /// The lane's earliest request still owed is read once, before any window is read; each open
+    /// window takes the answers its requests hold below it ([`Runtime::take_clipboard_answers`]);
+    /// they are merged by the identity the lane minted (`lane::in_admission_order`) and answered in
+    /// that order, each in its own window ([`Runtime::answer_clipboard_request`]). A request that
+    /// ends while the windows are being read is left for the next wake's drain, so a window read
+    /// later never takes an answer ahead of an earlier one a window read before it did not find
+    /// ended.
+    /// Then every open window settles what it owes at `now` ([`Runtime::settle_clipboard`]).
+    ///
+    /// An answer whose handling fails stops the drain there, as `answer_handoffs` does: those
+    /// failures are the window's fatal ones, and the answers taken after it go with it.
+    pub(crate) fn answer_clipboard(&mut self, now: Instant) -> Result<()> {
+        for (index, id, answered) in self.clipboard_answers() {
+            if let Some(mut runtime) = self.runtime_at(index) {
+                runtime.answer_clipboard_request(id, answered)?;
+            }
+        }
+        self.for_each_window(|runtime| runtime.settle_clipboard(now))
+    }
+
+    /// **One drain's answers, every window's, in admission order** — what
+    /// [`Self::answer_clipboard`] answers: the lane's earliest request still owed, read once; each
+    /// open window's answers below it; merged by the identity the lane minted, each with the index
+    /// of the window that holds it.
+    pub(crate) fn clipboard_answers(&mut self) -> Vec<(usize, ClipboardId, Answered)> {
+        let Some(app) = self.app.as_ref() else {
+            return Vec::new();
+        };
+        let mark = app.clipboard_lane.drain_mark();
+        let mut held = Vec::new();
+        for index in 0..self.windows.len() {
+            if let Some(mut runtime) = self.runtime_at(index)
+                && runtime.window.leaving.is_none()
+            {
+                held.push((index, runtime.take_clipboard_answers(&mark)));
+            }
+        }
+        lane::in_admission_order(held)
+    }
+}
 
 impl<B: Backend> Runtime<'_, B> {
     /// **`Copy` on a row whose execution policy the user can change**: put the command on the
@@ -50,7 +96,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// A newer copy replaces the window's last copy not yet answered, which ends `Superseded` — the
     /// clipboard ends holding the newer either way, and only the newer says it landed — **unless a
     /// paste was asked after that copy**, in any window: a paste reads the clipboard as it stood at
-    /// its press, so the newer copy then queues behind the paste instead.
+    /// its press, so the newer copy then queues behind the paste instead. The replaced copy's
+    /// terminal stays in the window's asks for the lane's drain ([`OwedCopy::ended`]): one that had
+    /// landed before the newer was asked still says so, in its turn after every earlier answer.
     ///
     /// A copy the lane refuses at its door is said once, through the window's door
     /// (`WindowHost::note`, `diagnostics.log` in the product), with `action`; one the clipboard
@@ -74,20 +122,20 @@ impl<B: Backend> Runtime<'_, B> {
         };
         let newer = request.id();
         let replaces = self.window.clipboard.copies.last().is_some_and(|older| {
-            !self
-                .app
-                .clipboard_lane
-                .a_paste_was_asked_after(older.request.id())
+            older.request.is_some() && !self.app.clipboard_lane.a_paste_was_asked_after(older.id)
         });
-        if replaces && let Some(older) = self.window.clipboard.copies.pop() {
-            // An answer that came before the newer copy was asked is the older copy's own.
-            let ended = self.app.clipboard_lane.supersede(older.request, newer);
-            self.answer_copy(older.effect, ended)?;
+        if replaces
+            && let Some(older) = self.window.clipboard.copies.last_mut()
+            && let Some(replaced) = older.request.take()
+        {
+            // An answer that came before the newer copy was asked is the older copy's own; it is
+            // answered by the drain, in its turn.
+            older.ended = Some(self.app.clipboard_lane.supersede(replaced, newer));
         }
         self.window
             .clipboard
             .copies
-            .push(OwedCopy { request, effect });
+            .push(OwedCopy::asked(request, effect));
         Ok(true)
     }
 
@@ -141,7 +189,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(source) = self.window.tabs[index]
             .sessions
             .get(&target.seat)
-            .and_then(|leaf| leaf.session.math_source(anchor))
+            .and_then(|TerminalPane { session: leaf, .. }| leaf.session.math_source(anchor))
             .map(str::to_owned)
         else {
             return Ok(());
@@ -175,7 +223,11 @@ impl<B: Backend> Runtime<'_, B> {
                 let Some(leaf) = self.window.tabs[index].sessions.get_mut(&target.seat) else {
                     return Ok(());
                 };
-                if !clear_copied_selection(&mut leaf.session, &mut leaf.view.projection, &copied) {
+                if !clear_copied_selection(
+                    &mut leaf.session.session,
+                    &mut leaf.view.projection,
+                    &copied,
+                ) {
                     return Ok(());
                 }
                 self.publish_interaction_frame()
@@ -260,6 +312,16 @@ impl<B: Backend> Runtime<'_, B> {
         self.app.settings_store.store(settings);
     }
 
+    /// Store the reader's answer about resuming agents after a restart (0.4.9 plan row 195).
+    ///
+    /// [`Self::apply_multiline_paste_ask`]'s shape: the switch is read at the next launch's
+    /// restore and at the restore card's answer, each time from the loaded settings.
+    pub(crate) fn apply_resume_agents(&mut self, enabled: bool) {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.resume_agents = enabled;
+        self.app.settings_store.store(settings);
+    }
+
     /// Put one row's whole path on the clipboard (K143).
     ///
     /// The path as the *user* would write it — `full_path`'s own separators —
@@ -276,7 +338,9 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn copy_selection(&mut self) -> Result<()> {
         let active = self.window.active_tab;
         let focused = self.window.tabs[active].focused_leaf;
-        let Some(leaf) = self.window.tabs[active].sessions.get(&focused) else {
+        let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[active].sessions.get(&focused)
+        else {
             return Ok(());
         };
         let Some(text) = selection_to_copy(&leaf.session, false) else {
@@ -308,7 +372,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(text) = self
             .sessions
             .get(&seat)
-            .and_then(|leaf| selection_to_copy(&leaf.session, true))
+            .and_then(|TerminalPane { session: leaf, .. }| selection_to_copy(&leaf.session, true))
         else {
             return Ok(());
         };
@@ -468,7 +532,8 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         let active = self.window.active_tab;
-        let Some(leaf) = self.window.tabs[active].sessions.get(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) = self.window.tabs[active].sessions.get(&seat)
+        else {
             return Ok(());
         };
         // Named now, while the gesture is happening, because the answer is spent on a later
@@ -483,21 +548,24 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **One paste asked of the clipboard lane**, aimed at `into`.
     ///
-    /// An earlier paste's answer that has come is spent first. A paste still owed is never
-    /// replaced by a later one: this one queues behind it — both read the clipboard, in order — and
-    /// a terminal's pane holds this paste's place behind whatever it already holds ([`PasteHold`]),
-    /// so `Ctrl+V`, `k`, `Ctrl+V` reaches the shell as the first paste, `k`, the second. A window
-    /// owes at most [`PASTES_OWED`]; a paste past that desk, or one the lane refuses at its door,
-    /// is said once in the log and, for a terminal, once on screen.
+    /// What the window owes is settled first ([`Self::settle_clipboard`]). A paste still owed is
+    /// never replaced by a later one: this one queues behind it — both read the clipboard, in
+    /// order — and a terminal's pane holds this paste's place behind whatever it already holds
+    /// ([`PasteHold`]), so `Ctrl+V`, `k`, `Ctrl+V` reaches the shell as the first paste, `k`, the
+    /// second. A window owes at most [`PASTES_OWED`]; a paste past that desk, or one the lane
+    /// refuses at its door, is said once in the log and, for a terminal, once on screen.
+    ///
+    /// The press is stamped, and what is owed settled, at the moment the window's `paste_clock`
+    /// counts it at ([`crate::PressClock`]): the wall clock in the product.
     pub(in crate::runtime) fn ask_for_a_paste(&mut self, into: PasteInto, ask: Ask) -> Result<()> {
-        let now = Instant::now();
+        let now = self.window.paste_clock.moment(Instant::now());
         self.settle_clipboard(now)?;
         if self.window.clipboard.pastes.len() >= PASTES_OWED {
             self.window.window.note(&format!(
                 "the clipboard lane: a paste was refused on the window: {PASTES_OWED} pastes are \
                  already owed"
             ));
-            return self.say_the_clipboard_busy(into);
+            return self.say_the_clipboard_busy(into, PasteBusy::DeskFull);
         }
         let request = match self.ask_the_clipboard(ask) {
             Ok(request) => request,
@@ -506,7 +574,12 @@ impl<B: Backend> Runtime<'_, B> {
                     "the clipboard lane refused a paste at its door: {}",
                     declined.reason()
                 ));
-                return self.say_the_clipboard_busy(into);
+                let why = match declined {
+                    Declined::LaneFull => PasteBusy::LaneFull,
+                    Declined::LaneGone => PasteBusy::LaneGone,
+                    Declined::NotStarted(_) => PasteBusy::NotStarted,
+                };
+                return self.say_the_clipboard_busy(into, why);
             }
         };
         let id = request.id();
@@ -527,39 +600,69 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
-    /// **Take what the clipboard lane has answered this window, withdraw what it no longer
-    /// wants, and spend what can be spent** — on the turn its wake brings
-    /// (`AppEvent::ClipboardAnswered`), on every turn of the window's (so a lost wake loses no
-    /// answer), and before a new paste is asked.
-    ///
-    /// A copy that landed applies its effect. Every paste's terminal is taken as it comes. A paste
-    /// still owed is withdrawn — ended `Cancelled`, its terminal to the lane's sink, a line in
-    /// `diagnostics.log` saying why — when its pane closed, was restarted or left the front, when
-    /// its field or page let the keyboard go, when it has been owed for
-    /// [`crate::clipboard_lane::PASTE_DEADLINE`], or when what its pane holds has passed the cap;
-    /// the last two also say once on screen that the clipboard was busy. A field's or a page's
-    /// paste is spent as soon as it has ended; a terminal's when it reaches the front of its pane's
-    /// hold ([`Self::advance_the_hold`]). `now` is the turn's clock, read once by the caller.
-    pub(crate) fn settle_clipboard(&mut self, now: Instant) -> Result<()> {
-        // The copies end in the order they were asked (one worker, first in first out); each that
-        // has is answered, in that order.
-        let mut at = 0;
-        while at < self.window.clipboard.copies.len() {
-            let Some(ended) = self.window.clipboard.copies[at].request.take() else {
-                at += 1;
-                continue;
-            };
-            let owed = self.window.clipboard.copies.remove(at);
-            self.answer_copy(owed.effect, ended)?;
-        }
-        for owed in &mut self.window.clipboard.pastes {
-            if owed.ended.is_none()
-                && let Some(ended) = owed.request.as_mut().and_then(ClipboardRequest::take)
-            {
-                owed.ended = Some(ended);
-                owed.request = None;
+    /// **Take every answer this window's clipboard requests hold below `owed`** (the lane's
+    /// earliest request still owed, read once for the whole drain), without answering them — the
+    /// application answers every window's in admission order across the windows
+    /// ([`FolioApp::answer_clipboard`]).
+    pub(crate) fn take_clipboard_answers(
+        &mut self,
+        mark: &lane::Mark<ClipboardId>,
+    ) -> Vec<(ClipboardId, Answered)> {
+        self.window.clipboard.answered(mark)
+    }
+
+    /// **Answer one request of this window's** that [`Self::take_clipboard_answers`] took: a copy
+    /// that landed applies its effect; a field's or a page's paste is spent now; a terminal's is
+    /// marked ended and goes on from the front of its pane's hold ([`Self::advance_the_hold`]),
+    /// which spends it once every earlier paste of that pane has been. Only here is a paste marked
+    /// ended, so an earlier paste's answer stops at it in the hold until its own turn.
+    pub(crate) fn answer_clipboard_request(
+        &mut self,
+        id: ClipboardId,
+        answered: Answered,
+    ) -> Result<()> {
+        match answered {
+            Answered::Copy { effect, ended } => self.answer_copy(effect, ended),
+            Answered::Paste { ended } => {
+                let Some(at) = self
+                    .window
+                    .clipboard
+                    .pastes
+                    .iter()
+                    .position(|owed| owed.id == id)
+                else {
+                    unreachable!(
+                        "a paste the window took an answer for is owed until it is answered"
+                    )
+                };
+                match self.window.clipboard.pastes[at].into {
+                    PasteInto::Terminal(target) => {
+                        self.window.clipboard.pastes[at].ended = Some(ended);
+                        self.advance_the_hold(target)
+                    }
+                    PasteInto::Field(_) | PasteInto::Preview(_) => {
+                        let owed = self.window.clipboard.pastes.remove(at);
+                        self.spend_paste(owed.into, ended)
+                    }
+                }
             }
         }
+    }
+
+    /// **Withdraw what the window no longer wants from the clipboard lane, and spend what can be
+    /// spent** — after the answers of the lane's wake ([`FolioApp::answer_clipboard`]), on every
+    /// turn of the window's (so a paste's deadline is kept on the turn it falls in), and before a
+    /// new paste is asked. It takes no answer from the lane: those are taken for every window at
+    /// once, so that none is answered ahead of an earlier one in another window.
+    ///
+    /// A paste still owed is withdrawn — ended `Cancelled`, its terminal to the lane's sink, a
+    /// line in `diagnostics.log` saying why — when its pane closed, was restarted or left the
+    /// front, when its field or page let the keyboard go, when it has been owed for
+    /// [`crate::clipboard_lane::PASTE_DEADLINE`], or when what its pane holds has passed the cap;
+    /// the last two also say once on screen that the clipboard was busy. A field's or a page's
+    /// paste that has ended is spent; a terminal's when it reaches the front of its pane's hold
+    /// ([`Self::advance_the_hold`]). `now` is the turn's clock, read once by the caller.
+    pub(crate) fn settle_clipboard(&mut self, now: Instant) -> Result<()> {
         let mut busy = None;
         for at in 0..self.window.clipboard.pastes.len() {
             let owed = &self.window.clipboard.pastes[at];
@@ -580,12 +683,14 @@ impl<B: Backend> Runtime<'_, B> {
                 "the clipboard lane: a paste was cancelled: {}",
                 why.words()
             ));
-            if why.is_the_clipboard_busy() && busy.is_none() {
-                busy = Some(into);
+            if let Some(busy_why) = why.busy()
+                && busy.is_none()
+            {
+                busy = Some((into, busy_why));
             }
         }
-        if let Some(into) = busy {
-            self.say_the_clipboard_busy(into)?;
+        if let Some((into, why)) = busy {
+            self.say_the_clipboard_busy(into, why)?;
         }
         let mut at = 0;
         while at < self.window.clipboard.pastes.len() {
@@ -606,12 +711,14 @@ impl<B: Backend> Runtime<'_, B> {
             .flat_map(|tab| {
                 tab.sessions
                     .iter()
-                    .filter(|(_, leaf)| leaf.paste_hold.is_some())
-                    .map(move |(seat, leaf)| PasteTarget {
-                        tab: tab.id,
-                        seat: *seat,
-                        incarnation: leaf.incarnation,
-                    })
+                    .filter(|(_, TerminalPane { session: leaf, .. })| leaf.paste_hold.is_some())
+                    .map(
+                        move |(seat, TerminalPane { session: leaf, .. })| PasteTarget {
+                            tab: tab.id,
+                            seat: *seat,
+                            incarnation: leaf.incarnation,
+                        },
+                    )
             })
             .collect();
         for target in holding {
@@ -631,7 +738,7 @@ impl<B: Backend> Runtime<'_, B> {
     fn places_held(&self) -> Vec<crate::clipboard_lane::ClipboardId> {
         let mut held = Vec::new();
         for tab in &self.window.tabs {
-            for leaf in tab.sessions.values() {
+            for TerminalPane { session: leaf, .. } in tab.sessions.values() {
                 if let Some(hold) = &leaf.paste_hold {
                     held.extend(hold.pastes());
                 }
@@ -747,17 +854,17 @@ impl<B: Backend> Runtime<'_, B> {
     fn spend_paste(&mut self, into: PasteInto, ended: ClipboardTerminal) -> Result<()> {
         match into {
             PasteInto::Terminal(target) => match ended {
-                Terminal::Done(Reply::Payload(payload)) => {
-                    self.apply_clipboard_payload(target, payload)
+                Terminal::Done(Reply::Payload { sequence, payload }) => {
+                    self.apply_clipboard_payload(target, sequence, payload)
                 }
                 Terminal::Failed(_) | Terminal::WorkerGone => {
                     if self.live_paste_target(target).is_some() {
-                        self.toast(
-                            toast::ToastKind::Error,
-                            toast::ToastAnchor::Window,
-                            None,
-                            i18n::Text::PasteClipboardRead.text().to_owned(),
-                        )
+                        self.refuse_paste(PasteRefusal {
+                            kind: RefusedKind::ReadFailed {
+                                worker_gone: matches!(ended, Terminal::WorkerGone),
+                            },
+                            from: PasteFrom::Clipboard(None),
+                        })
                     } else {
                         Ok(())
                     }
@@ -789,42 +896,60 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **The pane a paste was aimed at, wherever it stands in this window now** — by tab id, seat
     /// and incarnation, in any tab: its held input is its own whether or not its tab is on top.
-    fn paste_leaf_mut(&mut self, target: PasteTarget) -> Option<&mut LeafSession> {
+    fn paste_leaf_mut(&mut self, target: PasteTarget) -> Option<&mut ShellSession> {
         self.window
             .tabs
             .iter_mut()
             .find(|tab| tab.id == target.tab)?
             .sessions
             .get_mut(&target.seat)
-            .filter(|leaf| leaf.incarnation == target.incarnation)
+            .filter(|pane| pane.session.incarnation == target.incarnation)
+            .map(|pane| &mut pane.session)
     }
 
     /// **"The clipboard was busy", said once on screen** — for a terminal paste only: a field and
-    /// the quick edit say nothing about a clipboard they could not read, on their own terms.
-    fn say_the_clipboard_busy(&mut self, into: PasteInto) -> Result<()> {
+    /// the quick edit say nothing about a clipboard they could not read, on their own terms. `why`
+    /// is what the refusal line says.
+    fn say_the_clipboard_busy(&mut self, into: PasteInto, why: PasteBusy) -> Result<()> {
         let PasteInto::Terminal(target) = into else {
             return Ok(());
         };
         if self.live_paste_target(target).is_none() {
             return Ok(());
         }
+        self.refuse_paste(PasteRefusal {
+            kind: RefusedKind::Busy(why),
+            from: PasteFrom::Clipboard(None),
+        })
+    }
+
+    /// **The one door a refused paste is said through** (plan row 81): one line in
+    /// `diagnostics.log` — the refusal's kind, its road and the clipboard's sequence, never a path
+    /// or anything pasted ([`PasteRefusal::refusal_words`]) — and the notice on screen
+    /// ([`RefusedKind::toast_text`]). Whether the paste's pane is still there is each caller's
+    /// question, asked before it comes here, as it was before this door.
+    pub(in crate::runtime) fn refuse_paste(&mut self, refusal: PasteRefusal) -> Result<()> {
+        self.window.window.note(&refusal.refusal_words());
         self.toast(
             toast::ToastKind::Error,
             toast::ToastAnchor::Window,
             None,
-            i18n::Text::PasteClipboardBusy.text().to_owned(),
+            refusal.kind.toast_text(),
         )
     }
 
     fn apply_clipboard_payload(
         &mut self,
         target: PasteTarget,
+        sequence: Option<bt_platform::ClipboardSequence>,
         payload: bt_platform::ClipboardPayload,
     ) -> Result<()> {
         let Some(active) = self.live_paste_target(target) else {
             return Ok(());
         };
-        let Some(leaf) = self.window.tabs[active].sessions.get(&target.seat) else {
+        let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[active].sessions.get(&target.seat)
+        else {
             return Ok(());
         };
         let recipient = leaf.launch.paste_recipient.clone();
@@ -837,15 +962,22 @@ impl<B: Backend> Runtime<'_, B> {
         // refusal notice still leaves by the one door every paste's notices leave by
         // — and the line below is then an ordinary paste with nothing in it.
         let offered = std::mem::take(&mut prepared.picture);
+        // **A promise is lifted out for the picture's reason** (plan row 81): what it pastes is
+        // the paths of files nobody has written yet, and writing them is the source's render,
+        // on a worker of its own.
+        let promise = prepared.promise.take();
         // Whether it reached a shell is not asked here: a clipboard paste goes
         // to the pane that already holds the keyboard, so there is no focus for
         // it to move (owner's ruling 2026-09-17 changed the two *drop* roads and
         // left this one alone).
-        self.deliver_paste(target, prepared, "write clipboard paste to PTY")?;
+        self.deliver_paste(target, prepared, PasteFrom::Clipboard(sequence))?;
+        if let Some(promise) = promise {
+            return self.stage_clipboard_promise(target, sequence, promise);
+        }
         if offered.is_empty() {
             return Ok(());
         }
-        self.save_clipboard_picture(target, offered)
+        self.save_clipboard_picture(target, sequence, offered)
     }
 
     /// **The same paste, with the paths already in hand** — what a drop onto a
@@ -885,21 +1017,22 @@ impl<B: Backend> Runtime<'_, B> {
     /// function's first paragraph makes about a drop, said about a third way of
     /// coming by a path. `context` is all they do not share: it names the write
     /// for a reader of the error, and a picture that could not reach a shell is
-    /// not a drop that could not.
+    /// not a drop that could not. Since plan row 81 it is `from`, which names the write and the
+    /// road a refusal line says: a drop, a drag, a saved picture or a rendered promise.
     pub(in crate::runtime) fn paste_paths_into(
         &mut self,
         target: PasteTarget,
         paths: Vec<PathBuf>,
-        context: &'static str,
+        from: PasteFrom,
     ) -> Result<bool> {
         let Some(index) = self.live_paste_target(target) else {
             return Ok(false);
         };
-        let leaf = &self.window.tabs[index].sessions[&target.seat];
+        let TerminalPane { session: leaf, .. } = &self.window.tabs[index].sessions[&target.seat];
         let recipient = leaf.launch.paste_recipient.clone();
         let leading_space = input_line_needs_a_space_first(&leaf.session);
         let prepared = prepare_dropped_paste(paths, &recipient, leading_space);
-        self.deliver_paste(target, prepared, context)
+        self.deliver_paste(target, prepared, from)
     }
 
     /// **Name the shell in one of this window's seats**, as a paste's
@@ -911,7 +1044,7 @@ impl<B: Backend> Runtime<'_, B> {
     /// than a guess.
     pub(crate) fn paste_target(&self, seat: SeatId) -> Option<PasteTarget> {
         let tab = self.window.tabs.get(self.window.active_tab)?;
-        let leaf = tab.sessions.get(&seat)?;
+        let TerminalPane { session: leaf, .. } = tab.sessions.get(&seat)?;
         Some(PasteTarget {
             tab: tab.id,
             seat,
@@ -940,7 +1073,10 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn live_paste_target(&self, target: PasteTarget) -> Option<usize> {
         let index = self.window.active_tab;
         let tab = self.window.tabs.get(index)?;
-        let standing = tab.sessions.get(&target.seat).map(|leaf| leaf.incarnation);
+        let standing = tab
+            .sessions
+            .get(&target.seat)
+            .map(|TerminalPane { session: leaf, .. }| leaf.incarnation);
         paste_target_is_live(tab.id, standing, target).then_some(index)
     }
 
@@ -964,8 +1100,9 @@ impl<B: Backend> Runtime<'_, B> {
         &mut self,
         target: PasteTarget,
         prepared: PreparedClipboardPaste,
-        context: &'static str,
+        from: PasteFrom,
     ) -> Result<bool> {
+        let context = from.write_context();
         // **The address is checked before anything is said**, which is why this
         // stands above the notice rather than beside the write (review X-1): a
         // card about a path that could not be spelled for a shell that is no
@@ -973,13 +1110,8 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(active) = self.live_paste_target(target) else {
             return Ok(false);
         };
-        if let Some(notice) = prepared.notice {
-            self.toast(
-                toast::ToastKind::Error,
-                toast::ToastAnchor::Window,
-                None,
-                notice,
-            )?;
+        if let Some(kind) = prepared.refused {
+            self.refuse_paste(PasteRefusal { kind, from })?;
         }
         let Some(text) = prepared.text else {
             return Ok(false);
@@ -1026,11 +1158,15 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(false);
         };
         let seat = target.seat;
-        let Some(LeafSession {
-            life,
-            session,
+        let Some(TerminalPane {
+            session:
+                ShellSession {
+                    life,
+                    session,
+                    paste_hold,
+                    ..
+                },
             view: crate::TermView { projection, .. },
-            paste_hold,
             ..
         }) = self.window.tabs[active].sessions.get_mut(&seat)
         else {
@@ -1101,7 +1237,7 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(pending) = self.window.tabs[active]
             .sessions
             .values_mut()
-            .find_map(|leaf| leaf.pending_paste.as_mut())
+            .find_map(|TerminalPane { session: leaf, .. }| leaf.pending_paste.as_mut())
         else {
             return Ok(());
         };
@@ -1171,7 +1307,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn paste_card_layout(&mut self) -> Option<restore::PasteCardLayout> {
         let tab = self.window.tabs.get(self.window.active_tab)?;
         let (seat, pending) = pending_paste_in(tab)?;
-        let shell = profile_banner_name(&tab.sessions.get(&seat)?.launch.profile);
+        let shell = profile_banner_name(&tab.sessions.get(&seat)?.session.launch.profile);
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.scale_factor() as f32;
@@ -1209,20 +1345,21 @@ impl<B: Backend> Runtime<'_, B> {
         clipboard_focus_of(
             rung,
             self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
-            self.settings_field_holds_the_keyboard(),
             self.preview_edit_focus().is_some(),
         )
     }
 
-    /// **Whether a text field of the settings dialog holds the keyboard** — the
-    /// one fact [`text_field_holding`] needs beyond the rung (B-AUDIT-046 RT-1).
+    /// **Whether a text field of the settings dialog holds the keyboard**
+    /// (B-AUDIT-046 RT-1) — since T-SETTINGS-FIELDS-IME-POSITION the bit
+    /// [`Self::keyboard_owner`] raises [`ImeOwner::SettingsField`] on, so the
+    /// paste, the composition and the caret all read the one rung.
     ///
     /// The conditions under which the ladder reaches
     /// [`Self::settings_field_key`] and it answers, asked in the ladder's own
     /// words: no card stands above the dialog (each of those has its rung above
     /// the dialog's), no chord is being recorded (the recorder takes every key),
     /// no picker is open over the field, and the focus is a text field.
-    fn settings_field_holds_the_keyboard(&self) -> bool {
+    pub(in crate::runtime) fn settings_field_holds_the_keyboard(&self) -> bool {
         let card_above = self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
             || self.window.dirty_gate.is_open()
             || self.window.first_run.is_open()
@@ -1242,30 +1379,85 @@ impl<B: Backend> Runtime<'_, B> {
     }
 }
 
+/// **What became of the bytes** — the same door, for the callers that have to
+/// know (review 2026-09-17 P2-a).
+///
+/// [`super::terminal::write_pty_input`] swallows a refusal on purpose and always will: a shell
+/// sitting on a megabyte of unread input is a fact about that shell, not an
+/// error for the window to die of. But "swallowed" and "delivered" are two
+/// different things to a caller that is about to **move the keyboard** on the
+/// strength of it, and the drop roads are exactly that caller: a path the ring
+/// turned away, or a pane with no child behind it, must not take the reader's
+/// keyboard to a shell that received nothing and must not bring the window
+/// forward for it.
+///
+/// **[`PtyInput::Queued`] means queued, and no more than that.** The bytes are
+/// on `bt_pty::InputRing` and the writer thread will hand them to the child;
+/// whether the program on the other end reads them, and what it makes of them,
+/// is its own business and nothing this process can report. A drop's focus move
+/// is answering "did this window send it", which is the question this answers.
+pub(crate) fn offer_pty_input(
+    pty: PtyTarget<'_>,
+    bytes: &[u8],
+    what: &'static str,
+) -> Result<PtyInput> {
+    let pty = match pty {
+        PtyTarget::Shell(pty) => pty,
+        PtyTarget::Birth(birth) => {
+            return match birth.hold(bytes) {
+                Ok(()) => Ok(PtyInput::HeldForBirth),
+                // Said as the shell's own refusal is said, and for its reason.
+                Err(refused) => {
+                    crate::diagnostics::stderr_line(format!("{what}: {refused}"));
+                    Ok(PtyInput::Refused)
+                }
+            };
+        }
+        PtyTarget::BehindAPaste(hold) => {
+            hold.hold(bytes);
+            return Ok(PtyInput::HeldForPaste);
+        }
+        PtyTarget::Nowhere => return Ok(PtyInput::NoChild),
+    };
+    match hang_watch::during(hang_watch::Station::PtyInput, || {
+        let result = pty.write_with_reason(bytes, what);
+        hang_watch::counters(bytes.len(), if result.is_ok() { bytes.len() } else { 0 }, 1);
+        result
+    }) {
+        Ok(()) => Ok(PtyInput::Queued),
+        Err(refused @ PtyError::InputRefused { .. }) => {
+            hang_watch::during(hang_watch::Station::DiagnosticWrite, || {
+                crate::diagnostics::stderr_line(format!("{what}: {refused}"));
+            });
+            Ok(PtyInput::Refused)
+        }
+        Err(error) => Err(anyhow::Error::new(error).context(what)),
+    }
+}
+
 /// **Which text field holds the keyboard**, read off the rung the ladder
 /// resolved ([`ime_owner`]) — or `None` when what holds it is not a text field
 /// (B-AUDIT-046 RT-1).
 ///
 /// The rungs *are* the enumeration: every rung that is a one-line field answers
 /// with itself, and the match is total, so a rung added to [`ImeOwner`] has to
-/// say here whether a paste goes into it. The one field that is not a rung of
-/// its own is the settings dialog's: the dialog is a modal, and whether its
-/// focus is a text field is the one extra fact this is handed
-/// ([`Runtime::settings_field_holds_the_keyboard`]).
+/// say here whether a paste goes into it. The settings dialog's fields are a
+/// rung of their own since T-SETTINGS-FIELDS-IME-POSITION
+/// ([`ImeOwner::SettingsField`]), so no field here needs a fact beside the rung.
 ///
 /// The preview's document is not here: it takes a paste through its own door
 /// (`ClipboardSeat::PreviewDocument`), because it keeps the file's line breaks
 /// where a one-line field keeps the first line.
 #[must_use]
-pub(crate) fn text_field_holding(rung: ImeOwner, settings_field: bool) -> Option<TextFieldSeat> {
+pub(crate) fn text_field_holding(rung: ImeOwner) -> Option<TextFieldSeat> {
     match rung {
         ImeOwner::Rename => Some(TextFieldSeat::TabName),
         ImeOwner::GitPrompt => Some(TextFieldSeat::GitPrompt),
         ImeOwner::Palette => Some(TextFieldSeat::Palette),
         ImeOwner::GraphSearch => Some(TextFieldSeat::GraphSearch),
         ImeOwner::Search => Some(TextFieldSeat::FindBar),
-        ImeOwner::Modal => settings_field.then_some(TextFieldSeat::Settings),
-        ImeOwner::FilesTree | ImeOwner::Preview | ImeOwner::Shell => None,
+        ImeOwner::SettingsField => Some(TextFieldSeat::Settings),
+        ImeOwner::Modal | ImeOwner::FilesTree | ImeOwner::Preview | ImeOwner::Shell => None,
     }
 }
 
@@ -1352,12 +1544,11 @@ fn line_continuation_mark(grammar: shell_literal::ShellGrammar) -> Option<char> 
 pub(crate) fn clipboard_focus_of(
     rung: ImeOwner,
     swallowing: bool,
-    settings_field: bool,
     preview_edit: bool,
 ) -> menubar::ClipboardFocus {
     menubar::ClipboardFocus {
         swallowing,
-        field: text_field_holding(rung, settings_field),
+        field: text_field_holding(rung),
         preview_edit,
         shell: rung == ImeOwner::Shell,
     }
@@ -1423,7 +1614,10 @@ pub(crate) fn prepare_clipboard_paste(
             let insertion = shell_literal::paths_text(&paths, recipient, leading_space);
             PreparedClipboardPaste {
                 text: (!insertion.text.is_empty()).then_some(insertion.text),
-                notice: shell_literal::refusal_notice(&insertion.refused),
+                refused: (!insertion.refused.is_empty()).then_some(RefusedKind::Paths {
+                    refused: insertion.refused,
+                    of: paths.len(),
+                }),
                 ..PreparedClipboardPaste::default()
             }
         }
@@ -1441,13 +1635,22 @@ pub(crate) fn prepare_clipboard_paste(
             picture: offered,
             ..PreparedClipboardPaste::default()
         },
+        // **The fourth rung** (plan row 81): files another program promises to write, pasted as
+        // their paths once a worker has had them written — `Runtime::stage_clipboard_promise`.
+        ClipboardPayload::Promise(promise) => PreparedClipboardPaste {
+            promise: Some(promise),
+            ..PreparedClipboardPaste::default()
+        },
         ClipboardPayload::Nothing => PreparedClipboardPaste::default(),
-        ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise) => {
-            PreparedClipboardPaste {
-                notice: Some(i18n::Text::PasteClipboardPromise.text().to_owned()),
-                ..PreparedClipboardPaste::default()
-            }
-        }
+        ClipboardPayload::Refused(bt_platform::UnsupportedKind::Promise {
+            picture_passed_over,
+        }) => PreparedClipboardPaste {
+            refused: Some(RefusedKind::Promise {
+                why: PromiseWhy::Unsupported,
+                picture_passed_over,
+            }),
+            ..PreparedClipboardPaste::default()
+        },
     }
 }
 
@@ -1519,7 +1722,7 @@ pub(crate) fn stage_paste(
     host: bt_platform::HostPlatform,
     context: &'static str,
 ) -> StagedPaste {
-    let Some(leaf) = tab.sessions.get(&target.seat) else {
+    let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get(&target.seat) else {
         return StagedPaste::Send(text);
     };
     let mark = line_continuation_mark(leaf.launch.paste_recipient.encoder.grammar);
@@ -1527,10 +1730,10 @@ pub(crate) fn stage_paste(
         PasteRoad::AsTyped => StagedPaste::Send(text),
         PasteRoad::InputLine => StagedPaste::InputLine(powershell_input_line(&text)),
         PasteRoad::Ask { lines } => {
-            for leaf in tab.sessions.values_mut() {
+            for TerminalPane { session: leaf, .. } in tab.sessions.values_mut() {
                 leaf.pending_paste = None;
             }
-            if let Some(leaf) = tab.sessions.get_mut(&target.seat) {
+            if let Some(TerminalPane { session: leaf, .. }) = tab.sessions.get_mut(&target.seat) {
                 let continued = mark.filter(|mark| input::continued_by(&text, *mark));
                 leaf.pending_paste = Some(PendingPaste {
                     target,
@@ -1550,7 +1753,9 @@ pub(crate) fn stage_paste(
 pub(crate) fn pending_paste_in(tab: &TabState) -> Option<(SeatId, &PendingPaste)> {
     tab.sessions
         .iter()
-        .find_map(|(seat, leaf)| leaf.pending_paste.as_ref().map(|pending| (*seat, pending)))
+        .find_map(|(seat, TerminalPane { session: leaf, .. })| {
+            leaf.pending_paste.as_ref().map(|pending| (*seat, pending))
+        })
 }
 
 /// Take the waiting paste out of this tab, which is what every answer does first — `Cancel`
@@ -1558,7 +1763,7 @@ pub(crate) fn pending_paste_in(tab: &TabState) -> Option<(SeatId, &PendingPaste)
 pub(crate) fn take_pending_paste(tab: &mut TabState) -> Option<PendingPaste> {
     tab.sessions
         .values_mut()
-        .find_map(|leaf| leaf.pending_paste.take())
+        .find_map(|TerminalPane { session: leaf, .. }| leaf.pending_paste.take())
 }
 
 /// **What a spent answer writes**, or nothing for `Cancel`.
@@ -1723,10 +1928,239 @@ impl Withdrawn {
         }
     }
 
-    /// Whether the person is told on screen that the clipboard was busy: when the clipboard is
-    /// what kept the paste, not the person's own moving on.
-    fn is_the_clipboard_busy(self) -> bool {
-        matches!(self, Self::Deadline | Self::HeldOverTheCap)
+    /// Whether the person is told on screen that the clipboard was busy, and the refusal line's
+    /// word for it: when the clipboard is what kept the paste, not the person's own moving on.
+    fn busy(self) -> Option<PasteBusy> {
+        match self {
+            Self::TargetGone => None,
+            Self::Deadline => Some(PasteBusy::Deadline),
+            Self::HeldOverTheCap => Some(PasteBusy::HeldOverTheCap),
+        }
+    }
+}
+
+/// **One paste refused, as the person is told and as the log says it** (plan row 81,
+/// T-PASTE-REFUSAL-SAYS-WHY): what was refused, and the road it came by. Said through
+/// [`Runtime::refuse_paste`], the one door every paste refusal leaves by.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PasteRefusal {
+    pub(crate) kind: RefusedKind,
+    pub(crate) from: PasteFrom,
+}
+
+/// **What a paste refused**, a value: the notice's words and the log line's are both read off it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RefusedKind {
+    /// Paths no shell in this pane could be handed, each with its reason, of `of` offered. The
+    /// paths are the notice's (the person's own file names, beside the reason), never the line's.
+    Paths {
+        refused: Vec<(PathBuf, shell_literal::Refusal)>,
+        of: usize,
+    },
+    /// A promise that was not pasted, and whether a picture offered beside it did not render.
+    Promise {
+        why: PromiseWhy,
+        picture_passed_over: bool,
+    },
+    /// The clipboard's read failed, or was lost with the lane's worker.
+    ReadFailed { worker_gone: bool },
+    /// The clipboard was busy.
+    Busy(PasteBusy),
+    /// A picture whose file was not written.
+    PictureNotSaved(PictureNotSaved),
+}
+
+/// **Why a promise was not pasted.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromiseWhy {
+    /// The clipboard offered a promise this platform does not render, or whose descriptor did not
+    /// read.
+    Unsupported,
+    /// Its render refused, for this reason.
+    Refused(bt_platform::clipboard_promise::PromiseRefused),
+    /// Every staging worker's place was taken.
+    WorkersBusy,
+    /// The staging worker could not be started.
+    NotStarted,
+}
+
+/// **Why the clipboard was busy.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PasteBusy {
+    /// The window already owed [`PASTES_OWED`] pastes.
+    DeskFull,
+    /// The lane's ledger owed all it may ([`Declined::LaneFull`]).
+    LaneFull,
+    /// The lane's worker had ended ([`Declined::LaneGone`]).
+    LaneGone,
+    /// The thread door would not start the lane's worker ([`Declined::NotStarted`]).
+    NotStarted,
+    /// The clipboard did not answer within [`crate::clipboard_lane::PASTE_DEADLINE`].
+    Deadline,
+    /// What the pane held behind the paste passed what a pane holds.
+    HeldOverTheCap,
+}
+
+/// **Why a picture's file was not written.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PictureNotSaved {
+    /// Every staging worker's place was taken.
+    WorkersBusy,
+    /// The staging worker could not be started.
+    NotStarted,
+    /// The encode or the write failed (its reason is the line `adopt_clipboard_picture` says).
+    SaveFailed,
+}
+
+/// **The road a paste came by** (plan row 81) — and, for the clipboard's three, the clipboard's
+/// own count of its changes at the read: what names the write for a reader of an error
+/// ([`Self::write_context`]) and what a refusal line says.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PasteFrom {
+    /// The clipboard's text or files, pasted as read.
+    Clipboard(Option<bt_platform::ClipboardSequence>),
+    /// The file a clipboard picture was saved to.
+    Picture(Option<bt_platform::ClipboardSequence>),
+    /// The files a clipboard promise was rendered into.
+    Promise(Option<bt_platform::ClipboardSequence>),
+    /// Files dropped onto a pane.
+    Drop,
+    /// A path dragged out of Folio's own files onto a pane.
+    Drag,
+    /// A path a files column's *Insert path into terminal* sent (review N7).
+    Insert,
+}
+
+impl PasteFrom {
+    /// The write's name, for a reader of the error a failed write raises.
+    pub(crate) fn write_context(self) -> &'static str {
+        match self {
+            Self::Clipboard(_) => "write clipboard paste to PTY",
+            Self::Picture(_) => "write clipboard picture path to PTY",
+            Self::Promise(_) => "write clipboard promise paths to PTY",
+            Self::Drop => "write dropped paths to PTY",
+            Self::Drag => "write dragged path to PTY",
+            Self::Insert => "write inserted path to PTY",
+        }
+    }
+
+    /// The road's word in a refusal line.
+    fn road_words(self) -> &'static str {
+        match self {
+            Self::Clipboard(_) => "clipboard",
+            Self::Picture(_) => "picture",
+            Self::Promise(_) => "promise",
+            Self::Drop => "drop",
+            Self::Drag => "drag",
+            Self::Insert => "insert",
+        }
+    }
+
+    /// The clipboard's sequence in a refusal line: `none` for a road that read no clipboard, or
+    /// a read that did not say.
+    fn sequence_words(self) -> String {
+        match self {
+            Self::Clipboard(sequence) | Self::Picture(sequence) | Self::Promise(sequence) => {
+                sequence.map_or_else(|| "none".to_owned(), |sequence| sequence.0.to_string())
+            }
+            Self::Drop | Self::Drag | Self::Insert => "none".to_owned(),
+        }
+    }
+}
+
+impl RefusedKind {
+    /// **The notice's words** — the words each refusal said before plan row 81, and the two it
+    /// added: a picture offered beside a promise that did not render, and a promise too large.
+    pub(crate) fn toast_text(&self) -> String {
+        let text = match self {
+            Self::Paths { refused, .. } => {
+                return shell_literal::refusal_notice(refused)
+                    .expect("a paths refusal names at least one path");
+            }
+            Self::Promise {
+                why: PromiseWhy::Refused(refused),
+                ..
+            } if refused.is_too_large() => i18n::Text::PasteClipboardPromiseTooLarge,
+            Self::Promise {
+                picture_passed_over: true,
+                ..
+            } => i18n::Text::PasteClipboardPictureUnread,
+            Self::Promise { .. } => i18n::Text::PasteClipboardPromise,
+            Self::ReadFailed { .. } => i18n::Text::PasteClipboardRead,
+            Self::Busy(_) => i18n::Text::PasteClipboardBusy,
+            Self::PictureNotSaved(_) => i18n::Text::PasteClipboardPicture,
+        };
+        text.text().to_owned()
+    }
+
+    /// The kind and its detail, as the line says them: words and counts only.
+    fn kind_words(&self) -> String {
+        match self {
+            Self::Paths { refused, of } => {
+                let mut kinds: Vec<&'static str> = Vec::new();
+                for (_, reason) in refused {
+                    if !kinds.contains(&reason.log_word()) {
+                        kinds.push(reason.log_word());
+                    }
+                }
+                format!(
+                    "paths ({}, {} of {of} paths)",
+                    kinds.join(", "),
+                    refused.len()
+                )
+            }
+            Self::Promise {
+                why,
+                picture_passed_over,
+            } => {
+                let why = match why {
+                    PromiseWhy::Unsupported => "unsupported".to_owned(),
+                    PromiseWhy::Refused(refused) => refused.words(),
+                    PromiseWhy::WorkersBusy => "workers-busy".to_owned(),
+                    PromiseWhy::NotStarted => "not-started".to_owned(),
+                };
+                if *picture_passed_over {
+                    format!("promise ({why}, picture passed over)")
+                } else {
+                    format!("promise ({why})")
+                }
+            }
+            Self::ReadFailed { worker_gone: false } => "read-failed".to_owned(),
+            Self::ReadFailed { worker_gone: true } => "read-failed (worker-gone)".to_owned(),
+            Self::Busy(why) => format!(
+                "busy ({})",
+                match why {
+                    PasteBusy::DeskFull => "desk-full",
+                    PasteBusy::LaneFull => "lane-full",
+                    PasteBusy::LaneGone => "lane-gone",
+                    PasteBusy::NotStarted => "not-started",
+                    PasteBusy::Deadline => "deadline",
+                    PasteBusy::HeldOverTheCap => "held-over-the-cap",
+                }
+            ),
+            Self::PictureNotSaved(why) => format!(
+                "picture ({})",
+                match why {
+                    PictureNotSaved::WorkersBusy => "workers-busy",
+                    PictureNotSaved::NotStarted => "not-started",
+                    PictureNotSaved::SaveFailed => "not-saved",
+                }
+            ),
+        }
+    }
+}
+
+impl PasteRefusal {
+    /// **The refusal line**:
+    /// `paste refused: <kind>[ (<detail>)]; road=<road>; sequence=<N|none>` — built out of the
+    /// value's names and counts, so no path, no pasted text and no error string can reach it.
+    pub(crate) fn refusal_words(&self) -> String {
+        format!(
+            "paste refused: {}; road={}; sequence={}",
+            self.kind.kind_words(),
+            self.from.road_words(),
+            self.from.sequence_words()
+        )
     }
 }
 

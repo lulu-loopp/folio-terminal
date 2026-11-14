@@ -54,12 +54,12 @@ added later; `BT_PTY_DUMP` and `BT_HANG_SELFTEST` deliberately do not match it.
 | `BT_CARD_TRACE` | file path, used verbatim | Appends one line per station on a focus card's road: `card walk` for every call of the per-frame pass (the pane's grid, the card's rows, the stored offset before and after — one number, since the pass reports and never writes — how far the walk reached, and the offset the drawing will actually use, which is allowed to be a smaller number), `card aim` for every `Alt`+wheel notch (the detents, the stored offset, what the notch's own clamp made of it, what was asked for and what was given), `card pane resized` for every new grid a pane behind a card is given, and `card scale` for the two halves of a display change. The clock is the process's, so this file and a `BT_MOUSE_TRACE` of the same run merge on their first column. **A traced run is slower than an untraced one**: `card walk` takes a bounded transcript walk of its own. | **Two lines of the card's own transcript per `card walk` line** — its top and bottom row, each cut to 40 characters with control characters escaped, which is terminal text like any other. Otherwise seat, tab and window identifiers, grids and row counts. | off |
 | `BT_SEMANTIC_TRACE` | switch | Writes one line per matched screen region to `stderr` (so: to the console, since the name contains `TRACE`). | **The matched screen text** — a path, a URL, a hyperlink label. | off |
 | `BT_GIT_TRACE` | switch | Writes repository- and preview-watch messages to `stderr`. | **Repository and file paths being watched.** | off |
-| `BT_ATTENTION_TRACE` | file path, used verbatim | Appends one line per decision the attention queue makes, plus one line when a hooks installer resolves its target to a different path than it was asked for. | Tab indices, request and ticket identifiers, claim states, and the two paths of a resolved install target. No screen text. | off |
+| `BT_ATTENTION_TRACE` | file path, used verbatim | Appends one line per decision the attention queue makes, one line (`hear`) for every agent hook that reaches a pane, and one line when a hooks installer resolves its target to a different path than it was asked for. | Tab indices, request and ticket identifiers, claim states, the agent family and hook event name of each arrival, and the two paths of a resolved install target. No screen text. | off |
 | `BT_PREVIEW_TRACE` | file path, used verbatim | Appends one line per preview station, including one per page that holds a formula and one per formula the engine answers. | Seat, scale, rectangle, byte counts, and how many formulas a page has, was drawn and asked for. No screen text — a formula's own source is counted in characters, never written. | off |
 | `BT_HOTKEY_TRACE` | file path, used verbatim | Appends one line per station on the road a summon press travels, on both platforms: `reconcile wanted=<chord>` when the claim moves to a new chord (not once per frame), `install handler -> Ok/Err(<OSStatus>)` and `register keycode=<n> modifiers=<hex> -> Ok/Err(<OSStatus>)` where the claim is made, `handler fired id=<n> signature=<four characters> live=yes/no` for **every** hot key event this process is offered, and `summons_wake called` then `QuakeSummoned handled` as the press crosses into the event loop. A file that stops part way names the station the press did not reach. | The summon chord as `keybindings.json` spells it, key codes, modifier masks, `OSStatus` values and four-character signatures. No screen text and nothing else the reader typed. | off |
 | `BT_GLYPH_CENSUS` | file path, used verbatim | Appends one line each time a frame's demand on the shared glyph atlas changes: glyph instances, distinct rasters, distinct faces-and-sizes, rasters two surfaces share, the area they cover and the device's texture limit. **Slows every frame**: a raster's size is learned by rasterizing it a second time. | Counters and font identifiers. No screen text. | off |
 | `BT_FOCUS_THUMB_DUMP` | file path, used verbatim | Appends one counter line per frame that spent the thumbnail budget. | Integer counters only. | off |
-| `BT_PERF_TRACE` | switch | Per-frame and per-task timings and counters to `stderr`; every two seconds a `BT_PERF_TRACE turns` census of the window thread's turns by what woke them, and a `BT_PERF_TRACE threads` census of the process's threads by name whenever it changed ([formats](#turn-and-thread-census-bt_perf_trace)); includes one `BT_PERF_TRACE attempt` record per redraw/retained attempt, including empty and failed outcomes (identity, actual configuration, separate native/attention readings and phase timings; [format and freshness diagnostics](PRESENT-DIAGNOSTICS.md)); also turns on shaping-cache counting. Its `projection` line carries, since 2026-09-17, the three scroll numbers the frame it is written after decided: `scroll_offset_subpixels` (how far into the history the view stands), `scroll_extent_subpixels` (how far it could stand) and `bottom_relief_subpixels` (how much of that the blank rows under the prompt are spending). Among them, `live_math_result_dropped row=… candidate_row=… reason=…` for a rendered live formula the session refused to install — the one outcome that leaves a formula at source with nothing else to show for it. The reason is `screen`, `grid-generation`, `detection-revision`, `layout`, `source-changed`, `no-longer-detected` or `unproven`; the first four say the grid moved on while the raster was being made, and the last three say the rows no longer prove what was scanned. | Counters. One line carries the error text of a formula that failed to render. | off |
+| `BT_PERF_TRACE` | switch | Per-frame and per-task timings and counters to `stderr`; every two seconds a `BT_PERF_TRACE turns` census of the window thread's turns by what woke them followed by a `BT_PERF_TRACE stations` census of where its time went, and a `BT_PERF_TRACE threads` census of the process's threads by name whenever it changed ([formats](#turn-and-thread-census-bt_perf_trace)); includes one `BT_PERF_TRACE attempt` record per redraw/retained attempt, including empty and failed outcomes (identity, actual configuration, separate native/attention readings and phase timings; [format and freshness diagnostics](PRESENT-DIAGNOSTICS.md)); also turns on shaping-cache counting. Its `projection` line carries, since 2026-09-17, the three scroll numbers the frame it is written after decided: `scroll_offset_subpixels` (how far into the history the view stands), `scroll_extent_subpixels` (how far it could stand) and `bottom_relief_subpixels` (how much of that the blank rows under the prompt are spending). Its `frame` line ends, since 2026-11-03, with `body=composed|reused` — whether the window's body (the clear, the ground picture and every pane) was drawn or the one the window kept was put back — `body_us`, the microseconds the pane loop and the body's passes took, and, since 2026-11-09, `body_key_us`, the microseconds the body's key took (comparing it with the frame's panes, and on a composed frame copying them); on a reused frame the per-pane fields are zero. Among them, `live_math_result_dropped row=… candidate_row=… reason=…` for a rendered live formula the session refused to install — the one outcome that leaves a formula at source with nothing else to show for it. The reason is `screen`, `grid-generation`, `detection-revision`, `layout`, `source-changed`, `no-longer-detected` or `unproven`; the first four say the grid moved on while the raster was being made, and the last three say the rows no longer prove what was scanned. | Counters. One line carries the error text of a formula that failed to render. | off |
 | `BT_STARTUP_TRACE` | switch | Startup phase timings, DPI snapshots, surface-size clamps and the diagnostics channel, to `stderr`. | Timings and geometry. | off |
 | `BT_RESIZE_TRACE` | switch | Surface-size clamp lines during resize, to `stderr`. | Geometry. | off |
 | `BT_LAYOUT_EVENTS` | switch | Seat geometry changes to `stderr`. Note the name does not contain `TRACE`, so with nothing else set these lines go to `diagnostics.log`. | Geometry. | off |
@@ -203,7 +203,10 @@ and leaves; `BT_UNINSTALL_ASKER_CHILD` names the sandbox data folder `bt-app`'s
 copy of its own test binary that claims it and leaves as a Folio does;
 `BT_UNINSTALL_SELFHOLD_CHILD` names the part (`asker` or `door`), whether data is removed and the
 sandbox `bt-app`'s `uninstall::tests::the_door_holds_nothing_of_its_askers_so_remove_data_removes_its_log`
-sets on the copies of its own test binary that play the asking Folio and the door it starts. Only those
+sets on the copies of its own test binary that play the asking Folio and the door it starts;
+`BT_UNINSTALL_ENDS_IN_A_PAUSE_CHILD` marks the copy of its own test binary `bt-app`'s
+`uninstall::tests::the_door_goes_on_in_the_pause_its_asker_ends` starts as the asker, which reads
+its stdin to its end and leaves, writing nothing. Only those
 tests' child halves read them, and they write only into the test's own temporary folder. `BT_U37_ROAD_CHILD`, `BT_U37_ROAD_ROOT` and `BT_U37_ROAD_LINE` name the part
 (`trial` or `rescue`), the private folder and the hand-back line `bt-app`'s
 `update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers`
@@ -235,7 +238,12 @@ half reads them, and it writes one line into that file. `BT_ELEVATED_PIPE_VM_ROW
 `observe`), the guest folder its `row.txt` (and for `observe`, `line.txt`) is written to,
 and the `folio.exe` the `launch` row starts, for `bt-platform`'s ignored
 `elevated_pipe::tests::vm_row`, which only the clean-VM harness runs: it performs a real
-`runas` launch.
+`runas` launch. `BT_MATH_STACK_CHILD` carries `<shape index>:<stack bytes>` to the copy of
+`bt-math`'s own test binary that `tests::every_recursive_shape_renders_at_the_limit_on_a_quarter_of_the_worker_stack`
+and its whole-stack twin start once per shape (plan row 74), and `BT_BACKTRACE_REPORT_TEST_CHILD`
+marks the copy of `bt-app`'s test binary that `tests::a_contained_panics_report_names_this_crates_frame_by_file_and_line`
+starts to install the panic hook in (plan row 73); only those tests' child halves read them, and the
+second writes one panic report under `target/`, which it removes.
 
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |
@@ -267,6 +275,10 @@ at all.)
 
 **Half of a name, spelled in two pieces** so that a test asserting the name's
 absence is not its own counter-example: `BT_APP_`, `BT_TRANSFER`.
+
+**A compile-time value, not a variable of any process**: `BT_MATH_OPT_LEVEL`, which
+`crates/bt-math/build.rs` hands `rustc` (`cargo::rustc-env`) as the optimisation level the
+crate is built at, and which only its test module reads, through `env!` (plan row 74).
 
 **Fixture strings and markers** written by tests into a terminal or a probe and
 matched back out: `BT_APP_INPUT_OK`, `BT_FILL_080_XXXXXXXXXXXXXXXXXXXXXXXX`,
@@ -462,6 +474,7 @@ window thread only adds each turn to two counters):
 ```
 BT_PERF_TRACE threads total=14 named=[bt-pty-reader:3,bt-pty-writer:3,bt-hang-watch:1,main:1] unnamed=6
 BT_PERF_TRACE turns window_ms=2000 turns=10 us_total=6131 by_source=Timed(ShellCaret):3/800,Timed(RefusedFrame):3/740,Window(EventRedraw):3/4302,Event(TaskbarAnswered):1/288 unkept=0
+BT_PERF_TRACE stations window_ms=2000 us_total=5310 by_station=TurnPresent:3920,Drain:610,Woken:402,Place:378
 ```
 
 `threads` comes before the first `turns` line and again whenever it differs
@@ -494,6 +507,15 @@ program already uses for wakes:
 `unkept` counts turns whose event could not be named (more event kinds than the
 census keeps names for). The numbers come from the turn accounting, so a turn
 counted here is a turn in the exit summary's `wall` line.
+
+`stations` follows a `turns` line whenever the window thread spent any time in
+that window (0.4.9 plan row 196): `us_total` is the time it held control (parked
+time is not counted), charged to the hang-watch station it was at,
+and `by_station` splits it by station, in whole microseconds, longest
+first, naming only the stations it spent at least one microsecond at. The names
+are the program's `Station` names; `TurnPresent` is the present a turn pays at
+its own end for what it published, and `WindowRedraw` is a paint asked of the
+platform.
 
 ### Picture freshness (always on)
 

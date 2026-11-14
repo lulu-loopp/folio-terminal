@@ -396,14 +396,15 @@ fn other_builds_artefacts_are_pruned_and_a_held_one_is_kept_whole() {
 /// build's bytes is named as it is; one that does not is left exactly as the old build left it and
 /// the trial's own folder gets the module.
 ///
+/// Windows only: the module's bytes are a Windows build's (`psreadline::module_files` is empty
+/// on every other target), so elsewhere there is nothing a trial could name or write (0.4.10
+/// plan row 12: it returned there before it asserted anything).
+///
 /// MUTATION: write the durable copy from the trial (`install_psreadline_module_at(durable)`) —
 /// the stale durable file is rewritten.
+#[cfg(windows)]
 #[test]
 fn a_trial_names_a_current_durable_module_and_otherwise_writes_its_own() {
-    if crate::psreadline::module_files().is_empty() {
-        // No module to compare: nothing a trial could name or write (any target but Windows).
-        return;
-    }
     let root = bt_testpath::temp_path("psreadline-trial");
     let durable = root.join("durable");
     let trial = root.join("trial");

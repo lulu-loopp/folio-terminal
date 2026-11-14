@@ -7172,7 +7172,7 @@
          pressing it OPENS the file rather than switching to a buffer — which is
          exactly the first frame after a restart, when the pool is empty and the
          list is not */
-      { kind: "file", target: "C:\\Users\\Alice\\Developer\\folio-terminal\\docs\\DESIGN.md" },
+      { kind: "file", target: "C:\\Users\\Alice\\Developer\\lunar-workshop\\docs\\DESIGN.md" },
       /* AND THE THIRD KIND, WHICH THE NOTE ABOVE SAID WOULD DRAW NOTHING UNTIL
          W2 — it draws now (W1). A pinned URL with no buffer behind it is the
          file case one class over: the switcher lists it, pressing it navigates
@@ -7197,13 +7197,13 @@
   /* two claudes in two repos, and a shell in one of them: the case the strip has
      to survive, and the case a profile name alone cannot */
   state.tabs = [
-    mkWs(mkSession("PowerShell", mark("pwsh"), powershell(), false, "C:\\Users\\Alice\\Developer\\folio-terminal", powershell)),
+    mkWs(mkSession("PowerShell", mark("pwsh"), powershell(), false, "C:\\Users\\Alice\\Developer\\lunar-workshop", powershell)),
     /* the claude tab carries a progTitle because that is the real case P1-12 was
        written for: Claude Code names its own terminal, and with three claudes in
        one repo the title is the only thing that differs. Restoring it drops the
        progTitle (the program has not spoken yet) but keeps a manual name — which
        is the priority chain doing exactly what it promises. */
-    mkWs(mkSession("claude", mark("claude"), claude(), true, "C:\\Users\\Alice\\Developer\\folio-terminal", claude, "Adam 公式推导")),
+    mkWs(mkSession("claude", mark("claude"), claude(), true, "C:\\Users\\Alice\\Developer\\lunar-workshop", claude, "Adam 公式推导")),
     mkWs(mkSession("wsl", mark("ubuntu"), wsl(), false, "~/src/bt-corpus", wsl)),
   ];
   /* The first tab is the PowerShell one, and it is the pane the integration
@@ -9159,7 +9159,7 @@
   /* demo repo state per root; the native line reads the real repo (gitoxide or
      `git status --porcelain` on a debounce) — the mock defines the SURFACE */
   const GIT_DEMO = {
-    "C:\\Users\\Alice\\Developer\\folio-terminal": {
+    "C:\\Users\\Alice\\Developer\\lunar-workshop": {
       branch: "main", ahead: 2, behind: 0,
       branches: [["main", "12m"], ["feat/latex-blocks", "2h"], ["fix/white-collapse", "1d"], ["spike/mathjax", "6d"]],
       staged: [["A", "crates/bt-math/src/lib.rs"]],
@@ -9184,7 +9184,7 @@
      open/close curves (drawn top→bottom), refs worn as chips. The native line
      computes lanes from the real DAG; the mock hand-authors a believable one. */
   const GIT_GRAPH = {
-    "C:\\Users\\Alice\\Developer\\folio-terminal": [
+    "C:\\Users\\Alice\\Developer\\lunar-workshop": [
       { h: "d1900b6", m: "ui: command palette - intent navigation", t: "12m", d: 0, thr: [], refs: [["main", 0], ["HEAD", 0]], files: ["docs/design/ui-mockup.html", "docs/DESIGN.md"] },
       { h: "7147911", m: "m1.8f-r2: frame content digest (merge)", t: "1h", d: 0, thr: [], open: [1], files: ["crates/bt-app/src/main.rs", "crates/bt-render/src/lib.rs"] },
       { h: "a41f2c9", m: "digest: fnv over row/column/text", t: "1h", d: 1, thr: [0], refs: [["fix/white-collapse", 1]], files: ["crates/bt-render/src/lib.rs"] },
@@ -15216,7 +15216,7 @@
     /* tab 2: a files column down the left, the blocked claude, and a test run
        that came back non-zero — three content classes are two of them */
     const failed = mkSession("PowerShell", mark("pwsh"), powershell(), false,
-                             "C:\\Users\\Alice\\Developer\\folio-terminal", powershell);
+                             "C:\\Users\\Alice\\Developer\\lunar-workshop", powershell);
     failed.lines = failed.lines.concat([
       `<div><span class="prompt">PS&gt;</span> cargo test -p bt-viewport</div>`,
       `<div class="dim">running 214 tests</div>`,
@@ -15224,7 +15224,7 @@
       `<div style="color:#e5534b">error: test failed, to rerun pass \`-p bt-viewport\`</div>`]);
     failed.unread = true; failed.lastExit = "fail";
     splitLeafIn(t2, leavesOf(t2.tree)[0].id, "right", mkLeaf(failed.uid));
-    splitRootOf(t2, "left", mkFilesLeaf("C:\\Users\\Alice\\Developer\\folio-terminal"));
+    splitRootOf(t2, "left", mkFilesLeaf("C:\\Users\\Alice\\Developer\\lunar-workshop"));
     /* tab 3: the downloading wsl session plus the preview pane its README opens
        into — §7.1.3's per-tab singleton, drawn inside this tab's own card */
     splitLeafIn(t3, leavesOf(t3.tree)[0].id, "bottom",
@@ -15239,7 +15239,7 @@
     state.tabs.push(t4);
     /* THIS SHELL STANDS IN THE PARENT OF THE FILES COLUMN'S ROOT, on purpose:
        it is the square the composable `RootNotes` were written for. Tab 2's tree
-       is rooted on `…\Developer\folio-terminal`, so `…\Developer` is at once
+       is rooted on `…\Developer\lunar-workshop`, so `…\Developer` is at once
        "a terminal is here" and "parent" — the row that used to enter the list
        under the first of those and quietly lose the second. Open that column's
        ⌄ and the row wears both badges, in the fixed most-permanent → most-local

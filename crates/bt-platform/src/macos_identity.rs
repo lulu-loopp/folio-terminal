@@ -58,6 +58,7 @@
 //! **Off macOS** every call is refused with [`Why::NotMacOs`], naming this
 //! door; the parsers and the decision are pure and compile everywhere.
 
+use crate::poll_clock::{PollClock, WallPollClock};
 use std::path::Path;
 use std::time::Duration;
 
@@ -276,14 +277,20 @@ fn first_line(output: &str) -> Option<String> {
 /// fails), or its answer is not one designated requirement; [`Why::NotMacOs`]
 /// off macOS.
 pub fn running_requirement() -> Result<Requirement, Refusal> {
-    designated_requirement_of(&std::process::id().to_string()).map(Requirement::of_designated)
+    running_requirement_on(&WallPollClock)
+}
+
+/// [`running_requirement`] with its child's bound read on `clock`.
+fn running_requirement_on(clock: &dyn PollClock) -> Result<Requirement, Refusal> {
+    designated_requirement_of(&std::process::id().to_string(), clock)
+        .map(Requirement::of_designated)
 }
 
 /// The designated requirement `codesign` prints for `code` — a path, or a
-/// process id in decimal.
-fn designated_requirement_of(code: &str) -> Result<String, Refusal> {
+/// process id in decimal — with the child's bound read on `clock`.
+fn designated_requirement_of(code: &str, clock: &dyn PollClock) -> Result<String, Refusal> {
     let stage = Stage::RunningRequirement;
-    let answer = arm::run(stage, CODESIGN, &["-d", "-r-", code], DISPLAY_BOUND)?;
+    let answer = arm::run(stage, CODESIGN, &["-d", "-r-", code], DISPLAY_BOUND, clock)?;
     if answer.status != Some(0) {
         return Err(Refusal::quoting(
             stage,
@@ -334,17 +341,30 @@ pub fn parse_designated(stdout: &str) -> Option<String> {
 /// A [`Refusal`] at [`Stage::Validity`] or [`Stage::Requirement`];
 /// [`Why::NotMacOs`] off macOS.
 pub fn verify_bundle(path: &Path, requirement: &Requirement) -> Result<Verified, Refusal> {
-    verify_against(path, &requirement.text())
+    verify_bundle_on(path, requirement, &WallPollClock)
 }
 
-fn verify_against(path: &Path, requirement: &str) -> Result<Verified, Refusal> {
+/// [`verify_bundle`] with both children's bounds read on `clock`.
+fn verify_bundle_on(
+    path: &Path,
+    requirement: &Requirement,
+    clock: &dyn PollClock,
+) -> Result<Verified, Refusal> {
+    verify_against(path, &requirement.text(), clock)
+}
+
+fn verify_against(
+    path: &Path,
+    requirement: &str,
+    clock: &dyn PollClock,
+) -> Result<Verified, Refusal> {
     const STRICT: [&str; 4] = ["--verify", "--strict", "--deep", "--all-architectures"];
     let target = path.to_string_lossy();
 
     let stage = Stage::Validity;
     let mut arguments = STRICT.to_vec();
     arguments.push(&target);
-    let validity = arm::run(stage, CODESIGN, &arguments, VERIFY_BOUND)?;
+    let validity = arm::run(stage, CODESIGN, &arguments, VERIFY_BOUND, clock)?;
     if validity.status != Some(0) {
         return Err(Refusal::quoting(
             stage,
@@ -358,7 +378,7 @@ fn verify_against(path: &Path, requirement: &str) -> Result<Verified, Refusal> {
     let mut arguments = STRICT.to_vec();
     arguments.push(&test);
     arguments.push(&target);
-    let matched = arm::run(stage, CODESIGN, &arguments, VERIFY_BOUND)?;
+    let matched = arm::run(stage, CODESIGN, &arguments, VERIFY_BOUND, clock)?;
     match matched.status {
         Some(0) => Ok(Verified(())),
         Some(3) => Err(Refusal::quoting(stage, Why::NotSatisfied, &matched.stderr)),
@@ -381,8 +401,13 @@ fn verify_against(path: &Path, requirement: &str) -> Result<Verified, Refusal> {
 /// [`Stage::GatekeeperAssessment`] when a tool did not start, ran past its
 /// bound, or answered outside its grammar; [`Why::NotMacOs`] off macOS.
 pub fn assess(path: &Path) -> Result<Assessment, Refusal> {
+    assess_on(path, &WallPollClock)
+}
+
+/// [`assess`] with both children's bounds read on `clock`.
+fn assess_on(path: &Path, clock: &dyn PollClock) -> Result<Assessment, Refusal> {
     let stage = Stage::GatekeeperStatus;
-    let status = arm::run(stage, SPCTL, &["--status"], DISPLAY_BOUND)?;
+    let status = arm::run(stage, SPCTL, &["--status"], DISPLAY_BOUND, clock)?;
     let enabled = if status.status == Some(0) {
         parse_status(&status.stdout)
     } else {
@@ -406,6 +431,7 @@ pub fn assess(path: &Path) -> Result<Assessment, Refusal> {
         SPCTL,
         &["--assess", "--type", "execute", "-vv", &target],
         ASSESS_BOUND,
+        clock,
     )?;
     parse_assessment(&target, answer.status, &answer.stderr)
         .ok_or_else(|| Refusal::quoting(stage, Why::Malformed, &answer.stderr))
@@ -518,13 +544,13 @@ struct Answer {
 
 #[cfg(target_os = "macos")]
 mod arm {
-    use super::{Answer, OUTPUT_BOUND, Refusal, Stage, Why};
+    use super::{Answer, OUTPUT_BOUND, PollClock, Refusal, Stage, Why};
     use std::io::{self, Read};
     use std::os::fd::AsRawFd;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     /// How often a waiting call looks at its child.
-    const POLL: Duration = Duration::from_millis(10);
+    pub(super) const POLL: Duration = Duration::from_millis(10);
 
     /// Make a pipe's reads answer `WouldBlock` rather than wait, so a child that
     /// writes without end cannot hold the call past its bound.
@@ -564,12 +590,18 @@ mod arm {
     /// **Run `program` with `arguments` under `bound`**, through the child
     /// door; a child past its bound, or past [`OUTPUT_BOUND`] on a stream, is
     /// ended by its own handle and the call refused at `stage` — one past its
-    /// bound quoting the first line of what it had said by then.
+    /// bound quoting the first line of what it had said by then. The bound is
+    /// set and read on `clock` ([`crate::poll_clock::PollClock`]: the public
+    /// doors hand [`crate::poll_clock::WallPollClock`]; the tests hand a
+    /// pinned clock, whose deadline never comes, where a real tool's answer is
+    /// the subject, and a counted clock where the bound's end is), which also
+    /// rests [`POLL`] between two looks.
     pub(super) fn run(
         stage: Stage,
         program: &str,
         arguments: &[&str],
         bound: Duration,
+        clock: &dyn PollClock,
     ) -> Result<Answer, Refusal> {
         let refuse = |why| Refusal::at(stage, why);
         let mut command = crate::quiet_command(program);
@@ -580,7 +612,7 @@ mod arm {
             child.take_stdout().expect("stdout was piped"),
             child.take_stderr().expect("stderr was piped"),
         );
-        let deadline = Instant::now() + bound;
+        let deadline = clock.now() + bound;
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let collected = (|| {
             nonblocking(&stdout).map_err(|_| Why::DidNotStart)?;
@@ -599,10 +631,10 @@ mod arm {
                     }
                     return Ok(status.code());
                 }
-                if Instant::now() >= deadline {
+                if clock.now() >= deadline {
                     return Err(Why::TimedOut);
                 }
-                std::thread::sleep(POLL);
+                clock.pause(POLL);
             }
         })();
         let status = collected.map_err(|why| {
@@ -630,15 +662,17 @@ mod arm {
 
 #[cfg(not(target_os = "macos"))]
 mod arm {
-    use super::{Answer, Refusal, Stage, Why};
+    use super::{Answer, PollClock, Refusal, Stage, Why};
     use std::time::Duration;
 
-    /// Refused by name: this door has no arm off macOS.
+    /// Refused by name: this door has no arm off macOS, and its clock is never
+    /// read.
     pub(super) fn run(
         stage: Stage,
         _program: &str,
         _arguments: &[&str],
         _bound: Duration,
+        _clock: &dyn PollClock,
     ) -> Result<Answer, Refusal> {
         Err(Refusal::at(stage, Why::NotMacOs))
     }

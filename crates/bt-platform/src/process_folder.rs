@@ -22,7 +22,35 @@
 //! **A bridge to another machine is refused, not read** (the foreground-program door's boundary,
 //! [`crate::foreground_program`]): the local folder of `ssh` or `wsl` says nothing about where the
 //! shell on the far side stands.
+//!
+//! # And the command line this process's parent was started with
+//!
+//! [`parent_arguments`] (0.4.10 plan row 74): the words the operating system holds for the process
+//! that started this one — asked by `folio attention`, whose parent is the agent that ran its hook,
+//! so that a resumed session can be handed the flags the agent was started with. Read only, and
+//! answered only while that very parent runs: the parent is taken by its pid **and** its start
+//! instant ([`crate::install_flip::parent_of`]), and the start is asked again after the read, so a
+//! parent that ended — and a pid reused since — is never answered for. And
+//! [`arguments_of_parent_of`] the same, one generation up (row 74's review N1): the parent of a
+//! process this one descends from, for a hook an agent runs through a shell, with the child it was
+//! asked about held to the same rule — it must still run as recorded after the read too. Which
+//! step to take, and whether to take it, is the caller's.
+//!
+//! * **Windows**: the same one `OpenProcess` as the folder's, and the same PEB walk, to
+//!   `RTL_USER_PROCESS_PARAMETERS.CommandLine` (the `UNICODE_STRING` `winternl.h` names beside
+//!   `ImagePathName`), whose characters are split into words by `CommandLineToArgvW`. That is the
+//!   rule of the Windows shell, and nearly the MSVC C runtime's, which Rust's standard library
+//!   follows too: the two part only on a doubled quote inside a quoted run (`"a""b c"`), which
+//!   `CommandLineToArgvW` reads as a literal quote that also ends the quoted run, where the runtime
+//!   since 2008 stays inside it, so a word holding `""` may be recorded otherwise than the agent
+//!   read it (review N5, a named limit; re-review F3). A 32-bit parent is read from its own PEB.
+//! * **macOS**: `sysctl(KERN_PROCARGS2)`, through [`crate::install_flip::arguments_of`].
+//!
+//! Bounded as the folder's read is: a `UNICODE_STRING` holds at most 32,767 characters, and
+//! `KERN_PROCARGS2` answers at most `KERN_ARGMAX` bytes. Nothing waits on another thread or
+//! process.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Why a process's folder could not be read. Each is said to the person as "folder unknown"; the
@@ -51,6 +79,51 @@ pub fn current_directory(pid: u32) -> Result<PathBuf, FolderRefusal> {
     imp::current_directory(pid)
 }
 
+/// Why the parent's command line could not be read. A caller reads every one of them as "the
+/// launch is not known"; the variants keep the cause for the tests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ArgumentsRefusal {
+    /// This account may not read the parent (another user's, or a protected one).
+    NoAccess,
+    /// The parent has ended, or its pid now names a process that started after this one.
+    Exited,
+    /// The parent answered, but not with a command line (a short read, an empty line).
+    Unreadable,
+    /// This platform has no reading of another process's command line.
+    Unsupported,
+}
+
+/// **A process this one descends from, and the words it was started with.**
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AncestorLine {
+    /// The process, by its pid and start instant.
+    pub process: crate::install_flip::Running,
+    /// Its command line, its program's own word first.
+    pub words: Vec<OsString>,
+}
+
+/// **The command line this process's parent was started with** — see the module header.
+///
+/// # Errors
+/// An [`ArgumentsRefusal`] naming the reason.
+pub fn parent_arguments() -> Result<AncestorLine, ArgumentsRefusal> {
+    imp::parent_arguments()
+}
+
+/// **The command line `child`'s parent was started with** — `child` a process this one descends
+/// from, by its pid and start instant: the parent taken as [`parent_arguments`] takes it, started
+/// before `child`, and both still running as recorded before the open and after the read (row
+/// 74's review N1).
+///
+/// # Errors
+/// An [`ArgumentsRefusal`] naming the reason; `Exited` when `child` or its parent does not run as
+/// recorded.
+pub fn arguments_of_parent_of(
+    child: crate::install_flip::Running,
+) -> Result<AncestorLine, ArgumentsRefusal> {
+    imp::arguments_of_parent_of(child)
+}
+
 /// A bridge to another machine, by its image name as the foreground-program door spells it.
 #[cfg(any(windows, target_os = "macos", test))]
 fn is_far_side(image: &std::path::Path) -> bool {
@@ -59,18 +132,22 @@ fn is_far_side(image: &std::path::Path) -> bool {
     ))
 }
 
-/// Where the process parameters and the current directory stand in one PEB layout.
+/// Where the process parameters, the current directory and the command line stand in one PEB
+/// layout.
 ///
 /// The offsets are the documented `PEB` and `RTL_USER_PROCESS_PARAMETERS` layouts, which Windows
 /// has kept since NT for both widths: `PEB.ProcessParameters` at `0x20` (64-bit) or `0x10`
 /// (32-bit); `RTL_USER_PROCESS_PARAMETERS.CurrentDirectory` — a `CURDIR` whose first member is the
-/// `UNICODE_STRING DosPath` — at `0x38` or `0x24`; and in a `UNICODE_STRING` the byte length first
-/// and the buffer pointer at `8` or `4`.
+/// `UNICODE_STRING DosPath` — at `0x38` or `0x24`; `RTL_USER_PROCESS_PARAMETERS.CommandLine`, the
+/// `UNICODE_STRING` after `ImagePathName` (`winternl.h`: sixteen bytes and ten pointers, then the
+/// two strings), at `0x70` or `0x40`; and in a `UNICODE_STRING` the byte length first and the
+/// buffer pointer at `8` or `4`.
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PebLayout {
     parameters_at: u64,
     current_directory_at: u64,
+    command_line_at: u64,
     buffer_at: u64,
     pointer_bytes: usize,
 }
@@ -80,12 +157,14 @@ impl PebLayout {
     const NATIVE_64: Self = Self {
         parameters_at: 0x20,
         current_directory_at: 0x38,
+        command_line_at: 0x70,
         buffer_at: 8,
         pointer_bytes: 8,
     };
     const WOW64: Self = Self {
         parameters_at: 0x10,
         current_directory_at: 0x24,
+        command_line_at: 0x40,
         buffer_at: 4,
         pointer_bytes: 4,
     };
@@ -116,6 +195,24 @@ fn current_directory_units(
     peb: u64,
     layout: PebLayout,
 ) -> Option<Vec<u16>> {
+    parameters_string_units(memory, peb, layout, layout.current_directory_at)
+}
+
+/// **The command line's UTF-16 code units**, walked from the PEB at `peb` in `layout`, by the
+/// folder's rules: `None` for anything that is not a whole, non-empty string.
+#[cfg(any(windows, test))]
+fn command_line_units(memory: &dyn ProcessMemory, peb: u64, layout: PebLayout) -> Option<Vec<u16>> {
+    parameters_string_units(memory, peb, layout, layout.command_line_at)
+}
+
+/// The `UNICODE_STRING` at `field` of the process parameters the PEB at `peb` points at.
+#[cfg(any(windows, test))]
+fn parameters_string_units(
+    memory: &dyn ProcessMemory,
+    peb: u64,
+    layout: PebLayout,
+    field: u64,
+) -> Option<Vec<u16>> {
     let parameters = read_pointer(
         memory,
         peb.checked_add(layout.parameters_at)?,
@@ -124,15 +221,15 @@ fn current_directory_units(
     if parameters == 0 {
         return None;
     }
-    let dos_path = parameters.checked_add(layout.current_directory_at)?;
+    let string = parameters.checked_add(field)?;
     let mut length = [0u8; 2];
-    if !memory.read(dos_path, &mut length) {
+    if !memory.read(string, &mut length) {
         return None;
     }
     let length = usize::from(u16::from_le_bytes(length));
     let buffer = read_pointer(
         memory,
-        dos_path.checked_add(layout.buffer_at)?,
+        string.checked_add(layout.buffer_at)?,
         layout.pointer_bytes,
     )?;
     if length == 0 || length % 2 != 0 || buffer == 0 {
@@ -198,8 +295,10 @@ fn refusal_of_errno(errno: i32, no_such_process: i32, not_permitted: i32) -> Fol
 
 #[cfg(windows)]
 mod imp {
-    use super::{FolderRefusal, PebLayout, ProcessMemory};
+    use super::{AncestorLine, ArgumentsRefusal, FolderRefusal, PebLayout, ProcessMemory};
+    use crate::install_flip::Running;
     use std::{
+        ffi::OsString,
         os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
         path::PathBuf,
     };
@@ -210,7 +309,7 @@ mod imp {
         Win32::{
             Foundation::{
                 ERROR_ACCESS_DENIED, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER, HANDLE,
-                STILL_ACTIVE,
+                HLOCAL, LocalFree, STILL_ACTIVE,
             },
             System::{
                 Diagnostics::Debug::ReadProcessMemory,
@@ -219,6 +318,7 @@ mod imp {
                     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, QueryFullProcessImageNameW,
                 },
             },
+            UI::Shell::CommandLineToArgvW,
         },
     };
 
@@ -329,7 +429,16 @@ mod imp {
         }
     }
 
-    pub(super) fn current_directory(pid: u32) -> Result<PathBuf, FolderRefusal> {
+    /// Why a process could not be opened for reading: the cause each door names in its own words.
+    enum Unopened {
+        NoAccess,
+        Exited,
+        Unreadable,
+    }
+
+    /// **One process, opened to be read**: `PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ`,
+    /// the one open each door makes.
+    fn opened_for_reading(pid: u32) -> Result<Process, Unopened> {
         // SAFETY: a call taking flags and an integer; it dereferences nothing and answers an error
         // for a process id that has gone or that this token may not open.
         let opened = unsafe {
@@ -339,41 +448,124 @@ mod imp {
                 pid,
             )
         };
-        let handle = match opened {
-            Ok(handle) => handle,
+        match opened {
+            // SAFETY: the handle was opened here and is owned by this value alone.
+            Ok(handle) => Ok(Process(unsafe { OwnedHandle::from_raw_handle(handle.0) })),
             Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => {
-                return Err(FolderRefusal::NoAccess);
+                Err(Unopened::NoAccess)
             }
             Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => {
-                return Err(FolderRefusal::Exited);
+                Err(Unopened::Exited)
             }
-            Err(_) => return Err(FolderRefusal::Unreadable),
-        };
-        // SAFETY: the handle was opened above and is owned by this value alone.
-        let process = Process(unsafe { OwnedHandle::from_raw_handle(handle.0) });
+            Err(_) => Err(Unopened::Unreadable),
+        }
+    }
+
+    impl Process {
+        /// **One string of the process parameters, read from the PEB this process keeps them
+        /// in**: a WOW64 process's own 32-bit PEB (which `ProcessWow64Information` locates), any
+        /// other's native one. `walk` is the string's own walk
+        /// ([`super::current_directory_units`], [`super::command_line_units`]), handed the PEB
+        /// and the layout it is read in.
+        fn parameters_string(
+            &self,
+            walk: fn(&dyn ProcessMemory, u64, PebLayout) -> Option<Vec<u16>>,
+        ) -> Option<Vec<u16>> {
+            match self.query::<usize>(ProcessWow64Information) {
+                // A WOW64 process: the answer is its 32-bit PEB's address.
+                Some(peb32) if peb32 != 0 => u64::try_from(peb32)
+                    .ok()
+                    .and_then(|peb32| walk(self, peb32, PebLayout::WOW64)),
+                Some(_) => self
+                    .query::<PROCESS_BASIC_INFORMATION>(ProcessBasicInformation)
+                    .and_then(|basic| u64::try_from(basic.PebBaseAddress.addr()).ok())
+                    .and_then(|peb| walk(self, peb, PebLayout::NATIVE_64)),
+                None => None,
+            }
+        }
+    }
+
+    pub(super) fn current_directory(pid: u32) -> Result<PathBuf, FolderRefusal> {
+        let process = opened_for_reading(pid).map_err(|unopened| match unopened {
+            Unopened::NoAccess => FolderRefusal::NoAccess,
+            Unopened::Exited => FolderRefusal::Exited,
+            Unopened::Unreadable => FolderRefusal::Unreadable,
+        })?;
         if let Some(image) = process.image()
             && super::is_far_side(&image)
         {
             return Err(FolderRefusal::FarSide);
         }
-        let read = match process.query::<usize>(ProcessWow64Information) {
-            // A WOW64 process: the answer is its 32-bit PEB's address.
-            Some(peb32) if peb32 != 0 => u64::try_from(peb32).ok().and_then(|peb32| {
-                super::current_directory_units(&process, peb32, PebLayout::WOW64)
-            }),
-            Some(_) => process
-                .query::<PROCESS_BASIC_INFORMATION>(ProcessBasicInformation)
-                .and_then(|basic| u64::try_from(basic.PebBaseAddress.addr()).ok())
-                .and_then(|peb| {
-                    super::current_directory_units(&process, peb, PebLayout::NATIVE_64)
-                }),
-            None => None,
-        };
-        match read {
+        match process.parameters_string(super::current_directory_units) {
             Some(units) => Ok(super::folder_of_dos_path(&units)),
             None if process.has_exited() => Err(FolderRefusal::Exited),
             None => Err(FolderRefusal::Unreadable),
         }
+    }
+
+    /// This process's parent's command line (module header).
+    pub(super) fn parent_arguments() -> Result<AncestorLine, ArgumentsRefusal> {
+        let this = crate::install_flip::this_running_process().ok_or(ArgumentsRefusal::Exited)?;
+        arguments_of_parent_of(this)
+    }
+
+    /// `child`'s parent's command line (module header): asked only while the parent recorded by
+    /// pid and start runs, and `child` too, before the open and again after the read — the handle
+    /// held between keeps the process it opened, and a start that still matches after the read is
+    /// that same process.
+    pub(super) fn arguments_of_parent_of(child: Running) -> Result<AncestorLine, ArgumentsRefusal> {
+        use crate::install_flip::{parent_of, still_running};
+        let parent = parent_of(child).ok_or(ArgumentsRefusal::Exited)?;
+        let both_run = || still_running(parent) && still_running(child);
+        if !both_run() {
+            return Err(ArgumentsRefusal::Exited);
+        }
+        let process = opened_for_reading(parent.pid).map_err(|unopened| match unopened {
+            Unopened::NoAccess => ArgumentsRefusal::NoAccess,
+            Unopened::Exited => ArgumentsRefusal::Exited,
+            Unopened::Unreadable => ArgumentsRefusal::Unreadable,
+        })?;
+        let read = process.parameters_string(super::command_line_units);
+        if !both_run() {
+            return Err(ArgumentsRefusal::Exited);
+        }
+        match read.and_then(|units| words_of_command_line(&units)) {
+            Some(words) => Ok(AncestorLine {
+                process: parent,
+                words,
+            }),
+            None if process.has_exited() => Err(ArgumentsRefusal::Exited),
+            None => Err(ArgumentsRefusal::Unreadable),
+        }
+    }
+
+    /// **A command line's words, split by `CommandLineToArgvW`**, the first word's included —
+    /// the Windows shell's rule, which parts from the C runtime's only on a doubled quote inside a
+    /// quoted run: a literal quote that also ends the run here, where the runtime since 2008 stays
+    /// inside it (module header, review N5). `None` when it refuses.
+    fn words_of_command_line(units: &[u16]) -> Option<Vec<OsString>> {
+        use std::os::windows::ffi::OsStringExt;
+        let line: Vec<u16> = units.iter().copied().chain(std::iter::once(0)).collect();
+        let mut count = 0i32;
+        // SAFETY: `line` is NUL-ended and outlives the call; `count` is writable for it.
+        let words =
+            unsafe { CommandLineToArgvW(windows::core::PCWSTR(line.as_ptr()), &raw mut count) };
+        if words.is_null() {
+            return None;
+        }
+        let count = usize::try_from(count).unwrap_or(0);
+        let split = (0..count)
+            .map(|index| {
+                // SAFETY: the answer holds `count` NUL-ended strings, alive until it is freed below.
+                OsString::from_wide(unsafe { (*words.add(index)).as_wide() })
+            })
+            .collect();
+        // SAFETY: `CommandLineToArgvW` documents `LocalFree` as the matching release, and nothing
+        // of the answer is read after it.
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(words.cast())));
+        }
+        Some(split)
     }
 }
 
@@ -426,6 +618,37 @@ mod imp {
         };
         super::path_of_c_bytes(bytes).ok_or(FolderRefusal::Unreadable)
     }
+
+    /// This process's parent's command line (module header).
+    pub(super) fn parent_arguments() -> Result<super::AncestorLine, super::ArgumentsRefusal> {
+        let this =
+            crate::install_flip::this_running_process().ok_or(super::ArgumentsRefusal::Exited)?;
+        arguments_of_parent_of(this)
+    }
+
+    /// `child`'s parent's command line (module header), through `install_flip`'s read by pid and
+    /// start: a parent that does not run as recorded, before or after the read, is an exit, and so
+    /// is a `child` that no longer runs after it; a refused permission is no access; any other
+    /// failure is a read that did not answer.
+    pub(super) fn arguments_of_parent_of(
+        child: crate::install_flip::Running,
+    ) -> Result<super::AncestorLine, super::ArgumentsRefusal> {
+        use super::ArgumentsRefusal;
+        let parent = crate::install_flip::parent_of(child).ok_or(ArgumentsRefusal::Exited)?;
+        let words =
+            crate::install_flip::arguments_of(parent).map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => ArgumentsRefusal::Exited,
+                std::io::ErrorKind::PermissionDenied => ArgumentsRefusal::NoAccess,
+                _ => ArgumentsRefusal::Unreadable,
+            })?;
+        if !crate::install_flip::still_running(child) {
+            return Err(ArgumentsRefusal::Exited);
+        }
+        Ok(super::AncestorLine {
+            process: parent,
+            words,
+        })
+    }
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -436,6 +659,18 @@ mod imp {
     /// The named unsupported-platform refusal.
     pub(super) fn current_directory(_pid: u32) -> Result<PathBuf, FolderRefusal> {
         Err(FolderRefusal::Unsupported)
+    }
+
+    /// The named unsupported-platform refusal.
+    pub(super) fn parent_arguments() -> Result<super::AncestorLine, super::ArgumentsRefusal> {
+        Err(super::ArgumentsRefusal::Unsupported)
+    }
+
+    /// The named unsupported-platform refusal.
+    pub(super) fn arguments_of_parent_of(
+        _child: crate::install_flip::Running,
+    ) -> Result<super::AncestorLine, super::ArgumentsRefusal> {
+        Err(super::ArgumentsRefusal::Unsupported)
     }
 }
 
@@ -488,6 +723,7 @@ mod tests {
     struct Placed {
         parameters_at: u64,
         current_directory_at: u64,
+        command_line_at: u64,
         buffer_at: usize,
         width: usize,
     }
@@ -495,35 +731,92 @@ mod tests {
     const NATIVE_64_AT: Placed = Placed {
         parameters_at: 0x20,
         current_directory_at: 0x38,
+        command_line_at: 0x70,
         buffer_at: 8,
         width: 8,
     };
     const WOW64_AT: Placed = Placed {
         parameters_at: 0x10,
         current_directory_at: 0x24,
+        command_line_at: 0x40,
         buffer_at: 4,
         width: 4,
     };
 
+    /// The process parameters every scripted PEB points at.
+    const PARAMETERS: u64 = 0x7000;
+
+    /// A `UNICODE_STRING` holding `text` at `string`, its characters at `characters`.
+    fn put_unicode_string(
+        script: &mut Script,
+        string: u64,
+        characters: u64,
+        text: &str,
+        at: &Placed,
+    ) {
+        let text = utf16_bytes(text);
+        let length = u16::try_from(text.len()).unwrap();
+        let mut header = vec![0u8; at.buffer_at + at.width];
+        header[..2].copy_from_slice(&length.to_le_bytes());
+        header[2..4].copy_from_slice(&length.to_le_bytes());
+        header[at.buffer_at..at.buffer_at + at.width]
+            .copy_from_slice(&characters.to_le_bytes()[..at.width]);
+        script.put(string, &header);
+        script.put(characters, &text);
+    }
+
     /// A process whose PEB at `peb`, placed as `at`, points at parameters holding `folder`.
     fn process_standing_in(folder: &str, peb: u64, at: &Placed) -> Script {
-        let parameters = 0x7000_u64;
-        let characters = 0x9000_u64;
         let mut script = Script::default();
         script.put(
             peb + at.parameters_at,
-            &parameters.to_le_bytes()[..at.width],
+            &PARAMETERS.to_le_bytes()[..at.width],
         );
-        let text = utf16_bytes(folder);
-        let length = u16::try_from(text.len()).unwrap();
-        let mut dos_path = vec![0u8; at.buffer_at + at.width];
-        dos_path[..2].copy_from_slice(&length.to_le_bytes());
-        dos_path[2..4].copy_from_slice(&length.to_le_bytes());
-        dos_path[at.buffer_at..at.buffer_at + at.width]
-            .copy_from_slice(&characters.to_le_bytes()[..at.width]);
-        script.put(parameters + at.current_directory_at, &dos_path);
-        script.put(characters, &text);
+        put_unicode_string(
+            &mut script,
+            PARAMETERS + at.current_directory_at,
+            0x9000,
+            folder,
+            at,
+        );
         script
+    }
+
+    /// RED (row 74) — **the command line is read where each width keeps it, and is not the
+    /// folder**: a process placed with both strings answers each walk its own — the 64-bit
+    /// parameters' `CommandLine` at `0x70`, the WOW64 parameters' at `0x40`.
+    ///
+    /// MUTATIONS: `PebLayout::NATIVE_64.command_line_at` at `0x60` (`ImagePathName`, which this
+    /// script does not map) — that arm reads nothing; `command_line_units` walking
+    /// `current_directory_at` — it answers the folder.
+    #[test]
+    fn the_command_line_is_walked_from_either_peb_layout() {
+        let folder = r"C:\工作 work\";
+        let line =
+            r#""C:\Program Files\nodejs\node.exe" C:\npm\claude-code\cli.js --model "工作 opus""#;
+        for (layout, at) in [
+            (PebLayout::NATIVE_64, NATIVE_64_AT),
+            (PebLayout::WOW64, WOW64_AT),
+        ] {
+            let mut script = process_standing_in(folder, 0x1000, &at);
+            put_unicode_string(
+                &mut script,
+                PARAMETERS + at.command_line_at,
+                0xB000,
+                line,
+                &at,
+            );
+            assert_eq!(
+                command_line_units(&script, 0x1000, layout),
+                Some(units(line)),
+                "{layout:?}"
+            );
+            assert_eq!(
+                current_directory_units(&script, 0x1000, layout),
+                Some(units(folder)),
+                "{layout:?}: the folder is still the folder"
+            );
+        }
     }
 
     /// RED — **the folder is read where each width keeps it**: the 64-bit PEB's parameters at
@@ -823,6 +1116,307 @@ mod tests {
         let read = current_directory(helper.0.id());
         drop(helper);
         assert_eq!(read, Err(FolderRefusal::FarSide));
+    }
+
+    /// The full name of [`helper_parents`], as libtest is told to run it.
+    #[cfg(any(windows, target_os = "macos"))]
+    const PARENT_HELPER: &str = "process_folder::tests::helper_parents";
+
+    /// The word the stand-in parent carries on its command line: a space, a quote and a name that
+    /// is not ASCII, each a way a split could go wrong. libtest takes it as one more filter, which
+    /// names no test.
+    #[cfg(any(windows, target_os = "macos"))]
+    const PARENT_MARKER: &str = "工作 \"quoted\" word";
+
+    /// The word the stand-in shell carries on its command line, between the stand-in agent and the
+    /// reading child (review N1's T10 variant).
+    #[cfg(any(windows, target_os = "macos"))]
+    const SHELL_MARKER: &str = "stand-in shell";
+
+    /// **The stand-in parent and the child that reads it** (row 74, T10), run only when the test
+    /// that starts it asks. `parent-waits` and `parent-leaves` start this executable again as
+    /// `reads-parent`, with their own standard input and output, and either wait for it or end at
+    /// once; `reads-parent` waits for a line (or the end) on its standard input, then reads its
+    /// parent's command line and prints it — each word hex-encoded, so no word's own characters
+    /// can move the line about. **And one generation more** (review N1): `agent-waits` and
+    /// `agent-leaves` start a stand-in shell, `shell-hop`, carrying [`SHELL_MARKER`], and wait for
+    /// it or end at once; the shell starts `reads-agent` and waits for it, which reads its parent
+    /// (the shell) and then that parent's parent (the agent), and prints both.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn helper_parents() {
+        use std::io::{BufRead as _, Write as _};
+        let say = |label: &str, answer: Result<AncestorLine, ArgumentsRefusal>| {
+            let line = match answer {
+                Ok(line) => {
+                    let mut said = format!("{label} ok");
+                    for word in line.words {
+                        said.push(' ');
+                        for byte in word.to_string_lossy().as_bytes() {
+                            said.push_str(&format!("{byte:02x}"));
+                        }
+                    }
+                    said
+                }
+                Err(refusal) => format!("{label} err {refusal:?}"),
+            };
+            writeln!(std::io::stdout(), "{line}").expect("say what was read");
+            std::io::stdout().flush().expect("flush what was read");
+        };
+        match std::env::var(HELPER_MODE).as_deref() {
+            Ok(mode @ ("parent-waits" | "parent-leaves" | "agent-waits" | "agent-leaves")) => {
+                let (args, next): (&[&str], _) = if mode.starts_with("parent") {
+                    (&[], "reads-parent")
+                } else {
+                    (&[SHELL_MARKER], "shell-hop")
+                };
+                #[expect(
+                    clippy::zombie_processes,
+                    reason = "`parent-leaves` and `agent-leaves` end before their child on \
+                              purpose: that child is the test of a parent that has ended, and an \
+                              orphan is the system's to reap"
+                )]
+                let mut child = crate::quiet_command(std::env::current_exe().unwrap())
+                    .args(["--exact", PARENT_HELPER, "--nocapture"])
+                    .args(args)
+                    .env(HELPER_MODE, next)
+                    .spawn()
+                    .expect("start the next generation");
+                if mode.ends_with("-waits") {
+                    child.wait().expect("the child ends");
+                }
+            }
+            Ok("shell-hop") => {
+                crate::quiet_command(std::env::current_exe().unwrap())
+                    .args(["--exact", PARENT_HELPER, "--nocapture"])
+                    .env(HELPER_MODE, "reads-agent")
+                    .spawn()
+                    .expect("start the reading child")
+                    .wait()
+                    .expect("the reading child ends");
+            }
+            Ok(mode @ ("reads-parent" | "reads-agent")) => {
+                let mut release = String::new();
+                let _ = std::io::BufReader::new(std::io::stdin()).read_line(&mut release);
+                let parent = parent_arguments();
+                if mode == "reads-agent" {
+                    let agent = parent
+                        .clone()
+                        .and_then(|shell| arguments_of_parent_of(shell.process));
+                    say("SHELL", parent);
+                    say("PARENT", agent);
+                } else {
+                    say("PARENT", parent);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// What the reading child said: its parent's words, or the refusal by name.
+    #[cfg(any(windows, target_os = "macos"))]
+    fn parent_read_back(output: &mut dyn std::io::BufRead) -> Result<Vec<String>, String> {
+        line_read_back(output, "PARENT")
+    }
+
+    /// What the reading child said under `label`: the words it read, or the refusal by name.
+    #[cfg(any(windows, target_os = "macos"))]
+    fn line_read_back(
+        output: &mut dyn std::io::BufRead,
+        label: &str,
+    ) -> Result<Vec<String>, String> {
+        let (failed, read) = (format!("{label} err "), format!("{label} ok"));
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                output
+                    .read_line(&mut line)
+                    .expect("read the child's answer"),
+                0,
+                "the reading child ended without an answer"
+            );
+            let line = line.trim_end();
+            if let Some(refusal) = line.strip_prefix(failed.as_str()) {
+                return Err(refusal.to_owned());
+            }
+            if let Some(words) = line.strip_prefix(read.as_str()) {
+                return Ok(words
+                    .split_whitespace()
+                    .map(|hex| {
+                        let bytes: Vec<u8> = (0..hex.len())
+                            .step_by(2)
+                            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+                            .collect();
+                        String::from_utf8(bytes).unwrap()
+                    })
+                    .collect());
+            }
+        }
+    }
+
+    /// The stand-in parent in `mode`, its standard input and output piped to this test.
+    #[cfg(any(windows, target_os = "macos"))]
+    fn stand_in_parent(mode: &str) -> std::process::Child {
+        crate::quiet_command(std::env::current_exe().unwrap())
+            .args(["--exact", PARENT_HELPER, "--nocapture", PARENT_MARKER])
+            .env(HELPER_MODE, mode)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("start the stand-in parent")
+    }
+
+    /// RED (real process, row 74 T10) — **a child reads its parent's command line word for word**:
+    /// the stand-in parent's own words come back, the one holding a space, quotes and a name that
+    /// is not ASCII whole, and its program first.
+    ///
+    /// MUTATIONS: split the line at spaces instead of by `CommandLineToArgvW` — the marker comes
+    /// back in pieces (Windows); read `current_directory_at` for the command line — the parent's
+    /// folder comes back as one word (Windows); read this process's own arguments — the reading
+    /// child's words come back, with no marker.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_child_reads_its_parents_command_line_word_for_word() {
+        use std::io::Write as _;
+        let mut parent = stand_in_parent("parent-waits");
+        let mut output = std::io::BufReader::new(parent.stdout.take().expect("stdout was piped"));
+        let mut input = parent.stdin.take().expect("stdin was piped");
+        let parent = Started(parent);
+        input.write_all(b"go\n").expect("release the reading child");
+        input.flush().expect("flush the release");
+        let words = parent_read_back(&mut output);
+        drop(input);
+        drop(parent);
+        let words = words.expect("a running parent's command line is readable");
+        assert_eq!(
+            words.get(1..),
+            Some(
+                &[
+                    "--exact".to_owned(),
+                    PARENT_HELPER.to_owned(),
+                    "--nocapture".to_owned(),
+                    PARENT_MARKER.to_owned(),
+                ][..]
+            ),
+            "the parent's words: {words:?}"
+        );
+        assert_eq!(
+            words
+                .first()
+                .and_then(|program| std::path::Path::new(program).file_name()),
+            std::env::current_exe().unwrap().file_name(),
+            "its program first"
+        );
+    }
+
+    /// RED (real process, row 74 T10) — **a parent that has ended is not read**: the stand-in
+    /// parent starts the reading child and ends at once, and the child, asked only after it has
+    /// ended, does not answer the parent's words. On Windows the answer is `Exited` (the parent's
+    /// pid no longer runs as recorded); on macOS the orphan's parent is `launchd`, whose command
+    /// line holds no marker either way.
+    ///
+    /// MUTATION (of the setup, which is what makes this a test of an ended parent): let
+    /// `reads-parent` read before its release line — the parent is still running then, and its
+    /// words come back.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_parent_that_has_ended_is_not_read() {
+        use std::io::Write as _;
+        let mut parent = stand_in_parent("parent-leaves");
+        let mut output = std::io::BufReader::new(parent.stdout.take().expect("stdout was piped"));
+        let mut input = parent.stdin.take().expect("stdin was piped");
+        let mut parent = Started(parent);
+        parent.0.wait().expect("the stand-in parent ends");
+        input.write_all(b"go\n").expect("release the reading child");
+        input.flush().expect("flush the release");
+        let read = parent_read_back(&mut output);
+        drop(input);
+        drop(parent);
+        if cfg!(windows) {
+            assert_eq!(read, Err("Exited".to_owned()));
+        } else {
+            assert!(
+                !matches!(&read, Ok(words) if words.iter().any(|word| word == PARENT_MARKER)),
+                "an ended parent's words are never answered: {read:?}"
+            );
+        }
+    }
+
+    /// RED (real process, row 74 T10, review N1) — **through a shell between, the agent is read
+    /// one generation up**: the stand-in agent starts a stand-in shell, which starts the reading
+    /// child; the child reads the shell's words (its parent), then the agent's
+    /// ([`arguments_of_parent_of`] the shell), each word for word. Which shell line earns that step
+    /// is `bt-app`'s (`attention_codex::hook_shell_runs`); this is the door it steps through.
+    ///
+    /// MUTATIONS: `arguments_of_parent_of` reading `child` itself rather than its parent — the
+    /// shell's words come back twice, with no agent marker; `install_flip::parent_of` answering
+    /// this process's parent whatever it is asked — the same.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn through_a_shell_between_the_agent_is_read_one_generation_up() {
+        use std::io::Write as _;
+        let mut agent = stand_in_parent("agent-waits");
+        let mut output = std::io::BufReader::new(agent.stdout.take().expect("stdout was piped"));
+        let mut input = agent.stdin.take().expect("stdin was piped");
+        let agent = Started(agent);
+        input.write_all(b"go\n").expect("release the reading child");
+        input.flush().expect("flush the release");
+        let shell = line_read_back(&mut output, "SHELL");
+        let read = line_read_back(&mut output, "PARENT");
+        drop(input);
+        drop(agent);
+        let shell = shell.expect("a running shell's command line is readable");
+        assert_eq!(
+            shell.last().map(String::as_str),
+            Some(SHELL_MARKER),
+            "the shell's words: {shell:?}"
+        );
+        let read = read.expect("a running agent's command line is readable through its shell");
+        assert_eq!(
+            read.last().map(String::as_str),
+            Some(PARENT_MARKER),
+            "the agent's words, one generation up: {read:?}"
+        );
+    }
+
+    /// RED (real process, row 74 T10, review N1) — **an agent that has ended is not read through
+    /// its shell**: the stand-in agent starts the stand-in shell and ends at once, and the reading
+    /// child, released only after, does not answer the agent's words. On Windows the answer is
+    /// `Exited` (the snapshot still names the agent's pid, which no longer runs as recorded); on
+    /// macOS the orphaned shell's parent is `launchd`, whose command line holds no marker either
+    /// way.
+    ///
+    /// MUTATION (of the setup, which is what makes this a test of an ended agent): let
+    /// `reads-agent` read before its release line — the agent is still running then, and its
+    /// words come back.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn an_agent_that_has_ended_is_not_read_through_its_shell() {
+        use std::io::Write as _;
+        let mut agent = stand_in_parent("agent-leaves");
+        let mut output = std::io::BufReader::new(agent.stdout.take().expect("stdout was piped"));
+        let mut input = agent.stdin.take().expect("stdin was piped");
+        let mut agent = Started(agent);
+        agent.0.wait().expect("the stand-in agent ends");
+        input.write_all(b"go\n").expect("release the reading child");
+        input.flush().expect("flush the release");
+        let shell = line_read_back(&mut output, "SHELL");
+        let read = line_read_back(&mut output, "PARENT");
+        drop(input);
+        drop(agent);
+        assert!(
+            matches!(&shell, Ok(words) if words.last().map(String::as_str) == Some(SHELL_MARKER)),
+            "the shell still runs and is read: {shell:?}"
+        );
+        if cfg!(windows) {
+            assert_eq!(read, Err("Exited".to_owned()));
+        } else {
+            assert!(
+                !matches!(&read, Ok(words) if words.iter().any(|word| word == PARENT_MARKER)),
+                "an ended agent's words are never answered: {read:?}"
+            );
+        }
     }
 
     #[test]

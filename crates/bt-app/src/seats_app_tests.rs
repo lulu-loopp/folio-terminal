@@ -241,7 +241,7 @@ fn columns_of(width: u32) -> u32 {
 ///
 /// The report is a restored window in focus mode whose tab held three
 /// PowerShell panes: the third pane's first prompt read `(b` on one line and
-/// `ase) PS D:\Documents\SyncFolder\Application> ` on the next, and that
+/// `ase) PS D:\Developer\notes> ` (path neutralised) on the next, and that
 /// tab's card drew the seat as rows of two characters. `session.json` names
 /// the cause — the window is saved `maximized: true` beside a *normal*
 /// rectangle of 960x600, and `put_the_window_on_the_glass` asks Windows to
@@ -414,6 +414,7 @@ fn a_wheel_reads_the_hovered_panes_own_shell_and_not_the_keyboards() {
     tab.sessions
         .get_mut(&hovered)
         .expect("the hovered seat holds a session")
+        .session
         .grid
         .rows = std::num::NonZeroU16::new(17).expect("a nonzero row count");
 
@@ -484,6 +485,7 @@ fn the_breath_stands_down_on_the_alternate_screen() {
             .get_mut(&seat)
             .expect("the tab's one shell")
             .session
+            .session
             .feed(bytes)
             .expect("the fixture's bytes parse");
     };
@@ -532,7 +534,7 @@ fn the_breath_stands_down_on_the_alternate_screen() {
     );
     feed(&mut tab, b"\x1b]9;4;0\x07\x07");
     assert!(
-        tab.sessions[&seat].session.status().bell_latched(),
+        tab.sessions[&seat].session.session.status().bell_latched(),
         "and a bell rung from the alternate screen is still a bell"
     );
 
@@ -567,16 +569,24 @@ fn a_command_on_the_primary_screen_breathes_from_c_to_d() {
         .get_mut(&seat)
         .expect("the tab's one shell")
         .session
+        .session
         .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07cargo build\x1b]133;C\x07")
         .expect("the fixture's bytes parse");
     assert!(tab.fleet_working());
-    assert!(!tab.sessions[&seat].session.status().alternate_screen);
+    assert!(
+        !tab.sessions[&seat]
+            .session
+            .session
+            .status()
+            .alternate_screen
+    );
 
     // Output for a while — the breath is the command's, not the bytes'.
     for _ in 0..8 {
         tab.sessions
             .get_mut(&seat)
             .expect("the tab's one shell")
+            .session
             .session
             .feed(b"   Compiling bt-app v0.0.0\r\n")
             .expect("the fixture's bytes parse");
@@ -592,6 +602,7 @@ fn a_command_on_the_primary_screen_breathes_from_c_to_d() {
     tab.sessions
         .get_mut(&seat)
         .expect("the tab's one shell")
+        .session
         .session
         .feed(b"\x1b]133;D;0\x07")
         .expect("the fixture's bytes parse");
@@ -747,7 +758,7 @@ fn a_waiting_tabs_pulse_is_one_reading_of_one_clock() {
 }
 
 fn ticket_at(tab: &TabState, seat: SeatId) -> Option<u64> {
-    tab.sessions[&seat].attention.ledger.ticket()
+    tab.sessions[&seat].session.attention.ledger.ticket()
 }
 
 /// PIN (`attention` plan §4 B2, user ruling 2026-08-25) — **a bell takes no place, anywhere.**
@@ -782,7 +793,11 @@ fn a_bell_takes_no_place_wherever_it_rings() {
             assert_eq!(next.issued(), 0, "and spent no serial");
             let watched = tab_is_active && window_is_focused;
             assert_eq!(
-                tabs[0].sessions[&seat].session.status().bell_latched(),
+                tabs[0].sessions[&seat]
+                    .session
+                    .session
+                    .status()
+                    .bell_latched(),
                 !watched,
                 "the latch is spent by a look and by nothing else"
             );
@@ -1084,7 +1099,7 @@ fn an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present(
     // The chain: the only path from that present to a page on the glass.
     let publisher = squeezed_body("Runtime", "publish_frame_inner");
     assert!(
-            publisher.contains("ifself.focused().is_none(){self.window.chrome_present_pending=true;hang_watch::during(hang_watch::Station::WindowRedraw,||{self.window.window.request_redraw()});returnOk(false);}"),
+            publisher.contains("ifself.focused().is_none(){self.window.chrome_present_pending=true;self.ask_for_present();returnOk(false);}"),
             "a tab with no shell composes no terminal picture, and what it owes \
              instead is a present:\n{publisher}"
         );
@@ -1787,6 +1802,7 @@ fn a_restored_split_tree_reaches_zero_pty_resize_requests_after_a_matching_dpi_s
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }),
             )),
             Box::new(bt_persist::LayoutNodeV1::Leaf(
@@ -1854,7 +1870,7 @@ fn a_restored_split_tree_reaches_zero_pty_resize_requests_after_a_matching_dpi_s
 /// `seats.identity()` — a stored field naming one fixed leaf, which moves
 /// only when that leaf closes and never with focus — and all four callers
 /// handed that answer to `schedule_grid_change`, which writes through the
-/// `Runtime -> TabState -> LeafSession` deref chain to the *focused* leaf. A
+/// `Runtime -> TabState -> ShellSession` deref chain to the *focused* leaf. A
 /// lone-terminal tab hid it because the two seats are then the same
 /// rectangle. Split the tab, focus the narrow pane, and its shell was told
 /// the wide pane's column count: long lines ran off the right edge instead
@@ -2943,7 +2959,7 @@ fn a_tables_heading_row_stands_on_its_own_fill() {
 fn a_long_path_is_cut_and_the_phrase_beside_it_is_not() {
     let run = [0.0, 0.0, 300.0, 28.0];
     let gap = 12.0;
-    let long = r"C:\Users\somebody\Developer\folio-terminal\crates\bt-app\src\main.rs";
+    let long = r"C:\Users\somebody\Developer\lunar-workshop\crates\bt-app\src\main.rs";
     let words = seats::dress_foot(
         seats::FootDress {
             dissolved: 0.0,
@@ -4114,7 +4130,7 @@ fn a_stage_that_will_not_take_the_pane_refuses_it_at_every_dividing_aim() {
 /// the property with an id the table does not hold at all — the strongest
 /// form of "nothing here is resolved against the table" that can be written.
 ///
-/// Red gate: put the index back on `LeafSession` and the last block cannot be
+/// Red gate: put the index back on `ShellSession` and the last block cannot be
 /// expressed at all — there is no `usize` that means "a row this table has
 /// not got" — and the first three assertions become a statement about
 /// whatever row happens to sit where `cmd` sat.
@@ -4135,6 +4151,7 @@ fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
         tab.sessions
             .get_mut(&seat)
             .expect("the fixture files a session under every terminal")
+            .session
             .launch
             .profile = id.to_owned();
     }
@@ -4172,6 +4189,7 @@ fn a_pane_carries_its_profile_by_id_so_a_table_move_cannot_move_it() {
     tab.sessions
         .get_mut(&left)
         .expect("the left pane")
+        .session
         .launch
         .profile = "a-row-nobody-has".to_owned();
     assert!(!profiles::has_id("a-row-nobody-has"));

@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemKind, ItemQuery, ModuleSpec, Needle, Package, Pattern, QueryFailure,
-    ResolveCutoff, Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId, TraitResolver,
-    Universe, Vendor, View, Workspace, report, universes,
+    Rejection, ResolveCutoff, Scope, Search, Span, TargetId, TargetKind, TargetRoot, TraitId,
+    TraitResolver, Universe, Vendor, View, Workspace, report, universes,
 };
 use syn::parse::Parser as _;
 
@@ -743,6 +743,345 @@ fn what_a_product_build_contains_is_answered_at_the_file_and_at_the_item() {
         product.report(&index).contains("in the product"),
         "{}",
         product.report(&index)
+    );
+}
+
+// ── the gate grain (plan row 77) ──────────────────────────────────────────
+
+/// RED (T-CFG-TEST-USE-IS-NOT-PRODUCT, plan row 77) — **a `cfg` is read wherever it stands**:
+/// a module-level `#[cfg(test)] use`, `#[cfg(all(test, windows))] const`, `#[cfg(test)] static`
+/// and `type`, a `#[cfg(test)] impl`'s header, a `#[cfg(test)] macro_rules!`, and a `let`, an
+/// expression statement and a match arm under `#[cfg(test)]` inside a product function are out
+/// of the product; `#[cfg(not(test))]` and `#[cfg(any(test, windows))]` are not gates, and the
+/// ungated needles stay counted. The review's fold (F5) adds a line for each other position the
+/// walk reads — a field, a variant, a fn parameter, a generic parameter, an `extern crate`, a
+/// foreign item, an `impl` item, a `trait` item and a file's own `#![cfg(test)]` (`gated_file.rs`)
+/// — and one for the stated limit (F1), which plan row 109 (2026-10-30) replaced by the macro
+/// reading of `a_cfg_in_a_read_macro_body_is_a_gate` and the refusal of
+/// `a_cfg_in_any_other_macro_body_is_refused_by_its_line`. Each line of the fixture says which it
+/// is (`// counted`, `// gated`).
+///
+/// Before the row the three grains read none of the first nine gates — no item and no inline
+/// module holds a `use`, a `const` or an `impl` header, and the `let`, the expression and the arm
+/// sit in a product function — so every gated line counted as product (14 of 14, not 5).
+///
+/// MUTATION: drop the gate grain from `Occurrence::in_the_product` — the gated lines count;
+/// stop descending into function bodies in `crate::gates` — the `let`, the expression and the arm
+/// do.
+#[test]
+fn a_cfg_is_read_wherever_it_stands() {
+    let index = Index::shared(&fixture_universe("gated_regions")).expect("the fixture lowers");
+    let found = index
+        .search(&Search::new(
+            Needle::new(Pattern::text("the_gated_needle")),
+            View::CodeKeepingLiterals,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let union = index.union();
+    let mut wrong = Vec::new();
+    let mut gated = 0;
+    for occurrence in found.occurrences() {
+        let offset = occurrence.span.start();
+        let at = index.locate(offset).expect("an occurrence is in a file");
+        let from = union[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let to = union[offset..]
+            .find('\n')
+            .map_or(union.len(), |at| offset + at);
+        let line = union[from..to].trim_end_matches('\r');
+        let counted = line.ends_with("// counted");
+        assert!(
+            counted || line.ends_with("// gated"),
+            "every needle line says which it is: {line}"
+        );
+        gated += usize::from(!counted);
+        if occurrence.in_the_product(&index) != counted {
+            wrong.push(format!("{}: {line}", at.line));
+        }
+    }
+    assert_eq!((found.len(), gated), (24, 18), "the fixture's needles");
+    assert!(
+        wrong.is_empty(),
+        "read with the wrong verdict:\n  {}",
+        wrong.join("\n  ")
+    );
+    assert_eq!(found.in_the_product(&index).len(), 6);
+}
+
+/// RED (plan row 77) — **a `cfg` the reading cannot read, place or evaluate is refused by its
+/// line**, never read as "decided elsewhere": a predicate that is no predicate
+/// (`all(test windows)`), a `cfg_attr` that writes a `cfg`, a `cfg` on a closure's parameter,
+/// a position the gate walk does not read, and the literal `cfg(false)` and `cfg(true)` (the
+/// review, F3).
+///
+/// MUTATION: drop the `cfg_is_readable` refusal in `crate::gates` — the first and the last two
+/// are read as "decided elsewhere"; drop `cfg_attr_writes_a_cfg` — the second passes; drop the
+/// unplaced refusal in `crate::gates`' attribute visit — the third passes. (No check of `true` or
+/// `false` of its own: `syn` refuses both before `cfg_is_readable` reads a path.)
+#[test]
+fn a_cfg_the_reading_cannot_read_is_refused_by_its_line() {
+    let refused = Index::shared(&fixture_universe("gated_unreadable"))
+        .expect_err("the fixture is built to be refused");
+    let said: Vec<String> = refused
+        .iter()
+        .map(|rejection| match rejection {
+            Rejection::UnreadableCfg { at, spelling, .. } => format!("unreadable {at} {spelling}"),
+            Rejection::ConditionalCfg { at, spelling, .. } => {
+                format!("conditional {at} {spelling}")
+            }
+            Rejection::UnplacedCfg { at, .. } => format!("unplaced {at}"),
+            other => format!("{other}"),
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "unreadable 4:1 all(test windows)",
+            "conditional 7:1 test, cfg(any())",
+            "unplaced 11:17",
+            "unreadable 15:1 false",
+            "unreadable 18:1 true",
+        ]
+    );
+}
+
+/// RED (T-CFG-INSIDE-MACRO-TOKENS, plan row 109) — **a `cfg` inside a macro's tokens is a gate
+/// where the macro's body is read**: an invocation of a `macro_rules!` written earlier in the same
+/// file, in a scope holding the invocation, whose one arm takes a list of attribute-carrying names
+/// (`$( $(#[$a:meta])* $v:ident, )*`) and pastes each name only behind its own attributes or
+/// inside a top-level transcriber item a `cfg` keeps out of the product. Each entry's `cfg` is
+/// read as a gate on the entry, and the gated transcriber item's bytes are a gate too; a
+/// `cfg(not(test))`, a `cfg(any(test, windows))` and an ungated entry stay counted. The
+/// definition may stand at a file's top, and the invocation in a child module; or both in one
+/// function body.
+///
+/// Before the row no `cfg` inside a macro's tokens was read (row 77's stated limit), so the five
+/// gated lines counted as product (9 of 9, not 4).
+///
+/// MUTATION: drop the reading of a resolved invocation's entries in `crate::gates` — the four
+/// gated entries count (and are refused); drop the reading of the definition's top-level items —
+/// the `ALL` line counts (and is refused).
+#[test]
+fn a_cfg_in_a_read_macro_body_is_a_gate() {
+    let index = Index::shared(&fixture_universe("gated_in_macro"))
+        .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+    let found = index
+        .search(&Search::new(
+            Needle::new(Pattern::text("the_gated_needle")),
+            View::CodeKeepingLiterals,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let union = index.union();
+    let mut wrong = Vec::new();
+    let mut gated = 0;
+    for occurrence in found.occurrences() {
+        let offset = occurrence.span.start();
+        let at = index.locate(offset).expect("an occurrence is in a file");
+        let from = union[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let to = union[offset..]
+            .find('\n')
+            .map_or(union.len(), |at| offset + at);
+        let line = union[from..to].trim_end_matches('\r');
+        let counted = line.ends_with("// counted");
+        assert!(
+            counted || line.ends_with("// gated"),
+            "every needle line says which it is: {line}"
+        );
+        gated += usize::from(!counted);
+        if occurrence.in_the_product(&index) != counted {
+            wrong.push(format!("{}: {line}", at.line));
+        }
+    }
+    assert_eq!((found.len(), gated), (9, 5), "the fixture's needles");
+    assert!(
+        wrong.is_empty(),
+        "read with the wrong verdict:\n  {}",
+        wrong.join("\n  ")
+    );
+    assert_eq!(found.in_the_product(&index).len(), 4);
+}
+
+/// RED (plan row 109) — **every other `cfg` inside a macro's tokens is refused by its line**,
+/// never counted: an invocation with no definition in the file (`other!`, `vec!`,
+/// `thread_local!`), one nested inside another (`outer! { inner! { … } }`), an inner `#![cfg]`, a
+/// `cfg_attr` that writes a `cfg`, a `cfg` in a definition whose shape is not the read one (two
+/// arms), an invocation of a definition that drops the attributes it takes, a path-qualified
+/// invocation (`crate::entries!`), and an invocation an item macro stands between it and its
+/// definition (`shadowing!()` may define another `entries`). An invocation of the read shape whose
+/// body is not that shape is refused as unreadable. Not refused: a macro inside a gated module, a
+/// `cfg_attr` that writes no `cfg`, and `cfg!(…)`. A nested refusal names the innermost macro.
+///
+/// The review's fold (2026-10-30) adds an invocation of a read-shape definition under
+/// `#[cfg(windows)]`; one with an attribute macro, a non-language `derive`, a `cfg_attr(…,
+/// macro_use)` module or a `#[macro_use]` module between it and its definition; a definition that
+/// pastes the names into `stringify!`; one in an inline module used after it; a read definition
+/// shadowed by a later non-read one; and a statement macro between a block's definition and its
+/// invocation — each refused. Plan row 122 adds an `impl` item carrying an attribute macro between
+/// a definition and its invocation, refused the same way.
+///
+/// Before the row the fixture lowered: nothing inside a macro's tokens was read or refused. The
+/// expected list was filled from the reading's output and then checked row by row against the
+/// fixture's lines and columns.
+///
+/// MUTATION: drop the lexical refusal in `crate::gates`' macro visit — the fixture lowers; stop
+/// its descent into groups — the nested line and the two-arm definition's line pass; take the
+/// nearest earlier definition without checking what stands between — the last `entries!` is
+/// read; read a definition whatever its `cfg` — `windows_entries!` is; drop the attribute hazard
+/// — the three items between pass; accept a paste inside a group — `named_entries!` (and
+/// `dropping!`) are read; drop the scope check — `scoped_entries!` is; take the first definition
+/// — `twice!` is; drop the statement hazard — `block_entries!` is; drop `macro_use` from the
+/// hazards — the two module cases are; make only items hazards again (plan row 122's R4) —
+/// `impl_item_entries!` is.
+#[test]
+fn a_cfg_in_any_other_macro_body_is_refused_by_its_line() {
+    let refused = Index::shared(&fixture_universe("gated_in_macro_refused"))
+        .expect_err("the fixture is built to be refused");
+    let said: Vec<String> = refused
+        .iter()
+        .map(|rejection| match rejection {
+            Rejection::CfgInMacroTokens { at, macro_path, .. } => {
+                format!("in-macro {at} {macro_path}")
+            }
+            Rejection::UnreadableMacroBody { at, macro_path, .. } => {
+                format!("unreadable-body {at} {macro_path}")
+            }
+            other => format!("{other}"),
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "in-macro 5:5 other",
+            "in-macro 10:10 vec",
+            "in-macro 14:5 thread_local",
+            "in-macro 20:9 inner",
+            "in-macro 26:5 inner_attribute",
+            "in-macro 30:5 conditional",
+            "in-macro 37:9 macro_rules! two_arms",
+            "in-macro 51:5 dropping",
+            "unreadable-body 63:1 entries",
+            "in-macro 69:5 crate::entries",
+            "in-macro 76:5 entries",
+            "in-macro 109:5 windows_entries",
+            "in-macro 126:5 attribute_entries",
+            "in-macro 143:5 derive_entries",
+            "in-macro 160:5 conditional_use_entries",
+            "in-macro 172:5 named_entries",
+            "in-macro 188:5 scoped_entries",
+            "in-macro 206:5 twice",
+            "in-macro 221:9 block_entries",
+            "in-macro 239:5 used_entries",
+            "in-macro 260:5 impl_item_entries",
+        ]
+    );
+}
+
+/// GREEN (T-GATE-WALK-UNDER-ATTRIBUTE-MACROS, plan row 122) — **a `cfg` inside an item whose
+/// attributes rewrite nothing is a gate as written**: the language's own attributes (`allow`,
+/// `inline`, `must_use`, `track_caller`, `macro_use`), a tool namespace (`rustfmt::skip`), a
+/// `cfg_attr` writing only those, a `derive` of anything, and a derive helper (`serde`, `error`)
+/// beside the derive that declares it, spelt bare or by the declaring crate's path
+/// (`thiserror::Error`, `serde::Deserialize`) — on an item, an `impl` item or a `trait` item.
+///
+/// It holds before and after the row: the row refuses only what an attribute macro may rewrite.
+///
+/// MUTATION: drop the helper table from `crate::gates`' `may_rewrite` — the `serde` and `error`
+/// items are refused; take every tool path as rewriting — `skipped` and `conditionally_allowed`
+/// (whose `cfg_attr` writes `clippy::inline_always`) are refused.
+#[test]
+fn a_cfg_under_inert_attributes_is_a_gate() {
+    let index = Index::shared(&fixture_universe("gated_under_inert_attributes"))
+        .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+    let found = index
+        .search(&Search::new(
+            Needle::new(Pattern::text("the_gated_needle")),
+            View::CodeKeepingLiterals,
+        ))
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let union = index.union();
+    let mut wrong = Vec::new();
+    let mut gated = 0;
+    for occurrence in found.occurrences() {
+        let offset = occurrence.span.start();
+        let at = index.locate(offset).expect("an occurrence is in a file");
+        let from = union[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let to = union[offset..]
+            .find('\n')
+            .map_or(union.len(), |at| offset + at);
+        let line = union[from..to].trim_end_matches('\r');
+        let counted = line.ends_with("// counted");
+        assert!(
+            counted || line.ends_with("// gated"),
+            "every needle line says which it is: {line}"
+        );
+        gated += usize::from(!counted);
+        if occurrence.in_the_product(&index) != counted {
+            wrong.push(format!("{}: {line}", at.line));
+        }
+    }
+    assert_eq!((found.len(), gated), (10, 9), "the fixture's needles");
+    assert!(
+        wrong.is_empty(),
+        "read with the wrong verdict:\n  {}",
+        wrong.join("\n  ")
+    );
+    assert_eq!(found.in_the_product(&index).len(), 1);
+}
+
+/// RED (plan row 122) — **a `cfg` inside an item that carries an attribute macro is refused by its
+/// line**, never read as a gate: the macro receives the item's tokens and may emit anything, so
+/// what the `cfg` says is not what the compiler sees. Refused: a `let` under `#[proc_attr] fn`,
+/// and a `cfg` in a `vec!` there; an
+/// entry of a read-shape `macro_rules!` written and invoked inside such a fn (the review's R-N2);
+/// an item inside `#[proc_attr] mod`; a field under `#[cfg_attr(test, proc_attr)]` (the predicate
+/// is not evaluated); a `let` under an attribute macro on an `impl` item and on a `trait` item; a
+/// field under a `#[serde]` with no derive declaring it; a `let` under a path attribute
+/// (`tokio::main`); a parameter of a foreign fn under one; a `let` under a rewriting fn inside a
+/// rewriting module, named by the outer attribute; a field under `#[error]` beside a derive spelt
+/// `other_crate::Error`, which the helper table does not hold; and a `let` under
+/// `#[::clippy::…]`, a crate path and not the tool. Not refused: the item itself, a foreign
+/// item whose own `cfg` keeps it out (an item's own `cfg` is applied before any attribute macro
+/// on it), and an item under `#[implement]` with no `cfg` inside.
+///
+/// Before the row only the `vec!` line was refused (as `CfgInMacroTokens`, row 109); every other
+/// `cfg` inside was read as a gate as written.
+///
+/// MUTATION: drop the rewritten check in `crate::gates`' `gated_range` — every line but the
+/// `vec!` one passes; drop it from `refuse_cfgs` — the `vec!` line is refused as
+/// `CfgInMacroTokens` instead; stop setting the mode on `impl`, `trait` and foreign items — `h`,
+/// `hooked` and the parameter pass; take a `::`-led tool path as the tool — the
+/// `::clippy::not_the_tool` line passes.
+#[test]
+fn a_cfg_under_an_attribute_macro_is_refused_by_its_line() {
+    let refused = Index::shared(&fixture_universe("gated_under_attribute_macro_refused"))
+        .expect_err("the fixture is built to be refused");
+    let said: Vec<String> = refused
+        .iter()
+        .map(|rejection| match rejection {
+            Rejection::CfgUnderAttributeMacro {
+                at,
+                attribute_macro,
+                ..
+            } => format!("under {at} {attribute_macro}"),
+            other => format!("{other}"),
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            "under 7:5 proc_attr",
+            "under 9:18 proc_attr",
+            "under 22:9 proc_attr",
+            "under 29:5 proc_attr",
+            "under 35:5 cfg_attr(test, proc_attr)",
+            "under 44:9 proc_attr",
+            "under 52:5 serde(rename_all = \"lowercase\")",
+            "under 58:5 tokio::main",
+            "under 65:9 proc_attr",
+            "under 76:35 proc_attr",
+            "under 88:9 proc_attr",
+            "under 96:5 error(\"not thiserror's\")",
+            "under 102:5 ::clippy::not_the_tool",
+        ]
     );
 }
 

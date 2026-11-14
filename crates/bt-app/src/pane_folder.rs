@@ -189,11 +189,13 @@ mod tests {
     fn a_silent_shell_is_read_from_its_process_once() {
         let leaf = leaf_saying("no report from this shell");
         let mut session = leaf.session;
-        session.set_spawn_directory(Some(host_path(r"D:\opened")));
+        session
+            .session
+            .set_spawn_directory(Some(host_path(r"D:\opened")));
         let door = Scripted::answering(Ok(host_path(r"D:\opened\moved")));
         let memo = ProcessFolderMemo::default();
         assert_eq!(
-            pane_folder(&session, Some(moment(10, false)), &memo, &door),
+            pane_folder(&session.session, Some(moment(10, false)), &memo, &door),
             PaneFolder::Process(host_path(r"D:\opened\moved"))
         );
         assert_eq!(door.asked.get(), 1);
@@ -207,7 +209,9 @@ mod tests {
     fn a_refused_read_is_an_unknown_folder() {
         let leaf = leaf_saying("no report from this shell");
         let mut session = leaf.session;
-        session.set_spawn_directory(Some(host_path(r"D:\opened")));
+        session
+            .session
+            .set_spawn_directory(Some(host_path(r"D:\opened")));
         for refusal in [
             FolderRefusal::NoAccess,
             FolderRefusal::Exited,
@@ -218,7 +222,7 @@ mod tests {
             let door = Scripted::answering(Err(refusal));
             let memo = ProcessFolderMemo::default();
             assert_eq!(
-                pane_folder(&session, Some(moment(10, false)), &memo, &door),
+                pane_folder(&session.session, Some(moment(10, false)), &memo, &door),
                 PaneFolder::Unknown(Some(refusal))
             );
         }
@@ -236,7 +240,7 @@ mod tests {
         let door = Scripted::answering(Ok(host_path(r"D:\elsewhere")));
         let memo = ProcessFolderMemo::default();
         assert_eq!(
-            pane_folder(&leaf.session, Some(moment(10, false)), &memo, &door),
+            pane_folder(&leaf.session.session, Some(moment(10, false)), &memo, &door),
             PaneFolder::Reported(host_path(r"D:\reported"))
         );
         assert_eq!(door.asked.get(), 0);
@@ -251,12 +255,14 @@ mod tests {
         let door = Scripted::answering(Ok(host_path(r"D:\never")));
         let memo = ProcessFolderMemo::default();
         assert_eq!(
-            pane_folder(&session, None, &memo, &door),
+            pane_folder(&session.session, None, &memo, &door),
             PaneFolder::Unknown(None)
         );
-        session.set_spawn_directory(Some(host_path(r"D:\opened")));
+        session
+            .session
+            .set_spawn_directory(Some(host_path(r"D:\opened")));
         assert_eq!(
-            pane_folder(&session, None, &memo, &door),
+            pane_folder(&session.session, None, &memo, &door),
             PaneFolder::Opened(host_path(r"D:\opened"))
         );
         assert_eq!(door.asked.get(), 0);
@@ -272,7 +278,7 @@ mod tests {
         let leaf = leaf_saying("no report from this shell");
         let door = Scripted::answering(Ok(host_path(r"D:\here")));
         let memo = ProcessFolderMemo::default();
-        let ask = |moment| pane_folder(&leaf.session, Some(moment), &memo, &door);
+        let ask = |moment| pane_folder(&leaf.session.session, Some(moment), &memo, &door);
         ask(moment(10, false));
         ask(moment(10, false));
         assert_eq!(door.asked.get(), 1, "nothing written: one read");

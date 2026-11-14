@@ -8,8 +8,6 @@
 # `needle` is the needle the occurrence matched: an import row is accepted only for a needle a moved
 # owner reads (ruled in K2 batch 23, 2026-10-27).
 owner	door	module	needle
-crate (outside any item)	N-B	crate	ElementState
-crate (outside any item)	N-B	crate	MouseButton
 crate (outside any item)	N-B	crate	MouseScrollDelta
 crate (outside any item)	N-E	crate	PhysicalPosition
 crate::CardAim::spend	N-B	crate	MouseScrollDelta

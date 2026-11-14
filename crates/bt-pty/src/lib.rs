@@ -830,20 +830,22 @@ pub fn retire_session(session: PtySession) {
 fn retire_within(budget: Duration, teardown: impl FnOnce() + Send + 'static) {
     let outstanding = retirements();
     outstanding.begin();
-    let handed = std::thread::Builder::new()
-        .name("pty-retirement".to_string())
-        .spawn(move || {
-            let started = Instant::now();
-            teardown();
-            let spent = started.elapsed();
-            if spent > budget {
-                crate::say(format!(
-                    "a pane took {} ms to close, on a thread of its own rather than the window's",
-                    spent.as_millis()
-                ));
-            }
-            retirements().end();
-        });
+    // Typed where it is bound, so the call graph reads `spawn` as the standard library's and its
+    // closure as the worker's (plan row 52: the request-door guard's table of standard spawns).
+    let builder: std::thread::Builder =
+        std::thread::Builder::new().name("pty-retirement".to_string());
+    let handed = builder.spawn(move || {
+        let started = Instant::now();
+        teardown();
+        let spent = started.elapsed();
+        if spent > budget {
+            crate::say(format!(
+                "a pane took {} ms to close, on a thread of its own rather than the window's",
+                spent.as_millis()
+            ));
+        }
+        retirements().end();
+    });
     if handed.is_err() {
         outstanding.end();
     }
@@ -1905,7 +1907,7 @@ impl ShellProcessId {
 /// path of the program and the operating system's account of why it would not start. Both are the
 /// wrong register for the one place it is printed — the top of the user's own screen, where the
 /// shell's first line belongs. The path is not what the user picked (they picked *Git Bash*, not
-/// `D:\App\Tool\Git\bin\bash.exe`), and the OS's account arrives wrapped in the vendored
+/// `D:\Kit\Tool\Git\bin\bash.exe`), and the OS's account arrives wrapped in the vendored
 /// launcher's debugging: the whole `CreateProcessW` call, the command line `Debug`-quoted with the
 /// `NUL` terminator `CreateProcessW` requires still on the end of it, and the working directory
 /// again.
@@ -1930,6 +1932,14 @@ pub struct BirthFallback {
     requested: OsString,
     command: PtyCommand,
     size: PtySize,
+    /// **A fallback a test made is started only through the test's door** (plan row 174): set by
+    /// [`PtySession::fake_exited`] and by every session `test_shell` starts, so the product road
+    /// ([`BirthFallback::spawn_last_resort`]) refuses it instead of starting the account's own
+    /// shell from a test — with its startup files and its environment — and
+    /// `test_shell::TestShell::spawn_birth_fallback` is the one road that starts it. Test builds
+    /// only: `folio.exe` never has the `test-shell` feature.
+    #[cfg(any(test, feature = "test-shell"))]
+    made_for_a_test: bool,
 }
 
 impl BirthFallback {
@@ -1942,16 +1952,66 @@ impl BirthFallback {
     /// Start the retained last-resort command on a birth worker. The session carries the same
     /// [`ShellFallback`] record a spawn-time fallback leaves, with `why` as its reason, so the
     /// caller lands it on the road that already turns that record into the pane's first line.
-    pub fn spawn(
-        mut self,
+    ///
+    /// The name is this workspace's only `spawn_last_resort`: `bt-source`'s test-shell guard
+    /// refuses it in test code by its call shape (`.spawn_last_resort(`) as well as by its path,
+    /// which a method call never spells (plan row 174). In a test build a fallback a test made is
+    /// refused here and starts nothing; a test starts it through
+    /// `test_shell::TestShell::spawn_birth_fallback`.
+    pub fn spawn_last_resort(
+        self,
         columns: NonZeroU16,
         rows: NonZeroU16,
         wake: OutputWake,
         why: String,
     ) -> Result<PtySession, PtyError> {
+        self.last_resort_through(columns, rows, wake, why, PtySession::spawn)
+    }
+
+    /// [`Self::spawn_last_resort`] with the one `spawn` it makes handed in: the refusal of a
+    /// fallback a test made first, and only then [`Self::spawn_through`], so a test can drive the
+    /// product's road against a `spawn` that must never be called.
+    pub(crate) fn last_resort_through(
+        self,
+        columns: NonZeroU16,
+        rows: NonZeroU16,
+        wake: OutputWake,
+        why: String,
+        spawn: impl FnOnce(PtyCommand, PtySize, OutputWake) -> Result<PtySession, PtyError>,
+    ) -> Result<PtySession, PtyError> {
+        if let Some(refusal) = self.refused_outside_the_door() {
+            return Err(refusal);
+        }
+        self.spawn_through(columns, rows, wake, why, spawn)
+    }
+
+    /// The product road's refusal of a fallback a test made ([`BIRTH_FALLBACK_OUTSIDE_THE_DOOR`]).
+    #[cfg(any(test, feature = "test-shell"))]
+    fn refused_outside_the_door(&self) -> Option<PtyError> {
+        self.made_for_a_test
+            .then(|| PtyError::Backend(BIRTH_FALLBACK_OUTSIDE_THE_DOOR.to_owned()))
+    }
+
+    /// Never, in a build without the test shell: no test made anything there.
+    #[cfg(not(any(test, feature = "test-shell")))]
+    fn refused_outside_the_door(&self) -> Option<PtyError> {
+        None
+    }
+
+    /// The start both roads share, with the one `spawn` it makes handed in: the size the pane asks
+    /// for and the [`ShellFallback`] record, kept once for the product's road
+    /// ([`Self::last_resort_through`]) and the test door's.
+    pub(crate) fn spawn_through(
+        mut self,
+        columns: NonZeroU16,
+        rows: NonZeroU16,
+        wake: OutputWake,
+        why: String,
+        spawn: impl FnOnce(PtyCommand, PtySize, OutputWake) -> Result<PtySession, PtyError>,
+    ) -> Result<PtySession, PtyError> {
         self.size.columns = columns;
         self.size.rows = rows;
-        let mut session = PtySession::spawn(self.command, self.size, wake)?;
+        let mut session = spawn(self.command, self.size, wake)?;
         session.shell_fallback = Some(ShellFallback {
             requested: self.requested,
             started: LAST_RESORT_SHELL,
@@ -1960,6 +2020,11 @@ impl BirthFallback {
         Ok(session)
     }
 }
+
+/// What [`BirthFallback::spawn_last_resort`] answers, in a test build, for a fallback a test made.
+#[cfg(any(test, feature = "test-shell"))]
+pub const BIRTH_FALLBACK_OUTSIDE_THE_DOOR: &str = "a test's birth fallback is started through \
+     bt_pty::test_shell::TestShell::spawn_birth_fallback, never the product's spawn_last_resort";
 
 /// The command interpreter, and the arguments it needs, when `program` is a
 /// **batch file** — `None` for everything else, which is nearly everything.
@@ -2025,15 +2090,24 @@ fn through_the_interpreter(
     program: &OsStr,
     args: &[OsString],
 ) -> Option<(OsString, Vec<OsString>, OsString)> {
-    let script = Path::new(program).extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-    });
-    if !script {
+    if !is_interpreted_script(program) {
         return None;
     }
     let interpreter = std::env::var_os("ComSpec").unwrap_or_else(|| OsString::from("cmd.exe"));
     let switches = vec![OsString::from("/s"), OsString::from("/c")];
     Some((interpreter, switches, interpreter_line(program, args)))
+}
+
+/// **Whether `program` is a batch file**, which [`through_the_interpreter`] hands to `cmd.exe`:
+/// its extension is `.cmd` or `.bat`, either case. Asked by a caller whose arguments are not the
+/// reader's own profile rows — an agent's recorded launch words (`bt-app`'s `agent_resume`, 0.4.10
+/// plan row 74) — because `cmd` still expands `%…%` inside the quotes this crate puts around each
+/// token, and a shim's `%*` splits the words again by rules of its own.
+#[must_use]
+pub fn is_interpreted_script(program: &OsStr) -> bool {
+    Path::new(program).extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+    })
 }
 
 /// The line `cmd.exe` is handed after `/s /c`, quoted by cmd's own rules.
@@ -2129,6 +2203,7 @@ impl PtySession {
                 requested: OsString::from("preferred-shell"),
                 command: PtyCommand::last_resort_shell(&last_resort_arguments()),
                 size,
+                made_for_a_test: true,
             }),
         }
     }
@@ -2447,6 +2522,8 @@ impl PtySession {
                     requested: program,
                     command: fallback,
                     size,
+                    #[cfg(any(test, feature = "test-shell"))]
+                    made_for_a_test: false,
                 });
                 Ok(session)
             }
@@ -2480,6 +2557,15 @@ impl PtySession {
     /// Take the one delayed fallback available to a shell that dies at birth.
     pub fn take_birth_fallback(&mut self) -> Option<BirthFallback> {
         self.birth_fallback.take()
+    }
+
+    /// Mark the session's retained birth fallback, if it has one, as a test's: the session was
+    /// started through `test_shell`, whose rule its retained command never went through.
+    #[cfg(any(test, feature = "test-shell"))]
+    pub(crate) fn mark_birth_fallback_for_a_test(&mut self) {
+        if let Some(fallback) = self.birth_fallback.as_mut() {
+            fallback.made_for_a_test = true;
+        }
     }
 
     /// Whether this session still has its one delayed birth fallback.
@@ -6421,10 +6507,10 @@ mod tests {
     }
 
     /// The seat recording's own geometry: a 39-column prompt (the width of
-    /// `(base) PS D:\Developer\folio-terminal> `) directly beneath one 49-column hard-terminated
+    /// `(base) PS D:\Developer\lunar-workshop> `) directly beneath one 49-column hard-terminated
     /// row. Prompt width is the variable that decides whether a stale absolute row anchor is
     /// visible: the line editor re-addresses column 39 on whatever row it still believes in.
-    const SEAT_PROMPT: &str = "BTSEAT D:\\Developer\\folio-terminal> ";
+    const SEAT_PROMPT: &str = "BTSEAT D:\\Developer\\lunar-workshop> ";
 
     /// Typed at the wide width before the drag, so the line editor enters the resize holding a
     /// non-empty buffer and a previous render — and long enough that re-rendering it past the
@@ -6520,20 +6606,20 @@ mod tests {
     }
 
     /// The reporting host's own prompt, minus the conda prefix that the hook writes separately.
-    const PROFILE_PROBE_PROMPT: &str = "PS D:\\Developer\\folio-terminal> ";
+    const PROFILE_PROBE_PROMPT: &str = "PS D:\\Developer\\lunar-workshop> ";
     /// The line the user's screenshot shows being overwritten; it is conda's own startup noise.
-    const PROFILE_PROBE_NOISE: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const PROFILE_PROBE_NOISE: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
     /// The command in the user's screenshot: typed, never submitted, and long enough that the
     /// prompt plus the input wraps once the pane narrows.
     const PROFILE_PROBE_TYPED: &str =
-        "echo D:\\Developer\\folio-terminal\\local-images\\sunset.svg";
+        "echo D:\\Developer\\lunar-workshop\\local-images\\sunset.svg";
     /// The same command, long enough that prompt plus input **already** occupies two rows at
     /// `PROFILE_PROBE_WIDE`. This is the one property of the reported gesture that no earlier probe
     /// shape varied: `PROFILE_PROBE_TYPED` is deliberately short enough to fit on one row until the
     /// pane narrows, and a line editor that re-derives its render anchor from the post-resize
     /// cursor is only wrong by the number of rows the input occupied *before* the resize.
     const PROFILE_PROBE_TYPED_WRAPPED: &str =
-        "echo D:\\Developer\\folio-terminal\\local-images\\sunset-wrapped2.svg";
+        "echo D:\\Developer\\lunar-workshop\\local-images\\sunset-wrapped2.svg";
     const PROFILE_PROBE_WIDE: u16 = 100;
     const PROFILE_PROBE_NARROW: u16 = 70;
     const PROFILE_PROBE_ROWS: u16 = 26;
@@ -7823,12 +7909,12 @@ mod tests {
     /// somewhere the prompt does not reach, and a non-empty buffer across that narrowing is what
     /// makes the stale anchor survive to be re-used. So the prompt is deliberately wide, the narrow
     /// step is deliberately narrower than it, and the widening step deliberately returns.
-    const DEFER_PROBE_PROMPT: &str = "BTDEFER D:\\Developer\\folio-terminal> ";
+    const DEFER_PROBE_PROMPT: &str = "BTDEFER D:\\Developer\\lunar-workshop> ";
     /// Long enough that prompt plus input already occupies two rows at `DEFER_PROBE_WIDE`. The
     /// forensic sweep found this to be the decisive property: a line editor that re-derives its
     /// anchor from the post-resize cursor is wrong by exactly the rows its input occupied.
     const DEFER_PROBE_TYPED: &str =
-        "echo D:\\Developer\\folio-terminal\\local-images\\sunset-wrapped2.svg";
+        "echo D:\\Developer\\lunar-workshop\\local-images\\sunset-wrapped2.svg";
     const DEFER_PROBE_NOISE: &str = "BTDEFER_NOISE_ROW_MUST_SURVIVE";
     const DEFER_PROBE_WIDE: u16 = 100;
     const DEFER_PROBE_NARROW: u16 = 24;
@@ -8916,8 +9002,8 @@ mod tests {
     #[test]
     #[ignore = "dev probe: reproduces exact-right-edge widening through real PSReadLine and ConPTY"]
     fn exact_right_edge_widen_reanchor_pair_probe() {
-        const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
-        const TYPED: &str = "echo D:\\Developer\\folio-terminal\\.tmp-repaint-capture\\sunset.svg";
+        const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop\\dist> ";
+        const TYPED: &str = "echo D:\\Developer\\lunar-workshop\\.tmp-repaint-capture\\sunset.svg";
         const INITIAL_COLUMNS: u16 = 54;
         const WIDE_COLUMNS: u16 = 56;
         assert_eq!(PROMPT.len(), 44);
@@ -9016,7 +9102,7 @@ mod tests {
     #[test]
     #[ignore = "dev probe: races real PSReadLine cursor reads against chained ConPTY resizes"]
     fn reanchor_cursor_cpr_resize_storm_pair_probe() {
-        const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal\\dist> ";
+        const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop\\dist> ";
         const FIRST_HISTORY: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')";
         const SECOND_HISTORY: &str = "echo \"[Image: x]\"";
         const FINAL_COLUMNS: u16 = 54;
@@ -9186,7 +9272,7 @@ mod tests {
     fn nonempty_resize_shorter_history_recall_render_memory_pair_probe() {
         const PROMPT: &str = "BTHISTORY 012345678901234567890123456789> ";
         const HISTORY: &str = "Write-Output BT_SHORT";
-        const OLD_BUFFER: &str = "echo D:\\Developer\\folio-terminal\\.tmp-repaint-capture\\BT_OLD_RESIDUE_MUST_DISAPPEAR";
+        const OLD_BUFFER: &str = "echo D:\\Developer\\lunar-workshop\\.tmp-repaint-capture\\BT_OLD_RESIDUE_MUST_DISAPPEAR";
         // Keep the old width an exact multiple of the new one. That isolates render-memory loss:
         // B retains the same column through ConPTY reflow, so the red residue cannot be blamed on
         // the separate anchor-column calculation.
@@ -9367,9 +9453,9 @@ mod tests {
     }
 
     /// The width the 2026-08-17 seat recording's prompt occupies:
-    /// `(base) PS D:\Documents\SyncFolder\Developer\WorldQuant\user_package\user_package>` plus
+    /// `(base) PS `, a folder 70 characters long and `>`, plus
     /// the trailing space PowerShell's default prompt ends with. Synthesised rather than taken
-    /// from that path, because only the cell count is load-bearing and no probe should depend on
+    /// from that folder, because only the cell count is load-bearing and no probe should depend on
     /// one machine's directory tree.
     const NARROW_START_PROMPT_CELLS: u16 = 82;
     /// A width that prompt does *not* fit in, so `ReadLine` starts with it already wrapped.

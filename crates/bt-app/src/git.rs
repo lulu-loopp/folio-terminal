@@ -58,10 +58,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Condvar, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::window_seam::LoopProxy;
 use anyhow::{Context, Result};
+use bt_platform::poll_clock::{PollClock, WallPollClock};
 use winit::window::WindowId;
 
 use crate::{AppEvent, LeafId};
@@ -2540,13 +2541,17 @@ fn program_name(command: &Command) -> String {
 }
 
 /// Run one `git`, and never wait for it longer than `timeout`.
-fn run_product_git(command: Command, timeout: Duration) -> GitOutcome<GitRun> {
-    run_product_git_with_input(command, timeout, Vec::new())
+fn run_product_git(
+    command: Command,
+    clock: &dyn PollClock,
+    timeout: Duration,
+) -> GitOutcome<GitRun> {
+    run_product_git_with_input(command, clock, timeout, Vec::new())
 }
 
 #[cfg(test)]
-fn run_git(command: Command, timeout: Duration) -> GitOutcome<GitRun> {
-    run_git_with_input(command, timeout, Vec::new(), true)
+fn run_git(command: Command, clock: &dyn PollClock, timeout: Duration) -> GitOutcome<GitRun> {
+    run_git_with_input(command, clock, timeout, Vec::new(), true)
 }
 
 /// The same, with a pathspec list fed down the child's own standard input.
@@ -2567,14 +2572,27 @@ fn run_git(command: Command, timeout: Duration) -> GitOutcome<GitRun> {
 /// write while the child was blocked waiting for the rest of it.
 fn run_product_git_with_input(
     command: Command,
+    clock: &dyn PollClock,
     timeout: Duration,
     input: Vec<u8>,
 ) -> GitOutcome<GitRun> {
-    run_git_with_input(command, timeout, input, false)
+    run_git_with_input(command, clock, timeout, input, false)
 }
 
+/// **The one road every git child takes, its deadline on `clock`**
+/// (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): the deadline is set on [`PollClock::now`] once the
+/// child has started, read there after every look, and the rest between two looks is
+/// [`PollClock::pause`] of [`GIT_POLL_INTERVAL`]. [`WallPollClock`] in the product, which
+/// [`ask_git`] passes with [`GIT_COMMAND_TIMEOUT`]; a test hands a clock whose deadline never
+/// comes, so a real git it starts is awaited until it exits, or a counted one, so "the budget ran
+/// out" is a count of pauses rather than a race between a wall reading and a real child.
+///
+/// A [`PollClock`], not `crate::update_apply::WaitClock`: that clock's pause goes through a
+/// worker's wait door and takes the `&WorkerCtx` the thread door lent it, which [`answer`] does
+/// not have — a test asks it bare, with no worker between them.
 fn run_git_with_input(
     mut command: Command,
+    clock: &dyn PollClock,
     timeout: Duration,
     input: Vec<u8>,
     fixture: bool,
@@ -2624,7 +2642,7 @@ fn run_git_with_input(
     }
     let out = drain(observed(child.take_stdout()));
     let err = drain(observed(child.take_stderr()));
-    let deadline = Instant::now() + timeout;
+    let deadline = clock.now() + timeout;
     let ended = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -2639,7 +2657,7 @@ fn run_git_with_input(
                 )));
             }
         }
-        if Instant::now() >= deadline {
+        if clock.now() >= deadline {
             // Killed, reaped, and reported as a timeout **before** anything is
             // read back from it. A killed child does exit, and exit is what
             // `try_wait` reports — so a guard that went round the loop once more
@@ -2650,7 +2668,7 @@ fn run_git_with_input(
             let _ = child.wait();
             break Err(GitFault::TimedOut);
         }
-        thread::sleep(GIT_POLL_INTERVAL);
+        clock.pause(GIT_POLL_INTERVAL);
     };
     // **The readers are let go before the answer leaves** (T-ANSWER-AFTER-THE-FILE-IS-CLOSED):
     // joined for a child that ended on its own and for a killed one whose tree ended with it
@@ -2778,6 +2796,7 @@ fn repo_root(text: &str) -> PathBuf {
 pub fn answer(
     program: &Path,
     question: &GitQuestion,
+    clock: &dyn PollClock,
     timeout: Duration,
     now_unix: i64,
 ) -> GitAnswer {
@@ -2788,7 +2807,7 @@ pub fn answer(
                 dir,
                 &[OsStr::new("rev-parse"), OsStr::new("--show-toplevel")],
             );
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 Ok(run) if run.ok => GitAnswer::Repo {
                     dir: dir.clone(),
                     outcome: Ok(repo_root(&String::from_utf8_lossy(&run.stdout))),
@@ -2810,7 +2829,7 @@ pub fn answer(
                     OsStr::new("--ignore-submodules=none"),
                 ],
             );
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 Ok(run) if run.ok => GitAnswer::Status {
                     root: root.clone(),
                     outcome: Ok(parse_status(&run.stdout)),
@@ -2844,7 +2863,7 @@ pub fn answer(
                     OsStr::new("refs/tags"),
                 ],
             );
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 Ok(run) if run.ok => GitAnswer::Refs {
                     root: root.clone(),
                     outcome: Ok(parse_refs(&run.stdout, now_unix)),
@@ -2889,7 +2908,7 @@ pub fn answer(
             // A query that resolves to nothing exits non-zero and says nothing,
             // which is the ordinary case and not a failure: `--quiet` is asked
             // for precisely so that "no such revision" is silence.
-            if let Ok(run) = run_product_git(verify, timeout)
+            if let Ok(run) = run_product_git(verify, clock, timeout)
                 && run.ok
             {
                 push(&String::from_utf8_lossy(&run.stdout));
@@ -2908,7 +2927,7 @@ pub fn answer(
                         OsStr::new(&cap),
                     ],
                 );
-                match run_product_git(command, timeout) {
+                match run_product_git(command, clock, timeout) {
                     Ok(run) if run.ok => {
                         push(&String::from_utf8_lossy(&run.stdout));
                         None
@@ -2988,7 +3007,7 @@ pub fn answer(
             // `main` that does not exist.
             let mut command = command;
             command.args(refs);
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 Ok(run) if run.ok => GitAnswer::Log {
                     root: root.clone(),
                     skip: *skip,
@@ -3007,7 +3026,7 @@ pub fn answer(
             let words = diff_arguments(*against, path, renamed_from.as_deref());
             let arguments: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
             let command = git_command(program, root, &arguments);
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 // **The one question here whose success is not `status.success()`.**
                 // `--no-index` is a `diff` between two files and answers the
                 // shell's own convention for that: 0 when they are the same, 1
@@ -3033,7 +3052,7 @@ pub fn answer(
             let (words, input) = write_arguments(verb, paths);
             let arguments: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
             let command = git_command(program, root, &arguments);
-            match run_product_git_with_input(command, timeout, input) {
+            match run_product_git_with_input(command, clock, timeout, input) {
                 Ok(run) if run.ok => GitAnswer::Write {
                     root: root.clone(),
                     verb: verb.clone(),
@@ -3068,7 +3087,7 @@ pub fn answer(
             }
             arguments.push(OsStr::new(path));
             let command = git_command(program, root, &arguments);
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 Ok(run) if run.ok => GitAnswer::Show {
                     root: root.clone(),
                     hash: hash.clone(),
@@ -3105,7 +3124,7 @@ pub fn answer(
             }
             arguments.push(OsStr::new(path));
             let command = git_command(program, root, &arguments);
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 Ok(run) if run.ok => GitAnswer::DiffRange {
                     root: root.clone(),
                     a: a.clone(),
@@ -3140,7 +3159,7 @@ pub fn answer(
             }
             arguments.push(OsStr::new(target));
             let command = git_command(program, root, &arguments);
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 Ok(run) if run.ok => GitAnswer::Checkout {
                     root: root.clone(),
                     target: target.clone(),
@@ -3169,7 +3188,7 @@ pub fn answer(
                     OsStr::new(hash),
                 ],
             );
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 Ok(run) if run.ok => GitAnswer::CommitFiles {
                     root: root.clone(),
                     hash: hash.clone(),
@@ -3204,7 +3223,7 @@ pub fn answer(
                 arguments.push(OsStr::new(b));
             }
             let command = git_command(program, root, &arguments);
-            match run_product_git(command, timeout) {
+            match run_product_git(command, clock, timeout) {
                 Ok(run) if run.ok => GitAnswer::CompareFiles {
                     root: root.clone(),
                     a: a.clone(),
@@ -4461,7 +4480,13 @@ pub(crate) fn ask_git(
     question: &GitQuestion,
 ) -> GitAnswer {
     match GIT_LOCATION.located(ctx).as_deref() {
-        Some(program) => answer(program, question, GIT_COMMAND_TIMEOUT, now_unix()),
+        Some(program) => answer(
+            program,
+            question,
+            &WallPollClock,
+            GIT_COMMAND_TIMEOUT,
+            now_unix(),
+        ),
         None => faulted(question, GitFault::GitMissing(git_not_found().to_owned())),
     }
 }
@@ -4586,11 +4611,66 @@ pub fn take_git_worker_notice(notice_pending: &mut bool) -> Option<&'static str>
 mod tests {
     use super::*;
     use crate::test_support::host_path;
+    use std::time::Instant;
 
     thread_local! {
         /// Where the pipes of a child this thread starts say they were let go, when a test asks.
         static PIPES_LET_GO: std::cell::RefCell<Option<mpsc::Sender<()>>> =
             const { std::cell::RefCell::new(None) };
+    }
+
+    /// **A test's [`PollClock`] whose deadline never comes**
+    /// (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): its reading stays where it was first taken, and
+    /// each pause is slept whole so the child has the time to run. A real git a test starts is
+    /// awaited until it exits: the answer is the child's own, never a race between
+    /// [`GIT_COMMAND_TIMEOUT`] and a loaded machine. A git that never exits is the suite
+    /// watchdog's to name.
+    struct Awaited;
+
+    impl PollClock for Awaited {
+        fn now(&self) -> Instant {
+            static STILL: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+            *STILL
+        }
+
+        fn pause(&self, pause: Duration) {
+            thread::sleep(pause);
+        }
+    }
+
+    /// **A test's counted [`PollClock`]** (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): its reading
+    /// moves only by the pauses it is asked for, and it never sleeps; it counts them. "The
+    /// budget ran out" is then the number of looks the budget allows, whatever the load.
+    struct Counted {
+        began: Instant,
+        /// How far the pauses moved the clock, and how many there were.
+        moved: Mutex<(Duration, u128)>,
+    }
+
+    impl Counted {
+        fn new() -> Self {
+            Self {
+                began: Instant::now(),
+                moved: Mutex::new((Duration::ZERO, 0)),
+            }
+        }
+
+        /// The pauses the door asked for.
+        fn pauses(&self) -> u128 {
+            self.moved.lock().unwrap().1
+        }
+    }
+
+    impl PollClock for Counted {
+        fn now(&self) -> Instant {
+            self.began + self.moved.lock().unwrap().0
+        }
+
+        fn pause(&self, pause: Duration) {
+            let mut moved = self.moved.lock().unwrap();
+            moved.0 += pause;
+            moved.1 += 1;
+        }
     }
 
     /// A pipe that says, to the sender this thread's test set (`PIPES_LET_GO`), when its reader
@@ -4772,9 +4852,13 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     fn a_probe_from_a_deep_subdirectory_answers_with_the_repository_root() {
         let deep = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
         let question = GitQuestion::RepoProbe { dir: deep.clone() };
-        let GitAnswer::Repo { dir, outcome } =
-            answer(&real_git(), &question, GIT_COMMAND_TIMEOUT, RECORDED_AT)
-        else {
+        let GitAnswer::Repo { dir, outcome } = answer(
+            &real_git(),
+            &question,
+            &Awaited,
+            GIT_COMMAND_TIMEOUT,
+            RECORDED_AT,
+        ) else {
             panic!("a repository probe is answered with a repository");
         };
         assert_eq!(
@@ -5504,16 +5588,16 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     /// test could not tell the difference.
     ///
     /// The guard runs on a thread of its own and its answer comes back down a
-    /// channel, so a `run_git` that really did wait for its child fails this in a
-    /// minute rather than hanging the suite for ever. **The minute is not a
-    /// budget**: the call is given a hundred and fifty milliseconds and no load
-    /// turns that into sixty seconds. It is the difference between "returned"
-    /// and "never returns", which is the only difference this test is about — and
-    /// on the day it is spent, the stray child left behind is the defect itself.
+    /// channel within the lane suite's patience (`crate::lane::receive`), so a
+    /// `run_git` that really did wait for its child fails this by name rather than
+    /// hanging the suite for ever. **The hundred and fifty milliseconds are read on a
+    /// counted clock** (T-GIT-CHILD-DEADLINE-ON-A-CLOCK-SEAM): they run out after
+    /// exactly as many looks as the poll interval fits into them, whatever the load,
+    /// and that count is asserted — the budget's end is a fact of the test, not a
+    /// wall reading.
     #[test]
     fn a_child_that_will_not_finish_is_killed_and_reported() {
-        /// Long enough that only a guard which never returns can reach it.
-        const NEVER: Duration = Duration::from_secs(60);
+        const BUDGET: Duration = Duration::from_millis(150);
 
         // A program every installation of this platform has that never ends on its own:
         // Windows' `ping`, found where its own search finds it, and POSIX's `tail`, which a
@@ -5531,13 +5615,21 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         command.args(arguments);
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let _ = tx.send(run_git(command, Duration::from_millis(150)).err());
+            let clock = Counted::new();
+            let fault = run_git(command, &clock, BUDGET).err();
+            let _ = tx.send((fault, clock.pauses()));
         });
-        let fault = rx.recv_timeout(NEVER).expect(
-            "the guard came back, so it killed the child and reaped it: a guard that waited for \
-             this child would be waiting still",
-        );
+        // Came back, so it killed the child and reaped it: a guard that waited for this child
+        // would be waiting still.
+        let (fault, pauses) = crate::lane::receive(&rx, "the guard's fault");
         assert_eq!(fault, Some(GitFault::TimedOut));
+        assert_eq!(
+            pauses,
+            // Looked at, then paused: the deadline is reached on the pause that first carries
+            // the clock to or past it, so the count rounds up.
+            BUDGET.as_millis().div_ceil(GIT_POLL_INTERVAL.as_millis()),
+            "the budget ran out after the looks it allows, and not one more"
+        );
     }
 
     /// PIN (T-ANSWER-AFTER-THE-FILE-IS-CLOSED) — **a git question's answer comes back with git
@@ -5557,8 +5649,12 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         std::fs::create_dir_all(&root).expect("a scratch folder can be made");
         let run = |arguments: &[&str]| {
             let owned: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
-            run_git(git_command(&git, &root, &owned), GIT_COMMAND_TIMEOUT)
-                .expect("the scratch repository is built with the same git under test")
+            run_git(
+                git_command(&git, &root, &owned),
+                &Awaited,
+                GIT_COMMAND_TIMEOUT,
+            )
+            .expect("the scratch repository is built with the same git under test")
         };
         run(&["init", "-q", "-b", "main"]);
         std::fs::write(root.join("改动 change.txt"), b"one").expect("a file to stage");
@@ -5567,6 +5663,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         let answer = answer(
             &git,
             &GitQuestion::Status { root: root.clone() },
+            &Awaited,
             GIT_COMMAND_TIMEOUT,
             RECORDED_AT,
         );
@@ -5598,6 +5695,8 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
     /// the reaping usually wins; this states the fact.
     #[test]
     fn a_child_killed_past_its_time_has_let_go_of_its_pipes_when_the_fault_is_answered() {
+        const BUDGET: Duration = Duration::from_millis(150);
+
         let (program, arguments) = match bt_platform::host_platform() {
             bt_platform::HostPlatform::Windows => (
                 bt_platform::program_on_path(Path::new("ping")).expect("ping is on PATH"),
@@ -5613,13 +5712,19 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         thread::spawn(move || {
             let (let_go, heard) = mpsc::channel();
             PIPES_LET_GO.with(|slot| *slot.borrow_mut() = Some(let_go));
-            let fault = run_git(command, Duration::from_millis(150)).err();
+            let clock = Counted::new();
+            let fault = run_git(command, &clock, BUDGET).err();
             // Asked at once, with no wait: what has let go by now let go before the answer.
             let pipes = heard.try_iter().count();
-            let _ = tx.send((fault, pipes));
+            let _ = tx.send((fault, pipes, clock.pauses()));
         });
-        let (fault, pipes) = crate::lane::receive(&rx, "the guard's fault");
+        let (fault, pipes, pauses) = crate::lane::receive(&rx, "the guard's fault");
         assert_eq!(fault, Some(GitFault::TimedOut));
+        assert_eq!(
+            pauses,
+            BUDGET.as_millis().div_ceil(GIT_POLL_INTERVAL.as_millis()),
+            "the budget ran out after the looks it allows, and not one more"
+        );
         assert_eq!(
             pipes, 2,
             "both pipes were let go before the fault was answered"
@@ -5637,9 +5742,13 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         let question = GitQuestion::RepoProbe {
             dir: outside.clone(),
         };
-        let GitAnswer::Repo { outcome, .. } =
-            answer(&real_git(), &question, GIT_COMMAND_TIMEOUT, RECORDED_AT)
-        else {
+        let GitAnswer::Repo { outcome, .. } = answer(
+            &real_git(),
+            &question,
+            &Awaited,
+            GIT_COMMAND_TIMEOUT,
+            RECORDED_AT,
+        ) else {
             panic!("a repository probe is answered with a repository");
         };
         let _ = std::fs::remove_dir_all(&outside);
@@ -5691,6 +5800,7 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
                 .expect("the imaginary machine's git is found where its PATH says");
             let outcome = run_git(
                 git_command(&program, &this_repository(), &[OsStr::new("--version")]),
+                &Awaited,
                 GIT_COMMAND_TIMEOUT,
             );
             let words = match outcome {
@@ -5718,9 +5828,13 @@ refs/tags/v1.0\x00b1\x00\x00\x00 \x002026-08-01T09:00:00-04:00\n";
         let question = GitQuestion::Status {
             root: this_repository(),
         };
-        let GitAnswer::Status { outcome, .. } =
-            answer(&nowhere, &question, GIT_COMMAND_TIMEOUT, RECORDED_AT)
-        else {
+        let GitAnswer::Status { outcome, .. } = answer(
+            &nowhere,
+            &question,
+            &Awaited,
+            GIT_COMMAND_TIMEOUT,
+            RECORDED_AT,
+        ) else {
             panic!("a status question is answered with a status");
         };
         assert!(
@@ -6743,7 +6857,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
     fn this_workspace_answers_all_three_page_questions() {
         let git = real_git();
         let root = this_repository();
-        let ask = |question| answer(&git, &question, GIT_COMMAND_TIMEOUT, now_unix());
+        let ask = |question| answer(&git, &question, &Awaited, GIT_COMMAND_TIMEOUT, now_unix());
 
         let GitAnswer::Status { outcome, .. } = ask(GitQuestion::Status { root: root.clone() })
         else {
@@ -6874,8 +6988,12 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         std::fs::create_dir_all(&root).expect("a scratch folder can be made");
         let run = |arguments: &[&str]| {
             let owned: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
-            run_git(git_command(&git, &root, &owned), GIT_COMMAND_TIMEOUT)
-                .expect("the scratch repository is built with the same git under test")
+            run_git(
+                git_command(&git, &root, &owned),
+                &Awaited,
+                GIT_COMMAND_TIMEOUT,
+            )
+            .expect("the scratch repository is built with the same git under test")
         };
         run(&["init", "-q", "-b", "main"]);
         run(&["config", "user.name", "folio-test"]);
@@ -6899,6 +7017,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
                     skip,
                     count: GIT_LOG_PAGE,
                 },
+                &Awaited,
                 GIT_COMMAND_TIMEOUT,
                 RECORDED_AT,
             ) else {
@@ -6970,7 +7089,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
     fn a_search_ors_the_message_against_the_author_and_a_hash_lands_outright() {
         let git = real_git();
         let root = this_repository();
-        let ask = |question| answer(&git, &question, GIT_COMMAND_TIMEOUT, now_unix());
+        let ask = |question| answer(&git, &question, &Awaited, GIT_COMMAND_TIMEOUT, now_unix());
         let search = |query: &str| {
             let GitAnswer::Search { outcome, .. } = ask(GitQuestion::Search {
                 root: root.clone(),
@@ -7277,8 +7396,12 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         std::fs::create_dir_all(&root).expect("a scratch folder can be made");
         let run = |arguments: &[&str]| {
             let owned: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
-            run_git(git_command(&git, &root, &owned), GIT_COMMAND_TIMEOUT)
-                .expect("the scratch repository is built with the same git under test")
+            run_git(
+                git_command(&git, &root, &owned),
+                &Awaited,
+                GIT_COMMAND_TIMEOUT,
+            )
+            .expect("the scratch repository is built with the same git under test")
         };
         run(&["init", "-q", "-b", "main"]);
         run(&["config", "user.name", "folio-test"]);
@@ -7296,7 +7419,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
                 renamed_from: renamed_from.map(str::to_owned),
             };
             let GitAnswer::Diff { outcome, .. } =
-                answer(&git, &question, GIT_COMMAND_TIMEOUT, RECORDED_AT)
+                answer(&git, &question, &Awaited, GIT_COMMAND_TIMEOUT, RECORDED_AT)
             else {
                 panic!("a diff question is answered with a diff");
             };
@@ -7351,8 +7474,12 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
         std::fs::create_dir_all(&root).expect("a scratch folder can be made");
         let run = |arguments: &[&str]| {
             let owned: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
-            run_git(git_command(&git, &root, &owned), GIT_COMMAND_TIMEOUT)
-                .expect("the scratch repository is built with the same git under test")
+            run_git(
+                git_command(&git, &root, &owned),
+                &Awaited,
+                GIT_COMMAND_TIMEOUT,
+            )
+            .expect("the scratch repository is built with the same git under test")
         };
         run(&["init", "-q", "-b", "main"]);
         run(&["config", "user.name", "folio-test"]);
@@ -7386,7 +7513,7 @@ refs/heads/main\x00a3\x00\x00\x00*\x002026-08-15T10:18:24-04:00\n",
                 renamed_from: None,
             };
             let GitAnswer::Diff { outcome, .. } =
-                answer(&git, &question, GIT_COMMAND_TIMEOUT, RECORDED_AT)
+                answer(&git, &question, &Awaited, GIT_COMMAND_TIMEOUT, RECORDED_AT)
             else {
                 panic!("a diff question is answered with a diff");
             };

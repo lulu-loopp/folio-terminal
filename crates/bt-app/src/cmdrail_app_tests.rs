@@ -78,7 +78,7 @@ const RAIL_LOGICAL_WIDTHS: [u32; 3] = [331, 797, 1913];
 #[test]
 fn a_rail_never_covers_the_last_text_column() {
     let leaf = leaf_saying(RAIL_FAILED_THEN_PROMPT);
-    let stack = cmdrail::commands(leaf.session.command_marks());
+    let stack = cmdrail::commands(leaf.session.session.command_marks());
     assert!(
         stack
             .entries

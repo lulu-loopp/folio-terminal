@@ -6,9 +6,9 @@ use objc2_app_kit::{
 };
 
 use crate::clipboard::{
-    Candidate, ClipboardPayload, ClipboardPort, ClipboardTypes, MACOS_PICTURE_ORDER,
-    MAX_PICTURE_BYTES, PictureBytes, PictureEncoding, PictureSource, first_offered_picture,
-    read_payload,
+    Candidate, ClipboardPort, ClipboardRead, ClipboardSequence, ClipboardTypes,
+    MACOS_PICTURE_ORDER, MAX_PICTURE_BYTES, PictureBytes, PictureEncoding, PictureSource,
+    first_offered_picture, list_offered, read_payload_offering,
 };
 
 struct MacClipboard {
@@ -76,6 +76,13 @@ impl ClipboardPort for MacClipboard {
     fn picture(&mut self) -> Candidate<Vec<PictureBytes>> {
         first_offered_picture(&MACOS_PICTURE_ORDER, self)
     }
+    /// **The pasteboard's type names** (plan row 81), as AppKit lists them. Names only.
+    fn offered(&mut self) -> Vec<String> {
+        let Some(types) = self.pasteboard.types() else {
+            return Vec::new();
+        };
+        list_offered(types.iter().map(|kind| kind.to_string()))
+    }
     fn finish(&mut self) -> Result<(), String> {
         if self.pasteboard.changeCount() == self.before {
             Ok(())
@@ -117,15 +124,32 @@ impl PictureSource for MacClipboard {
 
 /// **Whatever the pasteboard holds, as a paste reads it** — asked from the clipboard lane's
 /// worker (`worker`) and read on the main thread (`crate::macos_clipboard::on_the_main_queue`, the
-/// owner's ruling of 2026-10-11, Q2).
-pub fn clipboard_payload(worker: &crate::admission::WorkerCtx) -> Result<ClipboardPayload, String> {
+/// owner's ruling of 2026-10-11, Q2) — with the `changeCount` it was read at and the type names
+/// offered when the answer is nothing or a promise; the read line is the caller's to write (plan
+/// row 81). Every promise is refused here: this platform renders none.
+pub fn clipboard_payload(worker: &crate::admission::WorkerCtx) -> ClipboardRead {
     crate::macos_clipboard::on_the_main_queue(worker, || {
         if objc2::MainThreadMarker::new().is_none() {
-            return Err("clipboard read requires the event-loop thread".into());
+            return ClipboardRead {
+                sequence: None,
+                offered: Vec::new(),
+                answer: Err("clipboard read requires the event-loop thread".into()),
+            };
         }
-        read_payload(&mut MacClipboard {
+        let mut port = MacClipboard {
             pasteboard: NSPasteboard::generalPasteboard(),
             before: 0,
-        })
+        };
+        let read = read_payload_offering(&mut port);
+        let sequence = u64::try_from(port.before).ok().map(ClipboardSequence);
+        let (answer, offered) = match read {
+            Ok(read) => (Ok(read.payload), read.offered),
+            Err(reason) => (Err(reason), Vec::new()),
+        };
+        ClipboardRead {
+            sequence,
+            offered,
+            answer,
+        }
     })
 }

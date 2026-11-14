@@ -10,12 +10,12 @@
 //! stops at a named phase for the next lock holder:
 //!
 //! 1. **Wait for O** (§C.4): the transaction lock `H\lock`, which O holds
-//!    until its process ends (`install_txn::hold_within`, 60 s; not had →
-//!    nothing written, [`Ended::OldHeldTheLock`], W3 stays for the next lock
-//!    holder), then the data directory's claim tried until had and let go at
-//!    once (`update_apply::wait_for_the_claim`); still held → `OldStayed`,
-//!    `Abandoned`. An entrance already there from a dead attempt (W4) → the
-//!    `Run` value removed, `Reverted`.
+//!    until its process ends (`install_txn::hold_by` on the road's clock,
+//!    60 s; not had → nothing written, [`Ended::OldHeldTheLock`], W3 stays for
+//!    the next lock holder), then the data directory's claim tried until had
+//!    and let go at once (`update_apply::wait_for_the_claim`); still held →
+//!    `OldStayed`, `Abandoned`. An entrance already there from a dead attempt
+//!    (W4) → the `Run` value removed, `Reverted`.
 //! 2. **Revalidate** (U-20's decision 1, taken here):
 //!    `update_prepare_windows::staged_as_verified` — the channel of the
 //!    installed copy, the installed `folio.exe` still the recorded old image,
@@ -84,9 +84,9 @@
 //!      with its creation time, running from `<install>\folio.exe`
 //!      (`update_apply::stop_trial` → `bt_platform::install_flip::ask`): asked
 //!      to quit (`WM_CLOSE` to the windows a person could close), 5 s of grace
-//!      through the wait door, then ended (`TerminateProcess` on a handle
-//!      whose creation time is read again), 5 s more; a process that is not
-//!      all three is never touched;
+//!      on the road's `stop_clock` (the wait door in the product), then ended
+//!      (`TerminateProcess` on a handle whose creation time is read again), 5 s
+//!      more; a process that is not all three is never touched;
 //!    - **the moves back**, under exclusive admission within 60 s (not had →
 //!      nothing recorded, [`Ended::RollbackWaits`]: the next holder tries):
 //!      `rolledout\` made; every install file whose digest is a **new**
@@ -165,7 +165,9 @@
 //! `update_apply::write_journal`, U-34); every effect
 //! is asked of `update_txn::may` first. Headless: the main thread is a worker
 //! (`admission::enter_standalone_main`), and its only sleeps are the wait
-//! door's (`bt_platform::wait::sleep_within`) and `install_txn::hold_within`'s.
+//! door's (`bt_platform::wait::sleep_within`), each lock wait's
+//! (`install_txn::hold_by`) among them, paused on the road's
+//! [`Road::wait_clock`] (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
 
 use std::ffi::OsString;
 use std::io;
@@ -185,8 +187,9 @@ use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
     Ahead, BeforeDeciding, Carried, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave,
-    Limits, Opener, Opens, Recording, TrialClock, WallClock, Watch, Watched, Window, failed_words,
-    owed_at_logon, read_receipt, stop_trial, trial_runs, trial_words, until_let_go,
+    Limits, LockWaitOn, Opener, Opens, Recording, TrialClock, WaitClock, WaitWithin, WallClock,
+    Watch, Watched, Window, failed_words, owed_at_logon, read_receipt, stop_trial, trial_runs,
+    trial_words, until_let_go,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -507,15 +510,13 @@ fn held_move(
     to: &Path,
     world: &mut dyn World,
 ) -> Result<(), crate::update_apply::Unwritten> {
-    let (worker, within) = journal.held_door();
     // One world behind two seams, each round's line said as it happens and
     // the round looked at after it; never both at once.
     let world = std::cell::RefCell::new(world);
     crate::update_apply::move_held_within(
-        worker,
+        journal.held_door(),
         from,
         to,
-        within,
         opening,
         &mut |line| world.borrow_mut().say(line),
         &mut || world.borrow_mut().move_held(step),
@@ -569,6 +570,27 @@ pub(crate) struct Road {
     /// trial's), the watch's turns and pauses, `decide`'s `now_ms` —
     /// [`WallClock`] in the product.
     pub(crate) trial_clock: Arc<dyn TrialClock>,
+    /// **The clock a held member's move window is read and paused on**
+    /// (`update_apply::move_held_within`, through the journal holder's
+    /// door) — [`WallClock`] in the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
+    pub(crate) held_clock: Arc<dyn WaitClock>,
+    /// **The clock the wait for a live trial's final decision after the
+    /// commit is read and paused on**
+    /// (`update_apply::note_unkept_after_trial_decision`) — [`WallClock`] in
+    /// the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
+    pub(crate) decision_clock: Arc<dyn WaitClock>,
+    /// **The clock the waits for O are read and paused on** — the road's one
+    /// deadline ([`Limits::old_within`]), the window election's asks again,
+    /// the transaction lock, the data directory's claim, the admission and
+    /// the held files before the moves; recovery's lock, its wait for an
+    /// election in flight, and a rollback's admission
+    /// (`update_apply::WaitClock`, T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT)
+    /// — [`WallClock`] in the product.
+    pub(crate) wait_clock: Arc<dyn WaitClock>,
+    /// **The clock a trial asked to quit, then ended, is waited out on** — the
+    /// quit grace and the end window of [`stop_trial`] — [`WallClock`] in the
+    /// product (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK).
+    pub(crate) stop_clock: Arc<dyn WaitClock>,
     /// This process, by its pid and start time: what the window's mark names
     /// when this process takes it (`update_apply::OWNER_FILE`).
     pub(crate) me: Running,
@@ -602,6 +624,10 @@ impl Road {
             channel,
             limits: Limits::PRODUCT,
             trial_clock: Arc::new(WallClock),
+            held_clock: Arc::new(WallClock),
+            decision_clock: Arc::new(WallClock),
+            wait_clock: Arc::new(WallClock),
+            stop_clock: Arc::new(WallClock),
             me: crate::update_apply::this_process(),
             starter: install_flip::parent_of_this_process(),
             handed_back: None,
@@ -823,6 +849,7 @@ pub(crate) fn apply(
     apply_electing(worker, road, txn, nonce, world, |worker, until| {
         crate::update_apply::take_the_window_for_applier(
             worker,
+            &*road.wait_clock,
             &road.home,
             txn,
             road.me,
@@ -865,7 +892,7 @@ fn apply_electing(
     // for O** (round 7): the mark, the transaction lock, the claim and the
     // admission all spend the same `old_within` — the election's own wait for
     // its lock too (round 8).
-    let until = Instant::now() + road.limits.old_within;
+    let until = road.wait_clock.now() + road.limits.old_within;
     let window = elect(worker, until);
     match window {
         Window::Mine(duty) => {
@@ -932,8 +959,16 @@ fn apply_under_the_lock(
     Option<Running>,
     Option<crate::update_apply::HeldPast>,
 ) {
-    apply_under_the_lock_with(worker, road, txn, nonce, window, world, |path, within| {
-        install_txn::hold_within(path, Hold::Exclusive, within)
+    apply_under_the_lock_with(worker, road, txn, nonce, window, world, |path, until| {
+        install_txn::hold_by(
+            path,
+            Hold::Exclusive,
+            until,
+            &LockWaitOn {
+                clock: &*road.wait_clock,
+                worker,
+            },
+        )
     })
 }
 
@@ -944,16 +979,13 @@ fn apply_under_the_lock_with(
     nonce: Nonce,
     window: Instant,
     world: &mut impl World,
-    hold: impl FnOnce(&Path, Duration) -> Result<Option<install_txn::Held>, install_txn::Failure>,
+    hold: impl FnOnce(&Path, Instant) -> Result<Option<install_txn::Held>, install_txn::Failure>,
 ) -> (
     Ended,
     Option<Running>,
     Option<crate::update_apply::HeldPast>,
 ) {
-    let lock = match hold(
-        &road.home.lock(),
-        window.saturating_duration_since(Instant::now()),
-    ) {
+    let lock = match hold(&road.home.lock(), window) {
         Ok(Some(held)) => held,
         Ok(None) => return (Ended::OldHeldTheLock, None, None),
         Err(failure) => return (Ended::Failed(failure.to_string()), None, None),
@@ -1035,13 +1067,19 @@ pub(crate) fn recover(
         Opener::Login
     };
     let handed = start.unwrap_or(&[]);
-    let (ended, successor, deferred_to, journal_held) = match hold(road) {
+    let (ended, successor, deferred_to, journal_held) = match hold(worker, road) {
         Ok((lock, journal)) => {
             let txn = journal.txn;
             match Txn::of(road, worker, journal, lock, Asker::Rescue) {
                 Ok(mut held) => {
                     let mut ended = if held.j.phase() == PhaseKind::Handoff {
-                        match crate::update_apply::window_holder(&road.home, txn, road.me) {
+                        match crate::update_apply::window_holder_on(
+                            worker,
+                            &*road.wait_clock,
+                            &road.home,
+                            txn,
+                            road.me,
+                        ) {
                             Ok(Some(crate::update_apply::WindowHolder::Marked(applier))) => {
                                 world.say(&format!(
                                     "BT_UPDATE_RECOVER {} has the update's window; the handed-off update is left to it",
@@ -1109,12 +1147,17 @@ pub(crate) fn recover(
     }
 }
 
-/// The transaction lock within [`Limits::old_within`], then the journal.
-fn hold(road: &Road) -> Result<(Held, Journal), Ended> {
-    let lock = match install_txn::hold_within(
+/// The transaction lock within [`Limits::old_within`] on the road's
+/// [`Road::wait_clock`], then the journal.
+fn hold(worker: &WorkerCtx, road: &Road) -> Result<(Held, Journal), Ended> {
+    let lock = match install_txn::hold_by(
         &road.home.lock(),
         Hold::Exclusive,
-        road.limits.old_within,
+        road.wait_clock.now() + road.limits.old_within,
+        &LockWaitOn {
+            clock: &*road.wait_clock,
+            worker,
+        },
     ) {
         Ok(Some(held)) => held,
         Ok(None) => return Err(Ended::LockHeld),
@@ -1280,7 +1323,13 @@ impl<'a> Txn<'a> {
         Ok(Self {
             road,
             asker,
-            j: Journaled::of(&road.home, worker, journal, road.limits.journal_held_within),
+            j: Journaled::of(
+                &road.home,
+                worker,
+                journal,
+                road.limits.journal_held_within,
+                &*road.held_clock,
+            ),
             _lock: lock,
             inventories,
             layout,
@@ -1366,6 +1415,7 @@ impl<'a> Txn<'a> {
         }
         if let Err(why) = crate::update_apply::wait_for_the_claim(
             worker,
+            &*self.road.wait_clock,
             &self.road.data,
             self.road.limits.poll,
             window,
@@ -1422,19 +1472,26 @@ impl<'a> Txn<'a> {
         window: Instant,
         world: &mut impl World,
     ) -> Result<Ended, String> {
-        let left = window.saturating_duration_since(Instant::now());
-        let admission =
-            match install_txn::hold_within(&self.road.home.admission(), Hold::Exclusive, left) {
-                Ok(Some(held)) => held,
-                Ok(None) => {
-                    world.say("BT_UPDATE_APPLY a running copy holds the admission");
-                    return self.revert(Actor::Applier, world);
-                }
-                Err(failure) => {
-                    world.say(&format!("BT_UPDATE_APPLY the admission: {failure}"));
-                    return self.revert(Actor::Applier, world);
-                }
-            };
+        let clock = LockWaitOn {
+            clock: &*self.road.wait_clock,
+            worker,
+        };
+        let admission = match install_txn::hold_by(
+            &self.road.home.admission(),
+            Hold::Exclusive,
+            window,
+            &clock,
+        ) {
+            Ok(Some(held)) => held,
+            Ok(None) => {
+                world.say("BT_UPDATE_APPLY a running copy holds the admission");
+                return self.revert(Actor::Applier, world);
+            }
+            Err(failure) => {
+                world.say(&format!("BT_UPDATE_APPLY the admission: {failure}"));
+                return self.revert(Actor::Applier, world);
+            }
+        };
         if let Err(why) = self.ready_to_move(worker, window) {
             world.say(&format!("BT_UPDATE_APPLY nothing is moved: {why}"));
             return self.revert(Actor::Applier, world);
@@ -1501,7 +1558,7 @@ impl<'a> Txn<'a> {
         until_let_go(
             window,
             self.road.limits.poll,
-            &mut Instant::now,
+            &mut || self.road.wait_clock.now(),
             &mut || {
                 let mut held = Vec::new();
                 for member in &self.inventories.old_present {
@@ -1515,7 +1572,7 @@ impl<'a> Txn<'a> {
                 }
                 Ok(held)
             },
-            &mut |pause| bt_platform::wait::sleep_within(worker, pause),
+            &mut |pause| self.road.wait_clock.pause(worker, pause),
         )
     }
 
@@ -1596,6 +1653,7 @@ impl<'a> Txn<'a> {
         let installed = self.road.installed.clone();
         let stopped = stop_trial(
             worker,
+            &*self.road.stop_clock,
             process,
             &[installed.as_path()],
             (limits.quit_within, limits.end_within, limits.poll),
@@ -1764,6 +1822,7 @@ impl<'a> Txn<'a> {
                     let limits = &self.road.limits;
                     if let Err(why) = stop_trial(
                         worker,
+                        &*self.road.stop_clock,
                         process,
                         &images,
                         (limits.quit_within, limits.end_within, limits.poll),
@@ -1773,7 +1832,7 @@ impl<'a> Txn<'a> {
                     }
                 }
                 Action::RollBack(Restore::Moves(moves)) => {
-                    if let Some(ended) = self.move_back(actor, &moves, world)? {
+                    if let Some(ended) = self.move_back(worker, actor, &moves, world)? {
                         return Ok(ended);
                     }
                 }
@@ -1864,6 +1923,7 @@ impl<'a> Txn<'a> {
             may_end.clone()?;
             stop_trial(
                 worker,
+                &*road.stop_clock,
                 process,
                 &[installed.as_path()],
                 (
@@ -1912,14 +1972,20 @@ impl<'a> Txn<'a> {
     /// nothing recorded), or a move that failed (`Stuck`, everything kept).
     fn move_back(
         &mut self,
+        worker: &WorkerCtx,
         actor: Actor,
         moves: &[Move],
         world: &mut impl World,
     ) -> Result<Option<Ended>, String> {
-        let admission = match install_txn::hold_within(
+        let clock = LockWaitOn {
+            clock: &*self.road.wait_clock,
+            worker,
+        };
+        let admission = match install_txn::hold_by(
             &self.road.home.admission(),
             Hold::Exclusive,
-            self.road.limits.old_within,
+            self.road.wait_clock.now() + self.road.limits.old_within,
+            &clock,
         ) {
             Ok(Some(held)) => held,
             Ok(None) => {
@@ -2164,12 +2230,15 @@ impl<'a> Txn<'a> {
         let installed = self.road.installed.clone();
         let limits = self.road.limits;
         let unkept = crate::update_apply::note_unkept_after_trial_decision(
-            worker,
+            WaitWithin {
+                worker,
+                within: limits.journal_held_within,
+                clock: &*self.road.decision_clock,
+            },
             &self.j.journal,
             &home,
             &installed,
             limits.poll,
-            limits.journal_held_within,
             &mut |line| world.say(line),
         )?;
         let located = self.layout.locate(&self.site())?;

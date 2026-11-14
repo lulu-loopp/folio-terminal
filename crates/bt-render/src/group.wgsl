@@ -89,3 +89,12 @@ fn over(input: VertexOutput) -> @location(0) vec4<f32> {
 fn cross_fade(input: VertexOutput) -> @location(0) vec4<f32> {
     return texel(input) * input.opacity;
 }
+
+// The window's kept body (row 64a), put back on the frame as it was stored: the
+// bytes the seats' own pipelines wrote into it, alpha included, under a
+// `Replace` blend — a copy, by a draw, because a Metal drawable cannot be the
+// destination of anything else.
+@fragment
+fn put_back(input: VertexOutput) -> @location(0) vec4<f32> {
+    return texel(input);
+}

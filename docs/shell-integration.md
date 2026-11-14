@@ -144,7 +144,7 @@ other:
 |---|---|---|---|
 | PowerShell / Windows PowerShell | Windows | `file:///D:/src` | `$PWD.ProviderPath` |
 | Git Bash | Windows | `file:///D:/src` | `pwd -W`, the MSYS builtin for the Win32 spelling |
-| WSL | WSL | `file:///mnt/d/src`, `file:///home/weiyi` | `$PWD` |
+| WSL | WSL | `file:///mnt/d/src`, `file:///home/alice` | `$PWD` |
 | Command Prompt | Windows | `file:///D:\src`, `file:///C:\Program Files` | `$P`, in the `PROMPT` variable |
 
 Command Prompt's report is spelled with **backslashes and unencoded spaces**, and that is forced
@@ -171,12 +171,12 @@ resolution and every inheritance into another pane had to learn a spelling nothi
 when you `cd`, not on every prompt.
 
 WSL reports the POSIX path and does **not** convert. `wslpath -w` would answer
-`\\wsl.localhost\<distro>\home\weiyi` for a Linux home — a UNC whose authority a `file:` report is
+`\\wsl.localhost\<distro>\home\alice` for a Linux home — a UNC whose authority a `file:` report is
 obliged to reject as a remote share — so converting would make the most common directory in WSL
 unreportable. A POSIX directory is stored and displayed as it is, and the pane translates it on
 this side, in the one place that knows which distribution the pane is standing in
 (`bt_transcript::paths::PrintedPathNamespace`, §7.30). That is what makes a name printed beside it
-resolvable: since 2026-09-07 a WSL pane standing in `/home/weiyi` measures `docs/a.md` from there,
+resolvable: since 2026-09-07 a WSL pane standing in `/home/alice` measures `docs/a.md` from there,
 and `/etc/hosts` printed into it is the file Windows opens at `\\wsl.localhost\<distro>\etc\hosts`.
 The wire format did not move, and neither did the rule about authorities: a report that *carried*
 one would still be refused.
@@ -187,10 +187,10 @@ A new tab opens where the shell you are looking at is standing, whenever the she
 name that place (`profiles::cwd_for_spawn`). Between the two namespaces the map is WSL's own drive
 mounts, and it is not total:
 
-| from → to | `D:\src` | `/mnt/d/src` | `/home/weiyi` |
+| from → to | `D:\src` | `/mnt/d/src` | `/home/alice` |
 |---|---|---|---|
 | → Windows profile | `D:\src` | `D:\src` | *no answer* |
-| → WSL | `/mnt/d/src` | `/mnt/d/src` | `/home/weiyi` |
+| → WSL | `/mnt/d/src` | `/mnt/d/src` | `/home/alice` |
 
 The empty cell is the honest one: a directory inside the distribution is not a place a Windows
 shell stands in — a `cmd.exe` handed a UNC working directory falls back to `C:\WINDOWS` and says
@@ -604,7 +604,7 @@ A program title outranks the working directory in the name stack, so without int
 Command Prompt tab is *called* `C:\WINDOWS\System32\cmd.exe` and stays called that after `OSC 7`
 finally gives it a real directory. A shell reading its own command line back has not named itself,
 it has repeated what this terminal wrote — so a title equal to the pane's own resolved program is
-dropped before the name stack sees it (`LeafSession::announced_title`). This is the rule the pane
+dropped before the name stack sees it (`ShellSession::announced_title`). This is the rule the pane
 head already applied to a title equal to the profile's *display name*, said in the other
 vocabulary. `title Build` in that same pane is kept.
 

@@ -5,7 +5,7 @@
 //! and real tabs — the real `step_leaf_text_scale` (the one mutation door's core), the real
 //! `apply_leaf_metrics`, the real `pane_cell_metrics`-shaped derivation through the production
 //! measuring service (`bt_render::CellMetrics::measure_at` behind `bt_render::CellMetricsMemo`),
-//! the real `LeafSession::propose_size` / `release_due_leaf_resize` transaction, and frames the
+//! the real `ShellSession::propose_size` / `release_due_size` transaction, and frames the
 //! leaves' own sessions compose. Where the claim is about the window's own wiring — which rung
 //! the wheel reaches first, which metrics a hit test reads, who may write the rung — it is
 //! pinned on the item bodies through `bt_source`.
@@ -46,7 +46,7 @@ fn physical() -> PhysicalSize<u32> {
 /// `leaf_saying` is born with its own 22-pixel rows rather than with its metrics, so the leaf is
 /// first given a different scale and then put at 100 % through the production apply operation,
 /// which is the one writer of the session's cell geometry.
-fn pane_at_rest(text: &str) -> LeafSession {
+fn pane_at_rest(text: &str) -> TerminalPane {
     let mut leaf = leaf_saying(text);
     leaf.view.metrics = fixture_cell_metrics(2.0, BASE);
     assert!(apply_leaf_metrics(
@@ -60,38 +60,40 @@ fn pane_at_rest(text: &str) -> LeafSession {
 }
 
 /// Re-solve a leaf into [`body`], as every road that re-solves the panes does.
-fn resolve(leaf: &mut LeafSession, at: Instant) -> bool {
-    let next = leaf.grid_for(body());
-    leaf.propose_size(GridChange {
-        next,
-        physical: physical(),
-        observed_at: at,
-        on_stage: LeafOnStage::Shown,
-        context: "ticket 37",
-        pane: card_trace::Pane::untraced(),
-    })
-    .expect("a shell-less leaf reflows")
+fn resolve(leaf: &mut TerminalPane, at: Instant) -> bool {
+    let next = leaf.session.grid_for(&leaf.view.metrics, body());
+    leaf.session
+        .propose_size(GridChange {
+            next,
+            physical: physical(),
+            observed_at: at,
+            on_stage: LeafOnStage::Shown,
+            context: "ticket 37",
+            pane: card_trace::Pane::untraced(),
+        })
+        .expect("a shell-less leaf reflows")
 }
 
 /// Release whatever the leaf owes its child, as the loop does past the quiet boundary.
-fn settle(leaf: &mut LeafSession, at: Instant) -> Option<LeafResizeCommit> {
-    release_due_leaf_resize(leaf, at, false)
+fn settle(leaf: &mut TerminalPane, at: Instant) -> Option<LeafResizeCommit> {
+    leaf.session
+        .release_due_size(at, false)
         .expect("a shell-less leaf commits")
         .0
 }
 
 /// Everything a neighbour's step could disturb, as one comparable picture.
-fn snapshot(leaf: &LeafSession) -> String {
+fn snapshot(leaf: &TerminalPane) -> String {
     format!(
         "{:?}",
         (
             leaf.view.text_scale,
             leaf.view.metrics,
             leaf.view.presented_metrics,
-            leaf.grid,
-            leaf.conpty_grid,
-            leaf.pending_pty_resize.map(|pending| pending.grid),
-            leaf.session.layout_key(),
+            leaf.session.grid,
+            leaf.session.conpty_grid,
+            leaf.session.pending_pty_resize.map(|pending| pending.grid),
+            leaf.session.session.layout_key(),
             leaf.view.projection.cell_height_subpixels(),
         )
     )
@@ -108,7 +110,7 @@ fn snapshot(leaf: &LeafSession) -> String {
 ///
 /// MUTATION: make `step_leaf_text_scale` apply the derived metrics without moving the rung (drop
 /// `leaf.view.text_scale = requested`) — the target's rung reads 100 and the percent assertion goes
-/// red; make `LeafSession::grid_for` read the window's base metrics — the target's grid does not
+/// red; make `ShellSession::grid_for` read the window's base metrics — the target's grid does not
 /// shrink.
 #[test]
 fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical() {
@@ -116,8 +118,8 @@ fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical
     let mut sibling = pane_at_rest("right");
     let target_before = (
         target.view.metrics,
-        target.grid,
-        target.session.layout_key(),
+        target.session.grid,
+        target.session.session.layout_key(),
         target.view.projection.cell_height_subpixels(),
     );
     let sibling_before = snapshot(&sibling);
@@ -132,11 +134,11 @@ fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical
     assert_eq!(target.view.text_scale.percent(), 150);
     assert_eq!(target.view.metrics, fixture_cell_metrics(1.0, 24.0));
     assert_ne!(target.view.metrics, target_before.0);
-    assert!(target.grid.columns < target_before.1.columns);
-    assert!(target.grid.rows < target_before.1.rows);
-    assert_ne!(target.session.layout_key(), target_before.2);
+    assert!(target.session.grid.columns < target_before.1.columns);
+    assert!(target.session.grid.rows < target_before.1.rows);
+    assert_ne!(target.session.session.layout_key(), target_before.2);
     assert_eq!(
-        target.session.layout_key().font_size_subpixels,
+        target.session.session.layout_key().font_size_subpixels,
         target.view.metrics.font_size_subpixels().get()
     );
     assert_ne!(
@@ -144,8 +146,11 @@ fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical
         target_before.3
     );
     assert_eq!(
-        target.pending_pty_resize.map(|pending| pending.grid),
-        Some(target.grid),
+        target
+            .session
+            .pending_pty_resize
+            .map(|pending| pending.grid),
+        Some(target.session.grid),
         "the child is owed the new grid"
     );
     assert_eq!(
@@ -160,7 +165,7 @@ fn stepping_one_pane_changes_its_metrics_and_leaves_its_neighbour_byte_identical
 ///
 /// Driven the way the wheel drives it: reports turned into rungs by the rung's own carry
 /// ([`TextSizeAim::notch`]), each spend applied through the door's core and re-solved through
-/// `LeafSession::propose_size`, and the child released by `release_due_leaf_resize` exactly as
+/// `ShellSession::propose_size`, and the child released by `release_due_size` exactly as
 /// the loop releases it. `told_the_child` is the commit's own record of whether
 /// `PtySession::resize` — `ResizePseudoConsole` — is called; the fixture has no ConPTY, so this
 /// counts the decision and not the syscall.
@@ -174,7 +179,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
         seat: SeatId(1),
     };
     let started = Instant::now();
-    let turn = |leaf: &mut LeafSession, slot: &mut Option<TextSizeAim>, delta, when| {
+    let turn = |leaf: &mut TerminalPane, slot: &mut Option<TextSizeAim>, delta, when| {
         let carry = slot.take();
         let (step, count) = TextSizeAim::notch(carry, slot, at, delta, leaf.view.text_scale);
         if count != 0
@@ -186,7 +191,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
 
     // Six 20-pixel reports are one notch; then three whole notches — all inside the quiet window.
     let mut leaf = pane_at_rest("burst");
-    let told_before = leaf.conpty_grid;
+    let told_before = leaf.session.conpty_grid;
     let mut slot = None;
     for index in 0..6 {
         turn(
@@ -211,7 +216,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
     }
     assert_eq!(leaf.view.text_scale.percent(), 175);
     assert_eq!(
-        leaf.conpty_grid, told_before,
+        leaf.session.conpty_grid, told_before,
         "nothing told inside the window"
     );
     assert!(
@@ -220,8 +225,11 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
     );
     let commit = settle(&mut leaf, started + Duration::from_secs(2)).expect("one release");
     assert!(commit.told_the_child, "the child is told once");
-    assert_eq!(leaf.conpty_grid, leaf.grid, "and told the final grid");
-    assert_ne!(leaf.conpty_grid, told_before);
+    assert_eq!(
+        leaf.session.conpty_grid, leaf.session.grid,
+        "and told the final grid"
+    );
+    assert_ne!(leaf.session.conpty_grid, told_before);
     assert!(
         settle(&mut leaf, started + Duration::from_secs(4)).is_none(),
         "and never again"
@@ -245,7 +253,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
 
     // Up and back down inside the quiet window ends where the child already is.
     let mut round = pane_at_rest("round");
-    let grid = round.conpty_grid;
+    let grid = round.session.conpty_grid;
     let mut slot = None;
     turn(
         &mut round,
@@ -266,7 +274,7 @@ fn a_burst_of_notches_tells_the_child_at_most_once_with_the_final_grid() {
         commit.is_none_or(|commit| !commit.told_the_child),
         "a round trip back to the child's grid tells it nothing"
     );
-    assert_eq!(round.conpty_grid, grid);
+    assert_eq!(round.session.conpty_grid, grid);
 }
 
 /// NEW (37) — **a Settings change then a display change, the display change then the Settings
@@ -313,17 +321,20 @@ fn settings_then_dpi_equals_dpi_then_settings_equals_a_direct_measure() {
     .expect("measures");
     assert_eq!(first.view.metrics, direct);
     assert_eq!(second.view.metrics, direct);
-    assert_eq!(first.session.layout_key(), second.session.layout_key());
+    assert_eq!(
+        first.session.session.layout_key(),
+        second.session.session.layout_key()
+    );
     assert_eq!(first.view.text_scale, rung, "neither change moved the rung");
 
     // Carried to a window at 2.0: the same rung, measured there.
     let mut tabs = vec![tab_holding(first)];
     apply_tabs_leaf_metrics(&mut tabs, derive_at(2.0, 18.0)).expect("measures");
-    let moved = tabs[0].focused().expect("the tab holds its shell");
+    let moved = tabs[0].focused_pane().expect("the tab holds its shell");
     assert_eq!(moved.view.text_scale, rung);
     assert_eq!(moved.view.metrics, fixture_cell_metrics(2.0, 27.0));
     assert_eq!(
-        moved.session.layout_key().font_size_subpixels,
+        moved.session.session.layout_key().font_size_subpixels,
         moved.view.metrics.font_size_subpixels().get()
     );
 }
@@ -344,7 +355,7 @@ fn a_tab_moved_to_a_window_at_another_scale_is_measured_there() {
     step_leaf_text_scale(&mut leaf, TextStep::Larger, 2, derive_at(1.0, BASE)).unwrap();
     let mut tabs = vec![tab_holding(leaf)];
     apply_tabs_leaf_metrics(&mut tabs, derive_at(2.0, BASE)).unwrap();
-    let there = tabs[0].focused().unwrap();
+    let there = tabs[0].focused_pane().unwrap();
     assert_eq!(there.view.text_scale.percent(), 125);
     assert_eq!(there.view.metrics, fixture_cell_metrics(2.0, 20.0));
     assert_eq!(
@@ -369,7 +380,7 @@ fn a_tab_moved_to_a_window_at_another_scale_is_measured_there() {
 ///
 /// The moving half runs the production moves on real tabs: `tear_pane_into_tab`, and a merge
 /// through `absorb_tab_into_layout` whose arriving seats are renumbered — the rung travels inside
-/// the `LeafSession` that is moved, with no copy in any transfer record. The birth half is every
+/// the `ShellSession` that is moved, with no copy in any transfer record. The birth half is every
 /// constructor's argument, pinned: `Runtime::split_seat` and every caller of `create_tab_state`
 /// (the `+`, a duplicate, a restore, *Reopen closed*) hand new views `TextScale::ACTUAL`.
 ///
@@ -391,7 +402,7 @@ fn split_and_duplicate_start_at_100_and_tear_out_and_merge_keep_the_rung() {
         cross_solve,
     )
     .expect("a terminal pane may become a tab");
-    let carried = torn.focused().expect("the torn tab holds the shell");
+    let carried = torn.focused_pane().expect("the torn tab holds the shell");
     assert_eq!(
         carried.view.text_scale.percent(),
         125,
@@ -495,9 +506,9 @@ fn the_rung_is_never_written_and_every_rebuilt_view_starts_at_100() {
         .expect("the layout serializes")
     };
     let before = persisted(&tab);
-    let leaf = tab.focused_mut().unwrap();
+    let leaf = tab.focused_pane_mut().unwrap();
     step_leaf_text_scale(leaf, TextStep::Larger, 4, derive_at(1.0, BASE)).unwrap();
-    assert_eq!(tab.focused().unwrap().view.text_scale.percent(), 175);
+    assert_eq!(tab.focused_pane().unwrap().view.text_scale.percent(), 175);
     let after = persisted(&tab);
     assert_eq!(before, after, "a size step writes nothing");
     assert!(!after.contains("text") && !after.contains("175"), "{after}");
@@ -575,8 +586,9 @@ fn the_rung_has_one_owner() {
         "step_leaf_text_scale",
         "pane_cell_metrics",
         "apply_tabs_leaf_metrics",
-        // the restart reads the rung it hands the constructor
-        "Runtime::restart_shell",
+        // a restart's and an ended agent's hand-back's successor reads the rung it hands the
+        // constructor (row 195)
+        "Runtime::bear_successor",
         // and so does a pane in birth's landing, which is born at the rung it already has
         // (T-PROGRAMS-REFRESH)
         "Runtime::land_pane_birth",
@@ -667,7 +679,10 @@ fn the_rung_has_one_owner() {
         "WindowRenderer::peek_thumbnail_extent",
         "WindowRenderer::prepare_peek_draws",
         "WindowRenderer::peek_box_rects",
-        "WindowRenderer::float_tag_rects",
+        // the status overlay's tag, drawn by the frame's seat painter from the window's base
+        // that the body's key carries (`BodyState::base_metrics`, row 64a)
+        "SeatPainter::float_tag_rects",
+        "WindowRenderer::body_state",
         // the single-seat door and the replay probe's encoding (`bt_render::probe_surface`;
         // its submit is `bt-render-probe`'s), whose one pane has no rung
         "WindowRenderer::present",
@@ -702,13 +717,13 @@ fn the_rung_has_one_owner() {
 fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
     let mut small = tab_holding(pane_at_rest("small"));
     let mut large = tab_holding(pane_at_rest("large"));
-    let leaf = large.focused_mut().unwrap();
+    let leaf = large.focused_pane_mut().unwrap();
     step_leaf_text_scale(leaf, TextStep::Larger, 3, derive_at(1.0, BASE)).unwrap();
     resolve(leaf, Instant::now());
     let small_frame = focused_frame(&mut small);
     let large_frame = focused_frame(&mut large);
-    let small_metrics = small.focused().unwrap().view.metrics;
-    let large_metrics = large.focused().unwrap().view.metrics;
+    let small_metrics = small.focused_pane().unwrap().view.metrics;
+    let large_metrics = large.focused_pane().unwrap().view.metrics;
     let (x, y) = (220.0, 90.0);
     let small_hit = small_metrics.hit_test_frame(&small_frame, x, y).unwrap();
     let large_hit = large_metrics.hit_test_frame(&large_frame, x, y).unwrap();
@@ -736,11 +751,11 @@ fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
     );
 
     // A stationary pointer while the size changes: the glass still shows the old picture.
-    let presented = large.focused().unwrap().view.presented_metrics;
-    let leaf = large.focused_mut().unwrap();
+    let presented = large.focused_pane().unwrap().view.presented_metrics;
+    let leaf = large.focused_pane_mut().unwrap();
     step_leaf_text_scale(leaf, TextStep::Larger, 1, derive_at(1.0, BASE)).unwrap();
     assert_eq!(
-        large.focused().unwrap().view.presented_metrics,
+        large.focused_pane().unwrap().view.presented_metrics,
         presented,
         "a step is not a presentation"
     );
@@ -763,19 +778,19 @@ fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
     assert!(method_body("Runtime", "pane_frame_metrics").contains("presented_metrics"));
     assert!(
         method_body("Runtime", "offer_ime_caret")
-            .contains("self.focused().map(|leaf| leaf.view.metrics)"),
+            .contains("self.focused_pane().map(|leaf| leaf.view.metrics)"),
         "the IME caret is measured in the focused pane's cells"
     );
     for (method, needle) in [
         (
             "take_forward_wheel_lines",
-            "self.leaf(seat).view.metrics.cell_height_px",
+            "self.pane(seat).view.metrics.cell_height_px",
         ),
         (
             "take_forward_wheel_notches",
-            "self.leaf(seat).view.metrics.cell_height_px",
+            "self.pane(seat).view.metrics.cell_height_px",
         ),
-        ("wheel_columns", "self.leaf(seat).view.metrics"),
+        ("wheel_columns", "self.pane(seat).view.metrics"),
     ] {
         assert!(
             method_body("Runtime", method).contains(needle),
@@ -798,7 +813,7 @@ fn two_panes_at_two_sizes_each_map_the_pointer_with_their_own_cells() {
 fn a_size_change_with_an_unchanged_grid_still_presents_and_input_uses_the_displayed_picture() {
     let mut tab = tab_holding(pane_at_rest("same grid"));
     let before = focused_frame(&mut tab);
-    let old_metrics = tab.focused().unwrap().view.metrics;
+    let old_metrics = tab.focused_pane().unwrap().view.metrics;
     let signature = |metrics| present_gate::SeatSignature {
         owner: (1, 1),
         picture_revision: 1,
@@ -807,8 +822,8 @@ fn a_size_change_with_an_unchanged_grid_still_presents_and_input_uses_the_displa
         focused: true,
         metrics,
     };
-    let leaf = tab.focused_mut().unwrap();
-    let grid = leaf.grid;
+    let leaf = tab.focused_pane_mut().unwrap();
+    let grid = leaf.session.grid;
     // A face a tenth of a pixel smaller measures to the same cell box: the one case where
     // nothing but the face size tells the two pictures apart.
     let smaller = fixture_cell_metrics(1.0, 15.9);
@@ -818,7 +833,7 @@ fn a_size_change_with_an_unchanged_grid_still_presents_and_input_uses_the_displa
         "the fixture's two sizes share one cell"
     );
     assert!(apply_leaf_metrics(leaf, smaller));
-    assert_eq!(leaf.grid, grid, "the apply operation moved no grid");
+    assert_eq!(leaf.session.grid, grid, "the apply operation moved no grid");
     let after = focused_frame(&mut tab);
     assert!(frame_matches_grid(&after, grid), "the grid is unchanged");
     assert!(
@@ -827,11 +842,11 @@ fn a_size_change_with_an_unchanged_grid_still_presents_and_input_uses_the_displa
     );
     assert_ne!(
         signature(old_metrics),
-        signature(tab.focused().unwrap().view.metrics),
+        signature(tab.focused_pane().unwrap().view.metrics),
         "the seat's signature carries its metrics"
     );
     assert_eq!(
-        tab.focused().unwrap().view.presented_metrics,
+        tab.focused_pane().unwrap().view.presented_metrics,
         old_metrics,
         "input is measured on the picture on the glass until the new one is presented"
     );
@@ -939,12 +954,13 @@ fn the_text_size_derivation_holds_at_its_edges() {
     assert_eq!(leaf.view.metrics, home);
     // Behind another tab: given the grid, reflowed at release.
     let mut behind = pane_at_rest("behind");
-    let grid = behind.grid;
+    let grid = behind.session.grid;
     step_leaf_text_scale(&mut behind, TextStep::Larger, 3, derive_at(1.0, BASE)).unwrap();
-    let next = behind.grid_for(body());
+    let next = behind.session.grid_for(&behind.view.metrics, body());
     let now = Instant::now();
     assert!(
         !behind
+            .session
             .propose_size(GridChange {
                 next,
                 physical: physical(),
@@ -956,10 +972,10 @@ fn the_text_size_derivation_holds_at_its_edges() {
             .unwrap(),
         "a hidden pane does not reflow now"
     );
-    assert_eq!(behind.grid, grid);
+    assert_eq!(behind.session.grid, grid);
     let commit = settle(&mut behind, now + Duration::from_secs(1)).expect("released");
     assert!(commit.reflowed && commit.told_the_child);
-    assert_eq!(behind.grid, next);
+    assert_eq!(behind.session.grid, next);
 }
 
 // ── input ────────────────────────────────────────────────────────────────────
@@ -1035,6 +1051,7 @@ fn six_twenty_pixel_reports_are_one_step_and_a_reversal_at_the_top_steps_down_on
         pan_on_the_wheel_road(bt_platform::PanStep {
             began_at: None,
             travel: (0, 30),
+            inertia: false,
         })
         .1
         .expect("a pan that moved turns the wheel")

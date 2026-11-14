@@ -1161,6 +1161,9 @@ pub struct Index {
     pub(crate) literals: Vec<LiteralRecord>,
     pub(crate) comments: Vec<CommentRecord>,
     pub(crate) macros: Vec<MacroRecord>,
+    /// Every stretch of bytes whose own `#[cfg]`s keep it out of every product build, in union
+    /// order (plan row 77; `crate::gates`).
+    pub(crate) gates: Vec<Span>,
     pub(crate) cross_check: FileSetDiff,
     pub(crate) macro_shapes: Vec<UnsupportedMacroShape>,
 }
@@ -1284,6 +1287,28 @@ impl Index {
     #[must_use]
     pub fn values(&self) -> &[ValueRecord] {
         &self.values
+    }
+
+    /// **Every stretch of bytes a `#[cfg]` keeps out of every product build** (plan row 77):
+    /// one span per node — an item, an `impl`, `trait` or foreign item, a `use`, a `let`, an
+    /// expression, a match arm, a field initialiser, a field, a variant, a parameter, a
+    /// generic parameter, the file itself — whose own `cfg`s say no product build compiles it,
+    /// attributes included, in union order. [`crate::Occurrence::in_the_product`]'s fourth
+    /// grain; a `cfg` on a parsed node the index could not place or read refused the index
+    /// instead. Inside a macro's tokens, which `syn` does not parse (plan row 109): a gate is read
+    /// on an entry of a list of attribute-carrying names and on a top-level item of that list's
+    /// `macro_rules!` — a definition no `cfg` conditions, pasting the names only as an `enum`'s
+    /// whole body `$( $(#[$a])* $v, )*`, reached with no hazard (a macro invocation, an attribute
+    /// macro, a foreign `derive`, a `macro_use`) between it and the invocation (`crate::gates`'
+    /// grammar; in the tree, `bt-app`'s `text_entries!`) — and every other `cfg` in any macro's
+    /// tokens refused the index ([`crate::Rejection::CfgInMacroTokens`]), so none is counted as
+    /// product unread. Inside an item that carries an attribute macro (plan row 122) — anything
+    /// but the language's own attributes, the tool namespaces, a `derive`, a derive helper beside
+    /// its derive, and a `cfg_attr` writing only those — no `cfg` is read: each refused the index
+    /// ([`crate::Rejection::CfgUnderAttributeMacro`]); the item's own `cfg`s are read as before.
+    #[must_use]
+    pub fn test_gates(&self) -> &[Span] {
+        &self.gates
     }
 
     /// Every type alias written directly in a module ([`AliasRecord`]), in union order.

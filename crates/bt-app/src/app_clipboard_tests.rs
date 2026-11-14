@@ -272,6 +272,7 @@ fn a_second_multi_line_paste_replaces_the_pending_one() {
         tab.sessions
             .get_mut(seat)
             .unwrap()
+            .session
             .launch
             .paste_recipient
             .encoder
@@ -280,7 +281,7 @@ fn a_second_multi_line_paste_replaces_the_pending_one() {
     let aim = |tab: &TabState, seat: SeatId| PasteTarget {
         tab: tab.id,
         seat,
-        incarnation: tab.sessions[&seat].incarnation,
+        incarnation: tab.sessions[&seat].session.incarnation,
     };
     let first = aim(&tab, seats[0]);
     let second = aim(&tab, seats[1]);
@@ -295,7 +296,7 @@ fn a_second_multi_line_paste_replaces_the_pending_one() {
     let held: Vec<SeatId> = tab
         .sessions
         .iter()
-        .filter(|(_, leaf)| leaf.pending_paste.is_some())
+        .filter(|(_, leaf)| leaf.session.pending_paste.is_some())
         .map(|(seat, _)| *seat)
         .collect();
     assert_eq!(held, vec![seats[1]], "one question, the newest");

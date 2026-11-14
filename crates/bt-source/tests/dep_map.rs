@@ -291,14 +291,20 @@ fn the_unclassified_are_listed_least_referenced_first() {
 /// package whose types it implements its own traits on (`…/term/`), each its own universe, the
 /// census taken over both as the real tree's is over the workspace.
 fn foreign_fixture() -> (Arc<Index>, FieldCensus) {
+    two_package_fixture("dep_map_foreign", "foreign-fixture", "foreign_fixture")
+}
+
+/// A fixture of two packages under `tests/fixtures/<folder>/`: the subject (`app/`, its package
+/// and crate named by the caller) and `term/` (`term_fixture`), the census taken over both.
+fn two_package_fixture(folder: &str, subject: &str, krate: &str) -> (Arc<Index>, FieldCensus) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("dep_map_foreign");
+        .join(folder);
     let package = |folder: &str, package: &str, name: &str| {
         let at = root.join(folder);
         let universe = Universe::declare(
-            format!("the foreign-trait fixture's {folder}"),
+            format!("the two-package fixture's {folder}"),
             vec![TargetRoot {
                 id: TargetId {
                     package: package.to_owned(),
@@ -313,7 +319,7 @@ fn foreign_fixture() -> (Arc<Index>, FieldCensus) {
         .expect("the fixture is there");
         Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
     };
-    let app = package("app", "foreign-fixture", "foreign_fixture");
+    let app = package("app", subject, krate);
     let term = package("term", "term-fixture", "term_fixture");
     let census =
         FieldCensus::take(&app, &FIXTURE_STRUCTS, &[&app, &term]).expect("the fixture's structs");
@@ -401,11 +407,16 @@ fn a_call_into_a_subject_trait_on_another_packages_type_is_an_edge() {
 ///   by a `use` while the subject declares a `Session` of its own (`twin.rs`). Placed by package
 ///   it would be the twin's, the call reaching nothing; a self type is placed only where the
 ///   rules are sure (F1).
-/// - `renamed`'s `rename` is declared only by the twin `Session`: the other package's reaches
-///   it through a deref. The answer would stand on another type's method (F2).
-/// - `Window::paint`'s `self.glass.shine()` is a call through `B::Glass`, and `lit`'s
-///   `T::shine(..)` a call through a generic's trait by its path: each reaches whichever
-///   implementation the argument names, and the census follows it to none (F2, for the path).
+/// - `renamed_crate`'s `aliased` reaches `aliased.rs`'s `impl Aliased for t::Session`, `t` a
+///   renamed crate: a path through a name that is no module is not placed by package (row 84,
+///   N2; placed by package it was the twin's, and the call was listed for the wrong reason).
+/// - `outside`'s `Thing::port(..)` names a type outside the workspace on which the subject
+///   implements `Ports`: the language picks the outside type's own `port` first when it has one,
+///   which the census does not read (row 84, N1; dropped before).
+/// - `Window::paint`'s `self.glass.shine()` is a call through `B::Glass`, which no product impl
+///   of `Backend` binds (row 84 follows a bound one: `dep_map_assoc`), and `lit`'s `T::shine(..)`
+///   a call through a generic's trait by its path, which reaches whichever implementation the
+///   argument names: the census follows each to none (F2, for the path).
 /// - `qualified`'s `<term_fixture::Session as Ports>::port(..)`: the rules read no qualified
 ///   self type.
 ///
@@ -414,7 +425,13 @@ fn a_call_into_a_subject_trait_on_another_packages_type_is_an_edge() {
 /// self type is not placed instead of refusing it, and `prod`'s and `elsewhere`'s rows are gone;
 /// in `Resolver::placed_for_sure`, accept a placement by package, and `elsewhere` is refused
 /// for the twin's reason while `prod`'s `Cell` impl is guessed into an edge;
-/// in `Resolver::bound_method`, answer without the refusal, and `paint`'s row is gone.
+/// in `Resolver::through_binding`, answer no binding with no callee instead of the refusal, and
+/// `paint`'s row is gone; in `Resolver::placed_for_sure`, accept any path that reaches one
+/// declaration again, and `renamed_crate` is refused as "only other types"; in
+/// `Resolver::associated`, drop the outside-type check, and `outside`'s row is gone. `renamed`'s
+/// `rename`, declared only by the twin `Session`, is followed through the other package's deref
+/// to `Inner::rename` (row 84, N3; listed as "only other types" before): MUTATION — do not go
+/// past the other types (`past_other_types` answering `None`), and its row is back.
 #[test]
 fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
     let (_, census) = foreign_fixture();
@@ -424,7 +441,7 @@ fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
             (
                 "Window::paint",
                 "shine",
-                "a call through an associated type, which the census follows to no \
+                "an associated type no product impl binds, which the census follows to no \
                  implementation: `B::Glass`"
             ),
             (
@@ -432,6 +449,12 @@ fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
                 "T::shine",
                 "a call through a generic's trait, which the census follows to no \
                  implementation: `T::shine`"
+            ),
+            (
+                "outside",
+                "Thing::port",
+                "a type's path on a type outside the workspace, whose own functions the census \
+                 does not read: `Thing::port`, which a workspace trait implements on it"
             ),
             (
                 "elsewhere",
@@ -452,10 +475,120 @@ fn a_call_the_census_cannot_follow_to_one_implementation_is_listed_by_kind() {
                 "a call through a qualified path"
             ),
             (
-                "renamed",
-                "rename",
-                "a method only other types of the receiver's name declare"
+                "renamed_crate",
+                "aliased",
+                "a method a trait implements outside its type's package, on a self type the \
+                 rules do not place: `Session` is not declared in the impl's own module, and \
+                 the workspace declares 2 types of that name"
             ),
         ]
     );
+    let renamed: Vec<String> = census
+        .calls()
+        .iter()
+        .filter(|row| row.caller.function == "renamed")
+        .flat_map(|row| row.callees.iter().map(|callee| callee.function.clone()))
+        .collect();
+    assert_eq!(renamed, ["Inner::rename"]);
+}
+
+// ── calls through an associated type ─────────────────────────────────────
+
+/// The associated-type fixture (`tests/fixtures/dep_map_assoc/`): a backend seam over the other
+/// package's types, as the window seam is over bt-render's and bt-platform's.
+fn assoc_fixture() -> (Arc<Index>, FieldCensus) {
+    two_package_fixture("dep_map_assoc", "assoc-fixture", "assoc_fixture")
+}
+
+/// The fixture's topic edges, as `(from, to, calls, example)`.
+fn edges_of(map: &DependencyMap) -> Vec<(&str, &str, usize, &str)> {
+    map.topics()
+        .iter()
+        .map(|edge| {
+            (
+                edge.from.as_str(),
+                edge.to.as_str(),
+                edge.calls,
+                edge.example.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// RED (T-CENSUS-FOLLOWS-ASSOCIATED-TYPE-CALLS, 2026-10-28) — **a call through a generic's
+/// associated type reaches the bound trait's impl on the one type the product impls bind it to;
+/// one the census cannot follow to one implementation is listed by kind.**
+///
+/// Row 83 listed every call through `B::Glass` as not followed (567 sites in bt-app: the window
+/// seam's `renderer`, `window`, `gpu`, `compositor`, … fields). What it reaches is in the index:
+/// the product `impl Backend for Native` binds `type Glass = …`, and the bound trait's impl on
+/// that type is the seam's forward. `frame.rs`'s four calls — through a field of `B::Glass`, a
+/// field of `B::Device`, a `G::Device` parameter (`Device` declared by two traits, both bound to
+/// `Gpu`), and `B::Glass::paint` by its path — are edges into `seam.rs`, never to the other
+/// package's inherent `paint`/`dev`, and the test-only `Headless` binds nothing the product has.
+/// `lanes.rs` holds the refusals — `Answer` bound to two types, `Load` to an impl's own generic,
+/// `Part` by no impl — and `light`'s `bulb.glow()`, which reaches `Glow`'s provided method, since
+/// `Bulb`'s impl does not write it.
+///
+/// `choir`'s `voice.hum()` is refused (`Voice` bound to two types) though `hum` is only a provided
+/// method: a product provided method's name is one of the package's, so its refusal is listed
+/// (the review's N1).
+///
+/// RED before: no edge; seven calls listed as "a call through an associated type", and `light`'s
+/// `glow` (no impl of the package declares the name) dropped without a row; before the review
+/// fold, `choir`'s refusal dropped without a row the same way. MUTATION:
+/// in `Resolver::through_binding`, let an inherent method of the bound type answer (drop the
+/// `trait_name` filter) — `paint`/`dev` reach the other package's inherent methods and the edge is
+/// gone; count the test-only impl's bindings (drop `binding.product`) — `Glass` and `Device` are
+/// bound to two types each and refused; follow only an associated type bound by exactly one impl
+/// — `Device` (two bindings, one type) is refused.
+#[test]
+fn a_call_through_an_associated_type_reaches_the_bound_traits_impl_on_its_product_binding() {
+    let (index, census) = assoc_fixture();
+    let map = DependencyMap::of(&census, &index);
+    assert_eq!(
+        edges_of(&map),
+        [(
+            "runtime/frame.rs",
+            "seam.rs",
+            4,
+            "crate::runtime::frame::Window::draw -> crate::seam::<Gpu as Device>::dev"
+        )]
+    );
+    assert_eq!(
+        not_followed(&census),
+        [
+            (
+                "ask",
+                "speak",
+                "an associated type the product impls bind to types that differ: `O::Answer` \
+                 (`Loud`, `Quiet`)"
+            ),
+            (
+                "carry",
+                "speak",
+                "an associated type an impl binds to its own generic, which the census follows \
+                 to no implementation: `C::Load` (`A`)"
+            ),
+            (
+                "choir",
+                "hum",
+                "an associated type the product impls bind to types that differ: `C::Voice` \
+                 (`Loud`, `Quiet`)"
+            ),
+            (
+                "lone",
+                "speak",
+                "an associated type no product impl binds, which the census follows to no \
+                 implementation: `L::Part`"
+            ),
+        ]
+    );
+    let light: Vec<String> = census
+        .calls()
+        .iter()
+        .filter(|row| row.caller.function == "light")
+        .flat_map(|row| row.callees.iter().map(|callee| callee.key()))
+        .collect();
+    assert_eq!(light, ["crate::lanes::Glow::glow"]);
 }

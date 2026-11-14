@@ -276,24 +276,26 @@ fn the_theme_a_window_opens_in_is_the_one_the_settings_file_names() {
 /// at exactly the moment the first pane is about to be asked what colour it
 /// is standing on.
 ///
-/// Mutation: move `set_theme` back below `create_window`, or resolve from the
-/// window again.
+/// What the settling leaves in force — the contrast theme's canvas, else the
+/// stored pair's — is held by
+/// `the_first_canvas_is_settled_from_the_contrast_theme_and_the_stored_pair`
+/// (T-HIGH-CONTRAST, 2026-10-29, where the steps moved into
+/// `settle_the_first_canvas` from this body). The text order this test used to
+/// read there (the pair before `set_theme`) is not a hazard: `set_schemes`
+/// refreshes the theme's cached background (observed 2026-10-29, a mutation
+/// moving the pair below `set_theme` stays green).
+///
+/// Mutation: move `settle_the_first_canvas` back below `create_window`, or
+/// resolve from the window again.
 #[test]
 fn the_canvas_is_in_force_before_the_window_is_made() {
     let body = method_body("Runtime", "create");
     let themed = body
-        .find("set_theme(resolved_theme)")
+        .find("settle_the_first_canvas(")
         .expect("`Runtime::create` puts a canvas in force");
     let made = body
         .find("create_window(")
         .expect("`Runtime::create` creates the window");
-    let schemes = body
-        .find("adopt_stored_schemes(")
-        .expect("`Runtime::create` adopts the stored scheme pair");
-    assert!(
-        schemes < themed,
-        "the pair is adopted before the theme picks one of it"
-    );
     assert!(
         themed < made,
         "the canvas is settled before the window exists, or the first frame is \
@@ -318,7 +320,7 @@ fn startup_polls_pty_until_the_first_text_frame_is_presented() {
 /// `Restart shell` read only the shell's OSC 7 report, so a pane opened by
 /// `New terminal in folder…` (or split off into a folder) whose shell has no
 /// integration restarted at its profile's default folder. The ladder is
-/// [`LeafSession::place_for_a_new_shell`]: the report, else the folder the
+/// [`ShellSession::place_for_a_new_shell`]: the report, else the folder the
 /// spawn put the shell down in, except the shell's-own-home mark, which is
 /// handed on as nothing so the next spawn asks for the home again.
 ///
@@ -330,7 +332,7 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
     // RED (coordinator's ruling 2026-10-05) — **a pane opened in a named folder hands that folder
     // on as named**, so Restart shell, Duplicate tab, Duplicate pane and the splits stand there
     // under Home and a fixed folder too; a pane not born that way hands its folder on as carried
-    // and keeps the profile's rule. The leaf's half is `LeafSession::seed_place_for_a_new_shell`;
+    // and keeps the profile's rule. The leaf's half is `ShellSession::seed_place_for_a_new_shell`;
     // `profiles::place_for` weighs it (pinned by
     // `every_road_that_names_a_folder_opens_there_whatever_the_profile_says`).
     //
@@ -339,17 +341,17 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
     let born_in = PathBuf::from(r"D:\项目\clicked");
     let named = {
         let mut leaf = leaf_saying("no report from this shell");
-        leaf.launch.spawn_place = Some(born_in.clone());
-        leaf.launch.born_named = true;
+        leaf.session.launch.spawn_place = Some(born_in.clone());
+        leaf.session.launch.born_named = true;
         leaf
     };
     let carried = {
         let mut leaf = leaf_saying("no report from this shell either");
-        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf.session.launch.spawn_place = Some(born_in.clone());
         leaf
     };
     let fixed = profiles::StartAt::Fixed(PathBuf::from(r"E:\固定"));
-    let restarted_in = |leaf: &LeafSession| {
+    let restarted_in = |leaf: &TerminalPane| {
         struct Nowhere;
         impl bt_pty::ShellEnvironment for Nowhere {
             fn var_os(&self, _: &str) -> Option<std::ffi::OsString> {
@@ -363,18 +365,22 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
             &fixed,
             &profiles::StartingDir::AccountHome,
             profiles::PathNamespace::Windows,
-            restart_seed(&leaf.launch.profile, leaf.seed_place_for_a_new_shell()).cwd,
+            restart_seed(
+                &leaf.session.launch.profile,
+                leaf.session.seed_place_for_a_new_shell(),
+            )
+            .cwd,
             &Nowhere,
         )
         .working_directory
     };
     assert_eq!(
-        named.seed_place_for_a_new_shell(),
+        named.session.seed_place_for_a_new_shell(),
         Some(profiles::SeedPlace::Named(born_in.clone()))
     );
     assert_eq!(restarted_in(&named), Some(born_in.clone()));
     assert_eq!(
-        carried.seed_place_for_a_new_shell(),
+        carried.session.seed_place_for_a_new_shell(),
         Some(profiles::SeedPlace::Carried(born_in))
     );
     assert_eq!(
@@ -390,12 +396,12 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
             "\u{1b}]7;file://localhost{}\u{7}",
             host_uri_path(r"D:\Developer\elsewhere")
         ));
-        leaf.launch.spawn_place = Some(PathBuf::from(r"D:\项目\clicked"));
-        leaf.launch.born_named = true;
+        leaf.session.launch.spawn_place = Some(PathBuf::from(r"D:\项目\clicked"));
+        leaf.session.launch.born_named = true;
         leaf
     };
     assert_eq!(
-        reported.place_for_a_new_tab_beside(),
+        reported.session.place_for_a_new_tab_beside(),
         Some(profiles::SeedPlace::Carried(host_path(
             r"D:\Developer\elsewhere"
         ))),
@@ -409,11 +415,15 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
 
     let silent = {
         let mut leaf = leaf_saying("no report from this shell");
-        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf.session.launch.spawn_place = Some(born_in.clone());
         leaf
     };
     assert_eq!(
-        restart_seed(&silent.launch.profile, silent.seed_place_for_a_new_shell()).cwd,
+        restart_seed(
+            &silent.session.launch.profile,
+            silent.session.seed_place_for_a_new_shell()
+        )
+        .cwd,
         Some(profiles::SeedPlace::Carried(born_in.clone())),
         "the folder the pane was born in, not the profile's default"
     );
@@ -421,14 +431,14 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
     let reported = {
         let mut leaf = leaf_saying(&format!(
             "\u{1b}]7;file://localhost{}\u{7}",
-            host_uri_path(r"D:\Developer\folio-terminal")
+            host_uri_path(r"D:\Developer\lunar-workshop")
         ));
-        leaf.launch.spawn_place = Some(born_in.clone());
+        leaf.session.launch.spawn_place = Some(born_in.clone());
         leaf
     };
     assert_eq!(
-        reported.place_for_a_new_shell(),
-        Some(host_path(r"D:\Developer\folio-terminal")),
+        reported.session.place_for_a_new_shell(),
+        Some(host_path(r"D:\Developer\lunar-workshop")),
         "a report is the first rung and beats where the shell was born"
     );
 
@@ -436,10 +446,13 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
     // place equal to the home mark as the shell's home (round 2), pinned in `profiles::tests`.
     let at_home = {
         let mut leaf = leaf_saying("no report from this shell either");
-        leaf.launch.spawn_place = Some(PathBuf::from("~"));
+        leaf.session.launch.spawn_place = Some(PathBuf::from("~"));
         leaf
     };
-    assert_eq!(at_home.place_for_a_new_shell(), Some(PathBuf::from("~")));
+    assert_eq!(
+        at_home.session.place_for_a_new_shell(),
+        Some(PathBuf::from("~"))
+    );
 }
 
 /// RED (F-SWEEP-2-048, owner ruling 2026-10-05) — **`folio --with-environment .` opens its pane
@@ -604,6 +617,136 @@ fn the_restart_is_registered_from_the_first_window_alone() {
     );
 }
 
+/// RED (plan row 191; the coordinator's ruling of 2026-11-03 on the clean-VM reboot) — **the
+/// launch asks the system to end Folio before the processes at the default shutdown level, once,
+/// at `SHUTDOWN_LEVEL`**: on the VM's reboot without it the shells' fate was the system's order;
+/// with it Folio was ended first, its shells exited with code 0 after it, and the layout on disk
+/// was unchanged.
+///
+/// MUTATION: ask at `0x280` (the default) — the level is not above every console process's;
+/// ask twice — two records.
+#[test]
+fn the_launch_asks_to_be_ended_before_the_shells_in_its_panes() {
+    let application = restart_application("launch-shutdown-level");
+    application
+        .folio
+        .ask_to_be_ended_before_the_shells(&application.event_loop);
+    let asked: Vec<u32> = application
+        .event_loop
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::headless::WindowEffect::ShutdownLevelAsked { level } => Some(level),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asked,
+        [bt_platform::session_end::SHUTDOWN_LEVEL],
+        "one ask, at the level above the default"
+    );
+}
+
+/// RED (plan row 191) — **the shutdown level is asked for at the launch's first window and
+/// nowhere else**, in the shape of [`the_restart_is_registered_from_the_first_window_alone`]:
+/// resolved by bt-source's call graph, the one product caller of
+/// `FolioApp::ask_to_be_ended_before_the_shells` is `resumed`, whose first-window block runs once
+/// a process.
+///
+/// MUTATION (plant `plant-191-i-the-level-never-asked.py`): delete the call in `resumed` — no
+/// caller, and a reboot is back to the system's order.
+#[test]
+fn the_shutdown_level_is_asked_from_the_first_window_alone() {
+    assert_eq!(
+        crate::test_support::resolved_callers_of("FolioApp", "ask_to_be_ended_before_the_shells"),
+        std::collections::BTreeSet::from(["crate::FolioApp::resumed".to_owned()]),
+        "the first window asks, and nothing else does"
+    );
+}
+
+/// The flags of each registration the headless loop recorded since it was last read.
+fn registered_flags(application: &crate::headless::HeadlessApplication) -> Vec<u32> {
+    application
+        .event_loop
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            crate::headless::WindowEffect::RestartRegistered { flags } => Some(flags),
+            _ => None,
+        })
+        .collect()
+}
+
+/// RED (0.4.10 plan row 22a, T-START-AT-LOGON-SWITCH; R10) — **while this copy's sign-in entry is
+/// on, the registration leaves the reboot's restart to it**: the entry starts Folio at that
+/// sign-in, and Windows' restart beside it would be a second plain start, which opens a window.
+/// The row lands after the first window's registration, so a round or a press that moves it
+/// across `On` asks again, and one that leaves the flags as they were asks nothing.
+///
+/// MUTATION (`plant-22-restart-flags-unchanged.py`): the flags ignore the row
+/// (`start_at_sign_in::restart_flags_for`) — the reboot's restart stays beside the entry.
+#[test]
+fn the_restart_registration_leaves_the_reboot_to_this_copys_sign_in_entry() {
+    use crate::start_at_sign_in::SignInRow;
+    use bt_platform::session_end::{RESTART_FLAGS, RESTART_NO_PATCH, RESTART_NO_REBOOT};
+    let mut application = restart_application("restart-sign-in");
+    let app = application.folio.app.as_mut().expect("the application");
+    app.start_at_sign_in = SignInRow::On;
+    application
+        .folio
+        .register_for_restart_held_by(&application.event_loop, |_| false);
+    let registered = registered_flags(&application);
+    let [flags] = registered[..] else {
+        panic!("one registration: {registered:?}")
+    };
+    assert_eq!(
+        flags,
+        RESTART_FLAGS | RESTART_NO_REBOOT,
+        "no restart after the reboot beside the entry: {flags:#x}"
+    );
+    assert_eq!(
+        flags & RESTART_NO_PATCH,
+        0,
+        "the installer's close still restarts it"
+    );
+
+    // The row moved from what the first window registered with: asked again, once.
+    application
+        .folio
+        .register_restart_after_sign_in_moved(&application.event_loop, Some(SignInRow::Unknown));
+    assert_eq!(
+        registered_flags(&application),
+        [RESTART_FLAGS | RESTART_NO_REBOOT]
+    );
+    // Another copy's entry, Off, turned off in Startup apps: the ruled flags, asked again.
+    for row in [
+        SignInRow::OnElsewhere,
+        SignInRow::Off,
+        SignInRow::TurnedOffBySystem,
+    ] {
+        application
+            .folio
+            .app
+            .as_mut()
+            .expect("the application")
+            .start_at_sign_in = row;
+        application
+            .folio
+            .register_restart_after_sign_in_moved(&application.event_loop, Some(SignInRow::On));
+        assert_eq!(registered_flags(&application), [RESTART_FLAGS], "{row:?}");
+    }
+    // A move that leaves the flags as they were, and a wake with no `App` before it: nothing.
+    application
+        .folio
+        .register_restart_after_sign_in_moved(&application.event_loop, Some(SignInRow::NotOurs));
+    application
+        .folio
+        .register_restart_after_sign_in_moved(&application.event_loop, None);
+    assert_eq!(registered_flags(&application), Vec::<u32>::new());
+}
+
 /// A headless application over one tab, its ledger emptied, for the restart's tests.
 fn restart_application(tag: &str) -> crate::headless::HeadlessApplication {
     crate::test_support::on_the_window_thread();
@@ -671,7 +814,10 @@ fn a_trial_asks_for_the_restart_only_once_committed() {
         .as_mut()
         .expect("the application")
         .release_trial_writes(vec![Writer::RestartRegistration], &|| {
-            crate::register_restart_now::<crate::headless::Headless>(event_loop);
+            crate::register_restart_now::<crate::headless::Headless>(
+                event_loop,
+                crate::start_at_sign_in::SignInRow::Unknown,
+            );
         });
     assert_eq!(registrations(&application), 1, "the commit asks, once");
 }
@@ -704,7 +850,7 @@ fn a_window_that_saves_nothing_asks_for_no_restart() {
         .app
         .as_mut()
         .expect("the application")
-        .session_store = store;
+        .storage_on(store);
     application
         .folio
         .register_for_restart_held_by(&application.event_loop, |_| false);

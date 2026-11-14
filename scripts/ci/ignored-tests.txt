@@ -21,7 +21,8 @@
 #     2026-09-21 when §7.30 gained the readings that settle it.
 #   * seven in `bt-app`: one writes a picture for a person to look at, two
 #     are the large-document typing benchmarks (T-MD-TYPING-PATH; the eager one is the reference), which time
-#     the whole input-to-layout path on docs/DESIGN.md and prints a table --
+#     the whole input-to-layout path on docs/DESIGN.md (the viewport one on the three Chinese
+#     pages too, the reading the Chinese frame-budget test asserted until 0.4.10 row 78) and prints a table --
 #     wall-clock on a shared machine, so it is read by a person and never
 #     asserted; the counted-work pins beside it run in the normal suite. Run
 #     it with `cargo test -p bt-app --bin folio md_typing_path_benchmark -- --ignored --nocapture`.

@@ -6,13 +6,13 @@
 use super::*;
 use crate::headless::key_down;
 use crate::headless::{Headless, HeadlessApplication, HeadlessFolio};
-use crate::runtime::pointer::{CaptureOwner, PointerCapture};
+use crate::runtime::pointer::{CaptureOwner, FieldDrag, PointerCapture};
 use crate::test_support::{buffer_saying, cross_tab, host_spelling, seat_of, tab_with_a_preview};
 use crate::{
     DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragSource, FilePeekPress, FloatDrag,
-    FloatHeadPress, ImageDrag, LeafSession, LocalImageActivation, PanePress, PreviewBlockDrag,
-    PreviewBodyDrag, PreviewTextDrag, RowMiddlePress, RowPress, SelectionDrag, SelectionDragMode,
-    SpringGate, TabCarry, TabPress, TerminalColumnDrag, TerminalThumbDrag, VideoPicturePress,
+    FloatHeadPress, ImageDrag, LocalImageActivation, PanePress, PreviewBlockDrag, PreviewBodyDrag,
+    PreviewTextDrag, RowMiddlePress, RowPress, SelectionDrag, SelectionDragMode, SpringGate,
+    TabCarry, TabPress, TerminalColumnDrag, TerminalPane, TerminalThumbDrag, VideoPicturePress,
     preview, settings,
 };
 use bt_doc::Bias;
@@ -161,7 +161,63 @@ fn every_owner(on: On) -> Vec<CaptureOwner> {
             key: "notes.md".to_owned(),
             latch,
         }),
+        CaptureOwner::FieldSelection(FieldDrag::Name(RenameSubject::Tab(on.tab))),
+        CaptureOwner::FieldSelection(FieldDrag::Name(RenameSubject::WebAddress {
+            leaf: crate::LeafId {
+                tab: on.shell.tab,
+                seat: on.shell.seat,
+            },
+        })),
+        CaptureOwner::FieldSelection(FieldDrag::FindBar(crate::LeafId {
+            tab: on.shell.tab,
+            seat: on.shell.seat,
+        })),
+        CaptureOwner::FieldSelection(FieldDrag::GraphSearch(on.tab, on.surface)),
+        CaptureOwner::FieldSelection(FieldDrag::Settings(settings::SettingsTarget::Field(
+            settings::SettingsRow::QuakeCommand,
+        ))),
+        CaptureOwner::FieldSelection(FieldDrag::Palette),
+        CaptureOwner::FieldSelection(FieldDrag::GitPrompt),
     ]
+}
+
+/// **A drag across a name editor drawn on a pane** (C25 with a pane-bound subject, here a page's
+/// address field on `on`'s pane). It shares its kind's name with the drag across a tab's name, and
+/// the doors part the two: this one leaves the glass with its pane and goes with it, a tab's name
+/// does neither (0.4.9 plan row 179, review F2). The doors' lists name it by this label.
+const PANE_RENAME: &str = "FieldSelection on a pane";
+
+/// **A drag across the find bar** (C25, row 180), whose capsule stands on `on`'s pane: the doors
+/// treat it as [`PANE_RENAME`] is treated.
+const FIND_BAR: &str = "FieldSelection in the find bar";
+
+/// **A drag across a commit graph's search** (C25, row 180), on `on`'s surface: the doors treat it
+/// as a selection drawn on that surface (`EditSelection`) is treated.
+const GRAPH_SEARCH: &str = "FieldSelection in a graph's search";
+
+/// **A drag across a field of the settings sheet** (C25, row 180): gone with the sheet, as the
+/// sheet's slider is.
+const SETTINGS_FIELD: &str = "FieldSelection in the settings sheet";
+
+/// **A drag across the palette's box** and **across a git menu's prompt** (C25, row 180): popups of
+/// the window, which no tab, pane or surface takes away.
+const PALETTE: &str = "FieldSelection in the palette";
+const GIT_PROMPT: &str = "FieldSelection in a git prompt";
+
+/// The name the doors' lists know `owner` by: its kind's name, except for C25's arms, which the
+/// doors part by what the field is drawn on.
+fn label(owner: &CaptureOwner) -> &'static str {
+    match owner {
+        CaptureOwner::FieldSelection(FieldDrag::Name(RenameSubject::WebAddress { .. })) => {
+            PANE_RENAME
+        }
+        CaptureOwner::FieldSelection(FieldDrag::FindBar(_)) => FIND_BAR,
+        CaptureOwner::FieldSelection(FieldDrag::GraphSearch(..)) => GRAPH_SEARCH,
+        CaptureOwner::FieldSelection(FieldDrag::Settings(_)) => SETTINGS_FIELD,
+        CaptureOwner::FieldSelection(FieldDrag::Palette) => PALETTE,
+        CaptureOwner::FieldSelection(FieldDrag::GitPrompt) => GIT_PROMPT,
+        owner => owner.name(),
+    }
 }
 
 /// Every owner kind's name, in §1.2's order.
@@ -191,6 +247,13 @@ fn every_name() -> Vec<&'static str> {
         "SettingsSlider",
         "SettingsMenuBar",
         "RowMiddlePress",
+        "FieldSelection",
+        PANE_RENAME,
+        FIND_BAR,
+        GRAPH_SEARCH,
+        SETTINGS_FIELD,
+        PALETTE,
+        GIT_PROMPT,
     ]
 }
 
@@ -215,7 +278,7 @@ fn two_tabs(tag: &str) -> HeadlessApplication {
 
 /// The pane of the tab in front at `index` among its shells, as the shell a press is handed to.
 fn shell(runtime: &Runtime<'_, Headless>, index: usize) -> PasteTarget {
-    let (seat, leaf): (&SeatId, &LeafSession) = runtime
+    let (seat, leaf): (&SeatId, &TerminalPane) = runtime
         .sessions
         .iter()
         .nth(index)
@@ -223,7 +286,7 @@ fn shell(runtime: &Runtime<'_, Headless>, index: usize) -> PasteTarget {
     PasteTarget {
         tab: runtime.id,
         seat: *seat,
-        incarnation: leaf.incarnation,
+        incarnation: leaf.session.incarnation,
     }
 }
 
@@ -285,13 +348,13 @@ fn each_owner_against_and_gone(
     let count = owners(&application.runtime()).len();
     for which in 0..count {
         let owner = owners(&application.runtime()).swap_remove(which);
-        let name = owner.name();
+        let (name, label) = (owner.name(), label(&owner));
         hold(&mut application.runtime(), owner);
         run(application);
         let (held, ended) = after(&mut application.runtime());
-        let expected = if ends.contains(&name) {
+        let expected = if ends.contains(&label) {
             (None, vec![(name, ending)])
-        } else if gone_too.contains(&name) {
+        } else if gone_too.contains(&label) {
             (None, vec![(name, "owner gone")])
         } else {
             (Some(name), Vec::new())
@@ -300,8 +363,9 @@ fn each_owner_against_and_gone(
     }
 }
 
-/// The owner kinds whose payload names a tab-bound surface (R-9's *off the glass*).
-const TAB_BOUND: [&str; 16] = [
+/// The owner kinds whose payload names a tab-bound surface (R-9's *off the glass*). The last is
+/// the formula block, which names no pane, and so no zoom takes it.
+const TAB_BOUND: [&str; 19] = [
     "Divider",
     "PanePress",
     "RowPress",
@@ -312,22 +376,26 @@ const TAB_BOUND: [&str; 16] = [
     "BlockThumb",
     "PicturePan",
     "EditSelection",
+    GRAPH_SEARCH,
     "RenderedSelection",
     "TerminalThumb",
     "TerminalFootMark",
+    PANE_RENAME,
+    FIND_BAR,
     "Route::Local",
     "Route::Forward",
     "Route::MathBlock",
 ];
 
 /// The gestures held on a preview surface's document.
-const ON_A_DOCUMENT: [&str; 7] = [
+const ON_A_DOCUMENT: [&str; 8] = [
     "VideoBar",
     "VideoPicture",
     "PreviewBodyThumb",
     "BlockThumb",
     "PicturePan",
     "EditSelection",
+    GRAPH_SEARCH,
     "RenderedSelection",
 ];
 
@@ -385,6 +453,32 @@ fn each_door_ends_a_held_capture() {
         after(&mut application.runtime()),
         (Some("Divider"), Vec::new()),
         "a capture whose sample still holds is a hand still on it"
+    );
+    let _ = application.runtime().app.pointer_capture.take();
+
+    // The button came up and its release never reached the program (0.4.9 plan row 107): the
+    // same door, with the system's sample unchanged and the platform saying the button is up.
+    // Every owner lasts while its button is down, so every one is cancelled.
+    let buttons = |application: &mut HeadlessApplication, down: bool| {
+        let runtime = application.runtime();
+        let mut answers = runtime.window.window.answers.get();
+        answers.buttons_down = down;
+        runtime.window.window.answers.set(answers);
+    };
+    each_owner_against(
+        &mut application,
+        "the resize door, the button up",
+        "cancel",
+        &all,
+        |runtime| every_owner(on_pane(runtime, 0)),
+        |application| {
+            buttons(application, false);
+            application
+                .runtime()
+                .flush_pending_pty_resize(Instant::now())
+                .expect("the turn's resize door runs");
+            buttons(application, true);
+        },
     );
 
     // A scale change: the owners holding a pixel quantity taken at the press.
@@ -461,7 +555,7 @@ fn each_door_ends_a_held_capture() {
         &mut application,
         "a zoom",
         "off the glass",
-        &TAB_BOUND[..15],
+        &TAB_BOUND[..TAB_BOUND.len() - 1],
         |runtime| every_owner(on_pane(runtime, 1)),
         |application| {
             let mut runtime = application.runtime();
@@ -535,6 +629,7 @@ fn each_door_ends_a_held_capture() {
             "BlockThumb",
             "PicturePan",
             "EditSelection",
+            GRAPH_SEARCH,
             "RenderedSelection",
         ],
         floating,
@@ -563,6 +658,7 @@ fn each_door_ends_a_held_capture() {
             "BlockThumb",
             "PicturePan",
             "EditSelection",
+            GRAPH_SEARCH,
             "RenderedSelection",
         ],
         on_the_card,
@@ -574,7 +670,7 @@ fn each_door_ends_a_held_capture() {
         &mut application,
         "the settings sheet shut by the gear",
         "owner gone",
-        &["SettingsSlider", "SettingsMenuBar"],
+        &["SettingsSlider", "SettingsMenuBar", SETTINGS_FIELD],
         |runtime| every_owner(on_pane(runtime, 0)),
         |application| {
             let mut runtime = application.runtime();
@@ -634,21 +730,24 @@ fn each_door_ends_a_held_capture() {
         "BlockThumb",
         "PicturePan",
         "EditSelection",
+        GRAPH_SEARCH,
         "RenderedSelection",
         "TerminalThumb",
         "TerminalFootMark",
         "Route::Local",
         "Route::Forward",
+        PANE_RENAME,
+        FIND_BAR,
     ];
     for which in 0..all.len() {
         let mut application = two_tabs("ending-doors-pane");
         let owner = every_owner(on_pane(&application.runtime(), 1)).swap_remove(which);
-        let name = owner.name();
+        let (name, label) = (owner.name(), label(&owner));
         hold(&mut application.runtime(), owner);
         let mut runtime = application.runtime();
         let closing = shell(&runtime, 1).seat;
         runtime.close_pane(closing).expect("the pane closes");
-        let expected = if held_on_the_pane.contains(&name) {
+        let expected = if held_on_the_pane.contains(&label) {
             (None, vec![(name, "owner gone")])
         } else if name == "Divider" {
             // Not the pane's: the seat set's settle drops a divider whose layout changed, as it
@@ -689,6 +788,7 @@ fn each_door_ends_a_held_capture() {
             "BlockThumb",
             "PicturePan",
             "EditSelection",
+            GRAPH_SEARCH,
             "RenderedSelection",
             "TerminalThumb",
             "TerminalFootMark",
@@ -698,6 +798,12 @@ fn each_door_ends_a_held_capture() {
             // And the glance card, which the tab that comes in front takes down by its own door.
             "GlanceHeadPress",
             "GlanceThumb",
+            // A drag across the tab's name editor, gone with the tab its name is, and one across
+            // a name drawn on one of its panes — or across the find bar on one — gone with the
+            // tab that pane is in.
+            "FieldSelection",
+            PANE_RENAME,
+            FIND_BAR,
         ],
         |runtime| every_owner(on_pane(runtime, 0)),
         |application| {
@@ -788,9 +894,9 @@ fn a_new_parse_lets_go_of_the_block_thumb_and_keeps_the_selection() {
 }
 
 /// A shell still being born, which keeps what it is sent (`PaneBirth::typed`).
-fn a_shell_being_born() -> LeafSession {
+fn a_shell_being_born() -> TerminalPane {
     let mut leaf = crate::test_support::leaf_saying("SHELL");
-    leaf.life.begin_birth(crate::PaneBirth {
+    leaf.session.life.begin_birth(crate::PaneBirth {
         seed: crate::LeafSeed {
             profile: crate::profiles::DEFAULT_IDENTITY.to_owned(),
             ..crate::LeafSeed::default()
@@ -851,8 +957,16 @@ fn a_forwarded_press_is_told_its_button_came_up_from_its_last_report() {
             .values()
             .next()
             .expect("the shell");
-        let typed = String::from_utf8(leaf.life.birth().expect("in birth").typed.borrow().clone())
-            .expect("UTF-8 was sent");
+        let typed = String::from_utf8(
+            leaf.session
+                .life
+                .birth()
+                .expect("in birth")
+                .typed
+                .borrow()
+                .clone(),
+        )
+        .expect("UTF-8 was sent");
         assert_eq!(
             typed, "\x1b[<0;3;2m",
             "{door}: the program hears its button come up"
@@ -901,4 +1015,47 @@ fn a_tab_switch_puts_a_held_dividers_ratio_back() {
         Some(at_the_press),
         "the split is back at the ratio it had when the press began"
     );
+}
+
+/// RED (0.4.9 plan row 107) — **a held gesture asks for every button that can
+/// be holding it**: what the platform reports, which on a Mac includes the
+/// left button for a gesture taken as the secondary press, and is exactly the
+/// set of buttons `input::pressed_button` maps onto it.
+///
+/// MUTATION: answer only the gesture's own button — a Mac control-click held
+/// on a mouse-tracking program reads its right button as up and is cancelled
+/// under the hand.
+#[test]
+fn a_held_gesture_asks_for_every_button_that_can_be_holding_it() {
+    let buttons = [
+        MouseButton::Left,
+        MouseButton::Right,
+        MouseButton::Middle,
+        MouseButton::Back,
+        MouseButton::Forward,
+    ];
+    for platform in [
+        bt_platform::HostPlatform::Windows,
+        bt_platform::HostPlatform::MacOs,
+    ] {
+        for latched in buttons {
+            let asked: Vec<MouseButton> = super::reported_buttons_of(latched, platform).collect();
+            let pressing: Vec<MouseButton> = buttons
+                .into_iter()
+                .filter(|reported| {
+                    [ModifiersState::empty(), ModifiersState::CONTROL]
+                        .into_iter()
+                        .any(|modifiers| {
+                            crate::input::pressed_button(*reported, modifiers, platform) == latched
+                        })
+                })
+                .collect();
+            let mut sorted = asked.clone();
+            sorted.sort_by_key(|button| format!("{button:?}"));
+            let mut expected = pressing;
+            expected.sort_by_key(|button| format!("{button:?}"));
+            assert_eq!(sorted, expected, "{latched:?} on {platform:?}");
+            assert_eq!(asked[0], latched, "the gesture's own button is asked first");
+        }
+    }
 }

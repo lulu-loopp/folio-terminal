@@ -2636,8 +2636,8 @@ mod tests {
 
     #[test]
     fn r2_extreme_local_path_stays_at_the_coalesced_conpty_viewport() {
-        const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
-        const PROMPT: &str = "(base) PS D:\\Developer\\folio-terminal> ";
+        const WARNING: &str = "Did not find path entry D:\\Kit\\Base\\anaconda3\\bin";
+        const PROMPT: &str = "(base) PS D:\\Developer\\lunar-workshop> ";
         let input = format!("{WARNING}\r\n{PROMPT}");
 
         let mut direct = TerminalAdapter::new(nz(104), nz(26));

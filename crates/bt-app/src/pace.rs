@@ -295,11 +295,14 @@ impl FrameClock {
     /// still moving" predicates — the same ones their deadlines are made of —
     /// and therefore `false` on the very turn after the last one lands. The
     /// first version of this was set by the *gate*, on the reasoning that an
-    /// animation only asks when it is animating; four advancers ask before they
-    /// have established they have anything at all, so a window with an empty tip
-    /// host and an empty float host marked itself running on every turn for
+    /// animation only asks when it is animating; four advancers then asked before
+    /// they had established they had anything at all, so a window with an empty
+    /// tip host and an empty float host marked itself running on every turn for
     /// ever, and every ordinary keystroke then rebuilt the whole interface. A
-    /// question is not evidence. This is.
+    /// question is not evidence. This is. (Since T-ADVANCERS-ASK-ONLY-WITH-WORK,
+    /// and since T-STRIP-ASKS-ON-ITS-TICK for the tab strip too, every advancer
+    /// asks only with work, but the rule stands: the answer here
+    /// is the journeys' own predicates, never who asked.)
     pub fn note_running(&mut self, lanes: Lanes) {
         self.running = lanes;
     }

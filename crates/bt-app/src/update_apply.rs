@@ -49,11 +49,11 @@
 //!   trial beside a candidate, never a rollback under it;
 //! * [`OWNER_FILE`] — **the window's owner** (U-34): the one process that has
 //!   taken the duty that a Folio window follows *Restart to update*, handed
-//!   from O to P explicitly ([`take_the_window`]); the mark names a recorded
+//!   from O to P explicitly ([`take_the_window_by`]); the mark names a recorded
 //!   live owner, the lock names a live unrecorded owner, and the journal says
 //!   whether an owner whose lock is now gone already took its road; recovery
 //!   that finds `Handoff` leaves it to a live process the mark names or whose
-//!   election lock is still held ([`window_holder`]), writes nothing and opens
+//!   election lock is still held ([`window_holder_on`]), writes nothing and opens
 //!   nothing;
 //! * [`ExitGuard`] — **the one way a road process leaves** (U-34): at its
 //!   exit, whatever the reason, a successor it holds still running opens
@@ -73,12 +73,14 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_flip::{self, Ask, Running};
 use bt_platform::install_txn::{self, Hold};
+use bt_platform::poll_clock::{PollClock, WallPollClock};
 
 use crate::cli;
 use crate::update_txn::{
@@ -338,30 +340,108 @@ pub(crate) fn write_journal(
     within: Duration,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
-    let began = Instant::now();
+    write_journal_on(
+        WaitWithin {
+            worker,
+            within,
+            clock: &WallClock,
+        },
+        None,
+        Spelling::Whole,
+        path,
+        bytes,
+        say,
+    )
+}
+
+/// **How a journal write's failure is said** ([`write_journal_on`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spelling {
+    /// The install door's whole sentence, its path included — the applier's
+    /// log ([`write_journal`]).
+    Whole,
+    /// [`failure_words`]: no path — `diagnostics.log`, the Prepare's.
+    WithoutPath,
+}
+
+impl Spelling {
+    fn of(self, failure: &install_txn::Failure) -> String {
+        match self {
+            Self::Whole => failure.to_string(),
+            Self::WithoutPath => failure_words(failure),
+        }
+    }
+}
+
+/// **A failure of the install door in the words `diagnostics.log` gets**: the
+/// door's step and the operating system's error, never the path (it names
+/// the account's folders) — `install_txn rename: Access is denied. (os error
+/// 5)` (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE).
+pub(crate) fn failure_words(failure: &install_txn::Failure) -> String {
+    format!("install_txn {}: {}", failure.stage.name(), failure.error)
+}
+
+/// **[`write_journal`], on `wait`'s clock, asked again only while `cancelled`
+/// (when there is one) is not set, and every failure said in `spelling`**
+/// (T-UPDATE-PREPARE-REVALIDATION-RESUME-FLAKE): the Prepare's journal
+/// writes ride a hold the way the applier's do, read and paused on the clock
+/// its road was given ([`WallClock`] in the product), stop asking once the
+/// job has cancelled the transaction (its `Poster`'s flag), and say each
+/// failure without its path. [`write_journal`] is this with the wall clock,
+/// no cancel, and a failure's whole sentence.
+///
+/// # Errors
+/// As [`write_journal`]; a hold still there when the cancel was seen is
+/// answered as one that outlasted the window.
+pub(crate) fn write_journal_on(
+    wait: WaitWithin<'_>,
+    cancelled: Option<&AtomicBool>,
+    spelling: Spelling,
+    path: &Path,
+    bytes: &[u8],
+    say: &mut dyn FnMut(&str),
+) -> Result<(), Unwritten> {
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
+    let began = clock.now();
     let mut write = install_txn::DurableWrite::new(path, bytes);
+    // The round's failure is spelled at once; whether it was a hold is read
+    // off it first, and taken back by the round's one reading of it.
+    let held = std::cell::Cell::new(None);
     let written = asked_while_held(
         within,
         &Asked::JOURNAL,
-        || write.ask(),
-        held_refusal,
-        &mut || began.elapsed(),
+        || {
+            write.ask().map_err(|failure| {
+                held.set(held_refusal(&failure));
+                spelling.of(&failure)
+            })
+        },
+        |_| held.take(),
+        &mut || clock.now().saturating_duration_since(began),
         &mut |pause| {
-            bt_platform::wait::sleep_within(worker, pause);
-            true
+            clock.pause(worker, pause);
+            !cancelled.is_some_and(|flag| flag.load(Ordering::SeqCst))
         },
         say,
     );
-    given_up_said(written, || write.give_up(), say)
+    given_up_said(
+        written,
+        || write.give_up().map_err(|failure| spelling.of(&failure)),
+        say,
+    )
 }
 
 /// **A journal write's end**: when it did not land, the write is given up
 /// (`give_up`: its kept temporary removed), and a removal refused is said in a
 /// line of its own, after what the rounds said; `written` is the answer either
 /// way.
-fn given_up_said(
+fn given_up_said<E: fmt::Display>(
     written: Result<(), Unwritten>,
-    give_up: impl FnOnce() -> Result<(), install_txn::Failure>,
+    give_up: impl FnOnce() -> Result<(), E>,
     say: &mut dyn FnMut(&str),
 ) -> Result<(), Unwritten> {
     if written.is_err()
@@ -378,11 +458,13 @@ fn given_up_said(
 /// file), and while the move is refused because another program holds the
 /// file open (`install_txn::Failure::refused_while_open`: Windows only) — an
 /// on-access scan of the freshly staged set, an indexer, a sync tool — ask
-/// the same move again through `worker`'s wait door until `within` has passed
-/// since the first ask (T-UPDATE-MOVE-HELD-RETRY: the flip's and the
-/// rollback's moves, [`Limits::journal_held_within`], [`JOURNAL_HELD_WITHIN`]
-/// in the product — E4's window and its reason, counted per move as E4
-/// counts it per write). Every round asks the one move: nothing else is moved
+/// the same move again through the wait's door until its `within` has passed
+/// on its clock since the first ask (T-UPDATE-MOVE-HELD-RETRY: the flip's and
+/// the rollback's moves, [`Limits::journal_held_within`],
+/// [`JOURNAL_HELD_WITHIN`] in the product — E4's window and its reason,
+/// counted per move as E4 counts it per write; the window read and the pauses
+/// made on [`WaitWithin::clock`], [`WallClock`] in the product:
+/// T-UPDATE-APPLY-FLIP-HOLD-FLAKE). Every round asks the one move: nothing else is moved
 /// between two rounds, and a refusal that is not a hold — the destination
 /// already taken (I1′), a flush after a rename that landed — is answered at
 /// once. **Each refused round says one line** through `say`, `opening` first
@@ -393,15 +475,19 @@ fn given_up_said(
 /// The last failure, and the refusal when it was a hold that outlasted the
 /// window.
 pub(crate) fn move_held_within(
-    worker: &WorkerCtx,
+    wait: WaitWithin<'_>,
     from: &Path,
     to: &Path,
-    within: Duration,
     opening: &str,
     say: &mut dyn FnMut(&str),
     look: &mut dyn FnMut(),
 ) -> Result<(), Unwritten> {
-    let began = Instant::now();
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
+    let began = clock.now();
     asked_while_held(
         within,
         &Asked {
@@ -410,14 +496,24 @@ pub(crate) fn move_held_within(
         },
         || install_txn::durable_move(from, to),
         held_refusal,
-        &mut || began.elapsed(),
+        &mut || clock.now().saturating_duration_since(began),
         &mut |pause| {
             look();
-            bt_platform::wait::sleep_within(worker, pause);
+            clock.pause(worker, pause);
             true
         },
         say,
     )
+}
+
+/// **A bounded wait on a worker's door**: the worker whose door it pauses
+/// through, how long it lasts, and the clock it is read and paused on —
+/// [`WallClock`] in the product (T-UPDATE-APPLY-FLIP-HOLD-FLAKE).
+#[derive(Clone, Copy)]
+pub(crate) struct WaitWithin<'a> {
+    pub(crate) worker: &'a WorkerCtx,
+    pub(crate) within: Duration,
+    pub(crate) clock: &'a dyn WaitClock,
 }
 
 /// **The system's refusal of a rename another program's hold refused**
@@ -545,6 +641,9 @@ pub(crate) struct Journaled<'w> {
     /// How long a write another program's hold refuses is asked again
     /// ([`write_journal`]).
     held_within: Duration,
+    /// **The clock a layout's held move is read and paused on**
+    /// ([`Self::held_door`]): [`WallClock`] in the product.
+    held_clock: &'w dyn WaitClock,
     pub(crate) journal: Journal,
     pub(crate) written: Vec<PhaseKind>,
     /// **The refusal of the last write another program's hold outlasted the
@@ -555,17 +654,20 @@ pub(crate) struct Journaled<'w> {
 
 impl<'w> Journaled<'w> {
     /// The journal `journal`, as read from the home `home`, written from
-    /// `worker`, a held write asked again for `held_within`.
+    /// `worker`, a held write asked again for `held_within`, a layout's held
+    /// move read and paused on `held_clock`.
     pub(crate) fn of(
         home: &Home,
         worker: &'w WorkerCtx,
         journal: Journal,
         held_within: Duration,
+        held_clock: &'w dyn WaitClock,
     ) -> Self {
         Self {
             path: home.journal(),
             worker,
             held_within,
+            held_clock,
             journal,
             written: Vec::new(),
             held: None,
@@ -576,11 +678,15 @@ impl<'w> Journaled<'w> {
         self.journal.body.phase.kind()
     }
 
-    /// **The worker this holder writes from, and its window for a held
-    /// file** — what a layout's moves are asked again through and for
-    /// ([`move_held_within`]).
-    pub(crate) fn held_door(&self) -> (&'w WorkerCtx, Duration) {
-        (self.worker, self.held_within)
+    /// **The worker this holder writes from, its window for a held file,
+    /// and the clock that window is read on** — what a layout's moves are
+    /// asked again through, for and on ([`move_held_within`]).
+    pub(crate) fn held_door(&self) -> WaitWithin<'w> {
+        WaitWithin {
+            worker: self.worker,
+            within: self.held_within,
+            clock: self.held_clock,
+        }
     }
 
     /// **Record `event` as `actor`**: the next phase by the protocol, allowed
@@ -752,15 +858,17 @@ pub(crate) fn unkept_said(txn: TxnId, version: &str, before: PhaseKind) -> Strin
 }
 
 /// **§C.4's authoritative test that O is gone**: the data directory `data`'s
-/// claim, tried until it is had and let go at once, sleeping `poll` between
-/// tries through the wait door, until `until`. A live holder or a transient
-/// sweep is asked about again; a claim that cannot be asked about is not
-/// (`ClaimRefusal::QueryDenied`: no answer is coming).
+/// claim, tried until it is had and let go at once, pausing `poll` between
+/// tries on `clock` (the road's [`WaitClock`]: the worker's wait door in the
+/// product, so a test sees the wait it lets go of), until `until`. A live
+/// holder or a transient sweep is asked about again; a claim that cannot be
+/// asked about is not (`ClaimRefusal::QueryDenied`: no answer is coming).
 ///
 /// # Errors
 /// Why O is taken to have stayed, as a sentence.
 pub(crate) fn wait_for_the_claim(
     worker: &WorkerCtx,
+    clock: &dyn WaitClock,
     data: &Path,
     poll: Duration,
     until: Instant,
@@ -775,11 +883,11 @@ pub(crate) fn wait_for_the_claim(
                 bt_platform::instance::ClaimRefusal::Held
                 | bt_platform::instance::ClaimRefusal::Sweeping,
             ) => {
-                let left = until.saturating_duration_since(Instant::now());
+                let left = until.saturating_duration_since(clock.now());
                 if left.is_zero() {
                     return Err("still held at the end of the wait".to_owned());
                 }
-                bt_platform::wait::sleep_within(worker, poll.min(left));
+                clock.pause(worker, poll.min(left));
             }
             Err(refusal) => return Err(format!("{refusal:?}")),
         }
@@ -888,7 +996,7 @@ pub(crate) fn reserve_last_trial(
         return Ok(Reserved::NotEligible);
     }
     let nonce = crate::update_job::mint_nonce();
-    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN);
+    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN, &WallClock);
     journaled.record(
         actor,
         &Event::TrialPlanned {
@@ -1071,7 +1179,7 @@ fn commit_last_trial_reading(
     }
     // On the trial's watch worker, whose lines it says through the watch's
     // own `say`.
-    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN);
+    let mut journaled = Journaled::of(home, worker, journal, JOURNAL_HELD_WITHIN, &WallClock);
     journaled.record(
         Actor::Trial,
         &Event::LastTrialReady { receipt, process },
@@ -1214,6 +1322,208 @@ impl WaitClock for CountedClock {
         TrialClock::pause(self, worker, pause);
     }
 }
+
+#[cfg(test)]
+impl CountedClock {
+    /// **A road's decision clock in a test whose synthetic trial acknowledges
+    /// the commit** (T-UPDATE-APPLY-FLIP-HOLD-FLAKE): its first pause lasts
+    /// until no receipt is left in `H\<txn>` — the trial's watch removed it,
+    /// [`note_unkept_after_trial_decision`]'s awaited end — within the suite's
+    /// patience (`lane::within_patience`); every later pause only moves the
+    /// clock. "Acknowledged in time" is the event, never a race between a
+    /// real window and the trial's thread; an acknowledgement that never
+    /// comes costs the patience once, and the window is then spent on the
+    /// count. It waits on less than the product does: the product's wait
+    /// also ends when no process runs from the program, or when a valid
+    /// receipt's trial no longer runs, and a test whose trial dies in the
+    /// first pause with its receipt left — or that leaves only an ill-formed
+    /// receipt beside a live process — spends the patience in that pause
+    /// before the next look; its verdict is the same.
+    pub(crate) fn awaiting_the_decision(home: &Home, txn: TxnId) -> Self {
+        let folder = home.transaction(txn);
+        Self::new(move |pause| {
+            if pause == 1 {
+                crate::lane::within_patience(|| !holds_a_receipt(&folder));
+            }
+        })
+    }
+}
+
+/// **A road's clock in a test that stops the road where the test needs it**
+/// (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT): a [`CountedClock`] whose
+/// first pause in which `here` holds tells the test (its [`Stopped`]) and
+/// lasts until the test says go, within the suite's patience; every other
+/// pause only moves the count. A road that waits for what the test holds is
+/// then seen waiting at that exact state — inside the wait, its deadline not
+/// moving — and the rest of the wait is spent on the count, never on the
+/// machine's speed.
+#[cfg(test)]
+impl CountedClock {
+    pub(crate) fn stopping_where(
+        mut here: impl FnMut() -> bool + Send + 'static,
+    ) -> (Self, Stopped) {
+        let (stopped, at) = std::sync::mpsc::channel();
+        let (go, gone) = std::sync::mpsc::channel();
+        let mut stopped = Some(stopped);
+        let clock = Self::new(move |_| {
+            if stopped.is_some() && here() {
+                let _ = stopped.take().map(|stopped| stopped.send(()));
+                crate::lane::receive(&gone, "the test's go to the road it stopped");
+            }
+        });
+        (clock, Stopped { at, go })
+    }
+}
+
+/// **The test's end of [`CountedClock::stopping_where`]**: the road stopped,
+/// and the go that lets it on.
+#[cfg(test)]
+pub(crate) struct Stopped {
+    at: std::sync::mpsc::Receiver<()>,
+    go: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(test)]
+impl Stopped {
+    /// The road is in its pause at the state, within the suite's patience; a
+    /// road that never gets there is red by `what`.
+    pub(crate) fn until_stopped(&self, what: &str) {
+        crate::lane::receive(&self.at, what);
+    }
+
+    /// The road goes on from that pause.
+    pub(crate) fn go(&self) {
+        let _ = self.go.send(());
+    }
+}
+
+#[cfg(test)]
+impl CountedClock {
+    /// **A road's stop clock in a test whose road stops a trial**
+    /// (T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK): [`stop_trial`]'s two
+    /// windows, `quit_within` and `end_within` looked at every `poll`, spent on
+    /// the count. Each pause of the stop is `poll`, or what is left, so the quit
+    /// grace is exactly [`Self::grace_pauses`] pauses and the next is the end
+    /// window's first:
+    ///
+    /// * **pause 1** lasts until `answered` holds — the trial's answer to the
+    ///   ask to quit: its end, or a trial that keeps the signal saying it got
+    ///   it — within the suite's patience (`lane::within_patience`);
+    /// * **the end window's first pause** lasts until `gone` holds — the ended
+    ///   trial gone, as the test's own waiter reports it — within the patience;
+    /// * every other pause only moves the clock, and a pause past both windows
+    ///   is red: a grace that never ends fails, never hangs.
+    ///
+    /// "Ended within the grace" and "asked to quit, then ended" are then the
+    /// trial's state at a counted pause, never a race between a real second
+    /// and the trial's exit. An answer that never comes costs the patience
+    /// once, and its window is then spent on the count.
+    pub(crate) fn stopping(
+        (quit_within, end_within, poll): (Duration, Duration, Duration),
+        answered: impl Fn() -> bool + Send + 'static,
+        gone: impl Fn() -> bool + Send + 'static,
+    ) -> Self {
+        let grace = Self::grace_pauses(quit_within, poll);
+        let past_both = grace + Self::grace_pauses(end_within, poll);
+        Self::new(move |pause| {
+            assert!(
+                pause <= past_both,
+                "the stop paused {pause} times, past its two windows ({past_both} pauses)"
+            );
+            if pause == 1 {
+                crate::lane::within_patience(&answered);
+            }
+            if pause == grace + 1 {
+                crate::lane::within_patience(&gone);
+            }
+        })
+    }
+
+    /// **How many of the stop's pauses a window of `within` looked at every
+    /// `poll` takes on this clock**: each pause is `poll`, the last what is
+    /// left.
+    pub(crate) fn grace_pauses(within: Duration, poll: Duration) -> usize {
+        assert!(!poll.is_zero(), "a stop that looks every 0 ms never pauses");
+        usize::try_from(within.as_millis().div_ceil(poll.as_millis())).unwrap()
+    }
+
+    /// **This stop clock's reading at the moment the stop asks for the end**:
+    /// a world's `say` hook that keeps [`Self::moved_ms`] at the first line
+    /// saying a trial "is asked to end" ([`stop_trial`]'s own words), and where
+    /// it keeps it. The grace alone is read there — the end window's pauses
+    /// come after — so a stop that cut the grace short reads less than its
+    /// `quit_within`, whatever the end window then spends.
+    pub(crate) fn at_the_end_ask(self: &std::sync::Arc<Self>) -> (SaidLineHook, ReadAtEndAsk) {
+        let read: ReadAtEndAsk = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (clock, kept) = (std::sync::Arc::clone(self), std::sync::Arc::clone(&read));
+        let hook = Box::new(move |line: &str| {
+            let mut kept = kept.lock().unwrap();
+            if kept.is_none() && line.contains("is asked to end") {
+                *kept = Some(clock.moved_ms());
+            }
+        });
+        (hook, read)
+    }
+}
+
+/// A world's hook on every line it says (a test's `Fake::on_say`).
+#[cfg(test)]
+pub(crate) type SaidLineHook = Box<dyn FnMut(&str) + Send>;
+
+/// Where [`CountedClock::at_the_end_ask`] keeps the stop clock's reading:
+/// `None` until the stop asks for the end.
+#[cfg(test)]
+pub(crate) type ReadAtEndAsk = std::sync::Arc<std::sync::Mutex<Option<u64>>>;
+
+/// Whether `folder` holds a file named as a trial's receipt.
+#[cfg(test)]
+fn holds_a_receipt(folder: &Path) -> bool {
+    match crate::files::read_directory(folder) {
+        crate::files::DirOutcome::Listed(listing) => listing.entries.iter().any(|entry| {
+            !entry.is_dir
+                && entry
+                    .name
+                    .starts_with(crate::update_txn::RECEIPT_FILE_PREFIX)
+        }),
+        crate::files::DirOutcome::Failed(_) => false,
+    }
+}
+
+/// **How many durable steps a committing road has still to take, as the
+/// disk shows them** (T-APPLIER-HOLD-CAP-UNDER-LOAD): from the journal's
+/// `phase` (`None`: no journal is left — a macOS holder removes the
+/// transaction once it is over) and the transaction folder `folder`. The
+/// commit road is `Handoff`, `Armed`, `Moving` (or a reserved
+/// `TrialStarting`), `Trial`, then `Committed` with the trial's receipt still
+/// in `folder` — the trial's watch removes it once it reads `Committed`, the
+/// decision the road's last wait is for — and nothing is left once the
+/// receipt is gone or the journal is past the road (ended otherwise, or
+/// removed). Along one road the count only falls, so a test awaits a commit
+/// with [`crate::lane::while_progressing`] on it: the suite's patience starts
+/// over at each step, and a road that stops moving is red by name.
+#[cfg(test)]
+pub(crate) fn commit_steps_left(phase: Option<PhaseKind>, folder: &Path) -> usize {
+    match phase {
+        Some(PhaseKind::Allocated | PhaseKind::Prepared) => COMMIT_STEPS,
+        Some(PhaseKind::Handoff) => 5,
+        Some(PhaseKind::Armed) => 4,
+        Some(PhaseKind::Moving | PhaseKind::TrialStarting) => 3,
+        Some(PhaseKind::Trial) => 2,
+        Some(PhaseKind::Committed) => usize::from(holds_a_receipt(folder)),
+        Some(
+            PhaseKind::RollbackIntent
+            | PhaseKind::Stuck
+            | PhaseKind::RolledBack
+            | PhaseKind::Abandoned
+            | PhaseKind::Retired,
+        )
+        | None => 0,
+    }
+}
+
+/// The most [`commit_steps_left`] counts: a journal not yet handed over.
+#[cfg(test)]
+pub(crate) const COMMIT_STEPS: usize = 6;
 
 /// **What a trial's watch is over**: the home, who records, the trial this
 /// holder just launched if the journal records none yet, and the clock.
@@ -1563,23 +1873,29 @@ pub(crate) fn survey(home: &Home, txn: TxnId, program: &Path, excluded: &[Runnin
 /// worker door; after the acknowledgement (or after the exact trial has ended)
 /// it re-reads the mark and carries that final answer into `Retired`.
 ///
-/// A decision not observed within the journal-held window is an error. The
+/// A decision not observed within the journal-held window (`wait`'s
+/// `within`, read on its clock, [`WallClock`] in the product:
+/// T-UPDATE-APPLY-FLIP-HOLD-FLAKE) is an error. The
 /// caller must preserve `H/<txn>` and the committed journal for a later holder;
 /// it must not turn elapsed time into a not-kept assertion.
 pub(crate) fn note_unkept_after_trial_decision(
-    worker: &WorkerCtx,
+    wait: WaitWithin<'_>,
     journal: &Journal,
     home: &Home,
     program: &Path,
     poll: Duration,
-    within: Duration,
     say: &mut dyn FnMut(&str),
 ) -> Result<Option<String>, String> {
     if let Some(version) = &journal.body.unkept {
         return Ok(Some(version.clone()));
     }
+    let WaitWithin {
+        worker,
+        within,
+        clock,
+    } = wait;
     let txn = journal.txn;
-    let until = Instant::now() + within;
+    let until = clock.now() + within;
     loop {
         match survey(home, txn, program, &[]) {
             Survey::Adoptable { .. }
@@ -1604,7 +1920,7 @@ pub(crate) fn note_unkept_after_trial_decision(
                 return Ok(unkept);
             }
             Survey::Unlistable(why) => {
-                if Instant::now() >= until {
+                if clock.now() >= until {
                     return Err(format!(
                         "the trial's final decision could not be observed: {why}"
                     ));
@@ -1612,13 +1928,13 @@ pub(crate) fn note_unkept_after_trial_decision(
             }
         }
 
-        let left = until.saturating_duration_since(Instant::now());
+        let left = until.saturating_duration_since(clock.now());
         if left.is_zero() {
             return Err(
                 "the live trial did not acknowledge its final not-kept decision".to_owned(),
             );
         }
-        bt_platform::wait::sleep_within(worker, poll.min(left));
+        clock.pause(worker, poll.min(left));
     }
 }
 
@@ -1812,15 +2128,19 @@ pub(crate) fn before_deciding(
 
 /// **Stop the trial** (W9/M9; the coordinator's ruling 2 of U-29 and ruling 1
 /// of U-24): ask it to quit, wait up to `quit_within` for it to leave the list,
-/// then end it and wait up to `end_within`, polling every `poll` through the
-/// wait door. Each ask goes through [`install_flip::ask`], which sends nothing
-/// to a process that is not that very trial running from one of `images`.
+/// then end it and wait up to `end_within`, looking every `poll`. Both windows
+/// are read and paused on `clock`, the road's `stop_clock` ([`WallClock`] in
+/// the product: the monotonic clock and the worker's wait door;
+/// T-TRIAL-STOP-QUIT-GRACE-ON-THE-ROAD-CLOCK). Each ask goes through
+/// [`install_flip::ask`], which sends nothing to a process that is not that
+/// very trial running from one of `images`.
 ///
 /// # Errors
 /// The process list could not be read, the trial could not be asked, or it
 /// did not end.
 pub(crate) fn stop_trial(
     worker: &WorkerCtx,
+    clock: &dyn WaitClock,
     process: TrialProcess,
     images: &[&Path],
     (quit_within, end_within, poll): (Duration, Duration, Duration),
@@ -1843,16 +2163,16 @@ pub(crate) fn stop_trial(
             Ok(false) => return Ok(()),
             Err(error) => return Err(format!("the trial {}: {error}", process.pid)),
         }
-        let until = Instant::now() + within;
+        let until = clock.now() + within;
         loop {
             if !trial_runs(process, images) {
                 return Ok(());
             }
-            let left = until.saturating_duration_since(Instant::now());
+            let left = until.saturating_duration_since(clock.now());
             if left.is_zero() {
                 break;
             }
-            bt_platform::wait::sleep_within(worker, poll.min(left));
+            clock.pause(worker, poll.min(left));
         }
     }
     Err(format!("the trial {} did not end", process.pid))
@@ -1867,7 +2187,7 @@ pub(crate) fn stop_trial(
 /// * O clears it as it hands the transaction over (before `Handoff`, while O
 ///   holds the transaction lock), so no mark of an earlier attempt stands;
 /// * P takes it as soon as it knows its transaction, before it waits for O's
-///   lock ([`take_the_window`]) — and only a P whose mark landed runs its
+///   lock ([`take_the_window_by`]) — and only a P whose mark landed runs its
 ///   road and opens a window; one that finds it taken, or whose mark does not
 ///   land, leaves everything alone (0.4.8 E2);
 /// * O takes it at its very end, after letting go of its claim — and starts
@@ -1877,7 +2197,7 @@ pub(crate) fn stop_trial(
 ///   process (a P that never took the mark is not an applier to wait for).
 ///
 /// Taking is one election under an exclusive operating-system lock,
-/// `H\<txn>\owner.lock` ([`take_the_window`]): read the mark, and write this
+/// `H\<txn>\owner.lock` ([`take_the_window_by`]): read the mark, and write this
 /// process into it only when it is absent or its process no longer runs (pid
 /// and start instant) — its owner died. The lock goes with a holder that dies
 /// inside the election.
@@ -2050,7 +2370,7 @@ impl WindowRefusal {
 
     /// Whether an applier should ask the same election again inside its one
     /// existing deadline.
-    const fn retryable(&self) -> bool {
+    pub(crate) const fn retryable(&self) -> bool {
         self.retryable
     }
 
@@ -2072,7 +2392,7 @@ impl std::fmt::Debug for WindowRefusal {
     }
 }
 
-/// **Who has the duty a window follows**, as [`take_the_window`] found it for
+/// **Who has the duty a window follows**, as [`take_the_window_by`] found it for
 /// the contender `C`.
 ///
 /// The two answers that come from the journal are `C`'s to have: an
@@ -2167,7 +2487,21 @@ pub(crate) fn election_within(until: Instant, now: Instant) -> Duration {
 /// **By `until`** (round 8, Codex's finding 15): the wait for the lock is the
 /// smaller of [`ELECTION_WITHIN`] and what is left before `until` — the
 /// applier's road deadline — so an election begun near that deadline never
-/// carries the applier's wait for O past it.
+/// carries the applier's wait for O past it. `now` is a reading of the clock
+/// `until` is read on (the road's [`WaitClock`] for an applier's road).
+pub(crate) fn take_the_window_by(
+    worker: Option<&WorkerCtx>,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    until: Instant,
+    now: Instant,
+) -> Window {
+    take_the_window_within(worker, home, txn, me, election_within(until, now), Applier)
+}
+
+/// [`take_the_window_by`], `until` read on the wall clock.
+#[cfg(test)]
 pub(crate) fn take_the_window(
     worker: Option<&WorkerCtx>,
     home: &Home,
@@ -2175,17 +2509,10 @@ pub(crate) fn take_the_window(
     me: Running,
     until: Instant,
 ) -> Window {
-    take_the_window_within(
-        worker,
-        home,
-        txn,
-        me,
-        election_within(until, Instant::now()),
-        Applier,
-    )
+    take_the_window_by(worker, home, txn, me, until, Instant::now())
 }
 
-/// [`take_the_window`], as `contender`, waiting up to `within` for the
+/// [`take_the_window_by`], as `contender`, waiting up to `within` for the
 /// election's lock — zero in O's panic road, which waits for nothing.
 pub(crate) fn take_the_window_within<C: Contender>(
     worker: Option<&WorkerCtx>,
@@ -2202,6 +2529,7 @@ pub(crate) fn take_the_window_within<C: Contender>(
         within,
         contender,
         ElectionOps {
+            lock_clock: WallPollClock,
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
@@ -2268,7 +2596,11 @@ impl MarkWriteFailure {
     }
 }
 
-struct ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait> {
+struct ElectionOps<Clock, AfterLock, ReadOwner, ReadPhase, Write, Wait> {
+    /// The clock the election lock's wait is read and paused on
+    /// (`install_txn::hold_by`): [`WallPollClock`] in the product, so the wait is
+    /// `install_txn::hold_within`'s.
+    lock_clock: Clock,
     after_lock: AfterLock,
     read_owner: ReadOwner,
     read_phase: ReadPhase,
@@ -2400,16 +2732,17 @@ impl Contender for Applier {
     }
 }
 
-fn take_the_window_within_using<C, AfterLock, ReadOwner, ReadPhase, Write, Ask, Wait>(
+fn take_the_window_within_using<C, Clock, AfterLock, ReadOwner, ReadPhase, Write, Ask, Wait>(
     home: &Home,
     txn: TxnId,
     me: Running,
     within: Duration,
     contender: C,
-    operations: ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait>,
+    operations: ElectionOps<Clock, AfterLock, ReadOwner, ReadPhase, Write, Wait>,
 ) -> Window<C>
 where
     C: Contender,
+    Clock: PollClock,
     AfterLock: FnOnce(),
     ReadOwner: FnMut() -> io::Result<Option<Running>>,
     ReadPhase: FnMut() -> Result<PhaseKind, PhaseRead>,
@@ -2418,6 +2751,7 @@ where
     Wait: FnMut(Duration) -> bool,
 {
     let ElectionOps {
+        lock_clock,
         after_lock,
         mut read_owner,
         mut read_phase,
@@ -2425,8 +2759,12 @@ where
         mut wait,
     } = operations;
     let until = Instant::now() + within;
-    let held = match install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within)
-    {
+    let held = match install_txn::hold_by(
+        &owner_lock_path(home, txn),
+        Hold::Exclusive,
+        lock_clock.now() + within,
+        &lock_clock,
+    ) {
         Ok(Some(held)) => held,
         Ok(None) => {
             return Window::Refused(WindowRefusal {
@@ -2512,6 +2850,7 @@ pub(crate) fn take_the_window_within_at(
         within,
         Applier,
         ElectionOps {
+            lock_clock: WallPollClock,
             after_lock,
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
@@ -2539,6 +2878,7 @@ pub(crate) fn take_the_window_within_writes_at<C: Contender>(
         within,
         contender,
         ElectionOps {
+            lock_clock: WallPollClock,
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
             read_phase: || read_window_phase(home, txn),
@@ -2573,6 +2913,7 @@ pub(crate) fn take_the_window_within_reads_at(
         within,
         Applier,
         ElectionOps {
+            lock_clock: WallPollClock,
             after_lock: || {},
             read_owner: read,
             read_phase,
@@ -2585,9 +2926,68 @@ pub(crate) fn take_the_window_within_reads_at(
     )
 }
 
-fn ask_for_the_window_until(
+/// **A road's [`WaitClock`], on `worker`, as a lock wait's clock**
+/// (`PollClock`, T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): its
+/// readings are the clock's, and each pause is the clock's pause through
+/// `worker`'s wait door. The one adapter by which a wait for a lock
+/// (`install_txn::hold_by`) reads a road's clock: the applier's and recovery's
+/// roads pass theirs (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+pub(crate) struct LockWaitOn<'a> {
+    pub(crate) clock: &'a dyn WaitClock,
+    pub(crate) worker: &'a WorkerCtx,
+}
+
+impl PollClock for LockWaitOn<'_> {
+    fn now(&self) -> Instant {
+        self.clock.now()
+    }
+
+    fn pause(&self, pause: Duration) {
+        self.clock.pause(self.worker, pause);
+    }
+}
+
+/// [`take_the_window_within`] with no worker's pauses (as `None` there), and
+/// the election lock's wait read and paused on `clock`
+/// (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): only that wait is the clock's — the
+/// owner read, the journal's phase and the mark write are each asked once, so
+/// their deadlines on the real clock are never spent. A test whose contender
+/// waits for a lock another one holds ends that wait inside the pause of its
+/// choosing, by the state it awaits, never by a race between two windows.
+#[cfg(test)]
+pub(crate) fn take_the_window_on(
+    worker: &WorkerCtx,
+    clock: &dyn WaitClock,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+) -> Window {
+    take_the_window_within_using(
+        home,
+        txn,
+        me,
+        within,
+        Applier,
+        ElectionOps {
+            lock_clock: LockWaitOn { clock, worker },
+            after_lock: || {},
+            read_owner: || read_window_owner(home, txn),
+            read_phase: || read_window_phase(home, txn),
+            write: mark_writer,
+            wait: |_| false,
+        },
+    )
+}
+
+/// **The applier's asks for the window, again while the answer is another
+/// live owner or a contended election, until `until`** — read on `now`, the
+/// road's [`WaitClock`] for an applier (T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT);
+/// each pause between two asks is `wait`'s, never past `until`.
+fn ask_for_the_window_by(
     until: Instant,
     poll: Duration,
+    mut now: impl FnMut() -> Instant,
     mut ask: impl FnMut() -> Window,
     mut wait: impl FnMut(Duration),
 ) -> Window {
@@ -2595,7 +2995,7 @@ fn ask_for_the_window_until(
         let answer = ask();
         let asks_again = matches!(&answer, Window::Theirs(_))
             || matches!(&answer, Window::Refused(refusal) if refusal.retryable());
-        let left = until.saturating_duration_since(Instant::now());
+        let left = until.saturating_duration_since(now());
         if !asks_again || left.is_zero() {
             return answer;
         }
@@ -2606,19 +3006,25 @@ fn ask_for_the_window_until(
 /// **The one applier election loop**, shared by Windows and macOS: another
 /// live marked owner or a contended election is asked again while the one
 /// `old_within` deadline has time left. No retry receives a fresh budget.
+/// Each pause between two asks is `clock`'s (the road's [`WaitClock`]: the
+/// worker's wait door in the product), and `until` — the road's deadline — is
+/// a reading of that clock, read there before each ask again and for each
+/// election's budget ([`take_the_window_by`]).
 pub(crate) fn take_the_window_for_applier(
     worker: &WorkerCtx,
+    clock: &dyn WaitClock,
     home: &Home,
     txn: TxnId,
     me: Running,
     until: Instant,
     poll: Duration,
 ) -> Window {
-    ask_for_the_window_until(
+    ask_for_the_window_by(
         until,
         poll,
-        || take_the_window(Some(worker), home, txn, me, until),
-        |pause| bt_platform::wait::sleep_within(worker, pause),
+        || clock.now(),
+        || take_the_window_by(Some(worker), home, txn, me, until, clock.now()),
+        |pause| clock.pause(worker, pause),
     )
 }
 
@@ -2630,7 +3036,7 @@ pub(crate) fn take_the_window_for_applier_at(
     ask: impl FnMut() -> Window,
     wait: impl FnMut(Duration),
 ) -> Window {
-    ask_for_the_window_until(until, poll, ask, wait)
+    ask_for_the_window_by(until, poll, Instant::now, ask, wait)
 }
 
 /// **Clear the window's mark** — O, as it hands the transaction over, before
@@ -2664,28 +3070,44 @@ pub(crate) enum WindowHolder {
 /// applier whose mark did not land stood aside (0.4.8 E2) and owns nothing.
 /// If the lock file itself cannot be opened, recovery falls back to that
 /// mark: an open refusal is not allowed to stall a persistent `Handoff`
-/// forever.
+/// forever. The wait for the election in flight is read and paused on
+/// `clock` (the recovery road's [`WaitClock`], through [`LockWaitOn`]:
+/// [`WallClock`] in the product; T-WINDOWS-HANDOVER-ORDER-A-HELD-LOCK-WAIT).
+pub(crate) fn window_holder_on(
+    worker: &WorkerCtx,
+    clock: &dyn WaitClock,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+) -> Result<Option<WindowHolder>, String> {
+    window_holder_using(home, txn, me, &LockWaitOn { clock, worker }, || {})
+}
+
+/// [`window_holder_on`] off a worker, its wait on the wall clock
+/// (`install_txn::hold_within`'s).
+#[cfg(test)]
 pub(crate) fn window_holder(
     home: &Home,
     txn: TxnId,
     me: Running,
 ) -> Result<Option<WindowHolder>, String> {
-    window_holder_using(home, txn, me, || {})
+    window_holder_using(home, txn, me, &WallPollClock, || {})
 }
 
-/// [`window_holder`], with `in_flight` run once when the first ask finds an
-/// election in flight, before the wait for it.
-fn window_holder_using(
+/// [`window_holder_on`], with the wait on `clock` and `in_flight` run once
+/// when the first ask finds an election in flight, before the wait for it.
+fn window_holder_using<Clock: PollClock + ?Sized>(
     home: &Home,
     txn: TxnId,
     me: Running,
+    clock: &Clock,
     in_flight: impl FnOnce(),
 ) -> Result<Option<WindowHolder>, String> {
     let lock = owner_lock_path(home, txn);
     let held = match install_txn::try_hold(&lock, Hold::Exclusive) {
         Ok(None) => {
             in_flight();
-            install_txn::hold_within(&lock, Hold::Exclusive, ELECTION_WITHIN)
+            install_txn::hold_by(&lock, Hold::Exclusive, clock.now() + ELECTION_WITHIN, clock)
         }
         asked => asked,
     };
@@ -2700,7 +3122,7 @@ fn window_holder_using(
     }
 }
 
-/// [`window_holder`] with a test step between finding the election in flight
+/// [`window_holder_on`] with a test step between finding the election in flight
 /// and waiting for it, so a test can end that election at that exact state
 /// without the clock.
 #[cfg(test)]
@@ -2710,7 +3132,7 @@ pub(crate) fn window_holder_at(
     me: Running,
     in_flight: impl FnOnce(),
 ) -> Result<Option<WindowHolder>, String> {
-    window_holder_using(home, txn, me, in_flight)
+    window_holder_using(home, txn, me, &WallPollClock, in_flight)
 }
 
 /// **What a road process's exit guard asks of the platform it runs on**
@@ -4026,7 +4448,7 @@ mod held_journal_tests {
                 Ok(()),
                 || {
                     asked = true;
-                    Ok(())
+                    Ok::<(), install_txn::Failure>(())
                 },
                 &mut |line| said.push(line.to_owned())
             )
@@ -4034,8 +4456,11 @@ mod held_journal_tests {
         );
         assert!(!asked && said.is_empty(), "a landed write asks no removal");
         assert!(
-            given_up_said(Err(unwritten()), || Ok(()), &mut |line| said
-                .push(line.to_owned()))
+            given_up_said(
+                Err(unwritten()),
+                || Ok::<(), install_txn::Failure>(()),
+                &mut |line| said.push(line.to_owned())
+            )
             .is_err()
         );
         assert!(said.is_empty(), "a removal done says nothing: {said:?}");

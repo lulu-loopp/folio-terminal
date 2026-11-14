@@ -5,7 +5,7 @@ use crate::input::Keystroke;
 use crate::runtime::panes::frame_row_of_anchor;
 use crate::window_seam::prelude::*;
 use crate::{
-    LeafSearchRescan, LeafSession, PointerTarget, Runtime, SearchRefresh, SearchScanCache,
+    LeafSearchRescan, PointerTarget, Runtime, SearchRefresh, SearchScanCache, ShellSession,
     hang_watch, input, marks, search, seats, tooltip,
 };
 use anyhow::Result;
@@ -341,7 +341,11 @@ impl<B: Backend> Runtime<'_, B> {
         };
 
         let revision = self.window.search_revision;
-        let leaf = self.sessions.get(&seat).expect("the seat was just checked");
+        let crate::TerminalPane {
+            session: leaf,
+            view,
+            ..
+        } = self.sessions.get(&seat).expect("the seat was just checked");
         // **The pattern over the transcript, under its own name** (T-STATION-SPLIT) — see
         // [`hang_watch::Station::SearchScan`]. Bracketed around the scan itself and not around
         // this function, which leaves through eight doors; there is no early return between
@@ -381,8 +385,7 @@ impl<B: Backend> Runtime<'_, B> {
         // Where the eye is: the viewport's own anchor when the pane has been scrolled, and nothing
         // when it is riding the live bottom — where "the first match at or below the top" is the
         // first match of all.
-        let from = leaf
-            .view
+        let from = view
             .projection
             .scroll_anchor()
             .map(|anchor| anchor.source.clone());
@@ -691,7 +694,19 @@ impl<B: Backend> Runtime<'_, B> {
                 self.window.search.focus();
                 self.step_search(true)?;
             }
-            search::SearchElement::Field | search::SearchElement::Body => {
+            search::SearchElement::Field => {
+                self.window.search.focus();
+                self.after_search_change()?;
+                // **And the caret goes where the press is** (0.4.9 plan row 180): the press
+                // that hands the keyboard back puts the caret at the seam under it, and a drag
+                // from there selects (ruling 7: it collapses B76's select-all, as a click into
+                // any text box does).
+                if let Some(seat) = self.window.search.seat() {
+                    let leaf = crate::LeafId { tab: self.id, seat };
+                    self.press_field(crate::runtime::pointer::FieldDrag::FindBar(leaf), position)?;
+                }
+            }
+            search::SearchElement::Body => {
                 self.window.search.focus();
                 self.after_search_change()?;
             }
@@ -733,6 +748,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(in crate::runtime) fn search_layers(&mut self) -> Vec<marks::OverlayLayer> {
         let Some(capsule) = self.search_capsule() else {
             self.window.search_layout = None;
+            self.window.drawn_fields.find_bar = None;
             return Vec::new();
         };
         self.window.search_layout = Some(capsule);
@@ -744,6 +760,28 @@ impl<B: Backend> Runtime<'_, B> {
         let focused = self.window.search.is_focused();
         let hover = self.window.search_hover;
         let (text, typed, caret_x) = self.search_field_look();
+        // **The run the field is drawn as, left for a press to read** (0.4.9 plan row 180), and
+        // the selection's wash read off the same table.
+        let field = self.window.search.field();
+        let shown = if typed {
+            field.composed().into_owned()
+        } else {
+            String::new()
+        };
+        let selected = field.composed_selection();
+        let [left, right] = capsule.text_run(scale);
+        let advances = {
+            let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+            renderer.chrome_text_advances(gpu, &shown, search::FIELD_FONT_LOGICAL_PX * scale)
+        };
+        let run = crate::text_field::DrawnRun {
+            left,
+            scroll_px: 0.0,
+            shown,
+            advances,
+        };
+        let selection = run.selection_span(selected, right);
+        self.window.drawn_fields.find_bar = Some(run);
         vec![search::build(
             &capsule,
             &search::CapsuleLook {
@@ -751,6 +789,7 @@ impl<B: Backend> Runtime<'_, B> {
                 typed,
                 caret_x,
                 focused,
+                selection,
                 broken,
                 counter: &counter,
                 flags,
@@ -837,7 +876,7 @@ impl<B: Backend> Runtime<'_, B> {
 /// at most [`SearchRefresh::walk_budget`] owed lines on top of whatever froze since the last scan.
 pub(crate) fn rescan_leaf_for_search(
     compiled: &bt_transcript::search::CompiledSearch,
-    leaf: &LeafSession,
+    leaf: &ShellSession,
     seat: SeatId,
     revision: u64,
     cache: Option<&SearchScanCache>,

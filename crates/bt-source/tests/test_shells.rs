@@ -18,34 +18,71 @@
 //! "test-shell")`, which a product build may turn on, so it is not test code
 //! here — it is the door, and the door is allowed to open.
 //!
-//! Two shapes are refused there:
+//! Four shapes are refused there:
 //!
 //! 1. **A pseudoconsole door** ([`PTY_DOORS`]): `PtySession::spawn` and the
-//!    resolving doors around it, named as a path — called or handed on as a
-//!    value. On a pseudoconsole every program is a terminal's child and every
-//!    shell is interactive, so this is refused whatever the program.
-//! 2. **A process start off a pseudoconsole** ([`PROCESS_STARTS`]) whose first
+//!    resolving doors around it, and `BirthFallback::spawn_last_resort`, named
+//!    as a path — called or handed on as a value. On a pseudoconsole every
+//!    program is a terminal's child and every shell is interactive, so this is
+//!    refused whatever the program.
+//! 2. **A method door** ([`METHOD_DOORS`], plan row 174): a pseudoconsole door
+//!    that is a method, called as one — `fallback.spawn_last_resort(…)` spells
+//!    no path, so it is read by its call shape, the name with its `(`. A call
+//!    shape is exact only while the name is the door's alone: every function
+//!    of that name in the workspace other than the door's own definition is a
+//!    finding too ([`door_definitions`]), and so is a door that is no longer
+//!    defined where the list says.
+//! 3. **A process start off a pseudoconsole** ([`PROCESS_STARTS`]) whose first
 //!    argument names a shell: a string literal whose file name is one of
 //!    [`SHELLS`], or a name in the argument with one of them as a `_`-separated
 //!    word (`git_bash()`, `ComSpec`). Other programs started this way — the
 //!    test binary itself, `where.exe`, `node --version` — are not shells and
 //!    are not this rule's subject.
+//! 4. **The person's birth retry** ([`PRODUCT_RETRIES`], plan row 182):
+//!    `bt-app`'s `pty_door::request_shell`, whose failed-start retry is the
+//!    account's interactive last-resort PowerShell, and `Retry::ThePersons`,
+//!    that retry handed to the birth by name. Both are keyed by their own
+//!    name, which the workspace declares once each, so every spelling that
+//!    reaches them is named: the full path, `super::request_shell`, a bare call
+//!    inside `pty_door`'s own tests, and a grouped or glob import with its use
+//!    (the import itself is named too). A test's birth goes through
+//!    `pty_door::request_shell_in`, whose retry is `Retry::OneShotForATest`, a
+//!    `-NoProfile -NonInteractive` one-shot. A test-build function is test code
+//!    here, so a `request_shell_in` that gave the person's retry is named too.
 //!
 //! # What stays review-owned
 //!
 //! A shell whose program reaches the start through a name that does not say
 //! so (`Command::new(program)` with `program` a parameter), including a neutral
 //! constant, and direct `portable_pty` backend use inside `bt-pty`'s own tests.
+//!
+//! **A product door a test drives** — this reads the test's own code, and the
+//! shell starts in product code (plan row 174's sweep, 2026-11-02):
+//! `bt-app`'s `pty_door::request_shell_in` asked by a test for a Store
+//! PowerShell — its first start, the test's own one-shot argv (its retry is
+//! shape 4's); the PowerShell probes
+//! (`shell_integration::powershell_probe_command`), which are `-NoProfile
+//! -NonInteractive` one-shots and the subject of the tests that run them; and
+//! the runtime's verbs that reach `create_leaf_session` (`split_seat`,
+//! `restart_shell`, `pop_out_preview`, `land_pane_birth`), which ask for no
+//! shell under a headless runtime only because its program answers are
+//! unknown. A birth fallback a test made is refused at run time by
+//! `spawn_last_resort` itself in a test build (the reaper's road included).
 //! Mechanical `use … as …` aliases of a named door are resolved in their
-//! lexical module or block scope. A parent-module alias needs no alias inference:
-//! the canonical member (`Command::new`, `quiet_command`, `PtySession::spawn`)
-//! remains a literal suffix/identifier in the call. Macro-generated imports and
-//! type aliases that do not come from a `use` declaration stay review-owned.
+//! lexical module or block scope. For the doors keyed by a path, a parent-module
+//! alias needs no alias inference: the canonical member (`Command::new`,
+//! `quiet_command`, `PtySession::spawn`) remains a literal suffix/identifier in
+//! the call. That does not hold for a free function keyed by its module, which a
+//! grouped import or `super::` reaches without the module's name; so the
+//! person's birth retry (shape 4) is keyed by its bare names instead.
+//! Macro-generated imports and type aliases that do not come from a `use`
+//! declaration stay review-owned.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bt_source::{
-    DiskScope, Index, LiteralValue, Package, Pattern, Search, Span, TargetId, TargetKind,
+    DiskScope, Index, ItemKind, LiteralValue, Package, Pattern, Search, Span, TargetId, TargetKind,
     TargetRoot, TokenKind, Universe, Vendor, View, Workspace, is_vendored, needle, report,
     universes,
 };
@@ -54,7 +91,7 @@ use syn::visit::Visit as _;
 
 /// The pseudoconsole doors a test may not name: every one of them starts a
 /// process on a pseudoconsole.
-const PTY_DOORS: [&str; 8] = [
+const PTY_DOORS: [&str; 9] = [
     "PtySession::spawn",
     "PtySession::spawn_default",
     "PtySession::spawn_default_in",
@@ -63,7 +100,36 @@ const PTY_DOORS: [&str; 8] = [
     "PtySession::spawn_shell_in_with",
     "PtySession::spawn_refreshed",
     "PtySession::spawn_interactive",
+    "BirthFallback::spawn_last_resort",
 ];
+
+/// The pseudoconsole doors that are methods, read by their call shape: the
+/// method's name, the type whose `impl` defines it and the package that
+/// defines it — the one function of that name the workspace may hold.
+const METHOD_DOORS: [MethodDoor; 1] = [MethodDoor {
+    name: "spawn_last_resort",
+    owner: "BirthFallback",
+    package: "bt-pty",
+    door: "bt_pty::test_shell::TestShell::spawn_birth_fallback",
+}];
+
+/// One method door ([`METHOD_DOORS`]).
+struct MethodDoor {
+    name: &'static str,
+    owner: &'static str,
+    package: &'static str,
+    /// The road a test takes instead.
+    door: &'static str,
+}
+
+/// The person's birth retry, which a test may not name (plan row 182): the
+/// product's birth door (`pty_door::request_shell`), whose retry is the
+/// account's interactive last-resort shell, and that retry by name
+/// (`Retry::ThePersons`). Matched as identifiers, not paths: each is declared
+/// once in the workspace, and a grouped import, `super::` or a bare call in
+/// `pty_door`'s own tests reaches it without the module's or the enum's name.
+/// A whole identifier, so `request_shell_in` is not one of them.
+const PRODUCT_RETRIES: [&str; 2] = ["request_shell", "ThePersons"];
 
 /// The calls that start a process off a pseudoconsole: the standard library's,
 /// and `bt_platform`'s three doors in front of it.
@@ -97,32 +163,22 @@ fn workspace_root() -> PathBuf {
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are
 /// source *about* compilation and are declared out, as `timing.rs` does.
-fn universe_for(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn universe_for(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
-fn workspace_indices() -> Vec<Index> {
+/// Every first-party package's name and index: the index is the one this process holds for each
+/// package's [`universes::first_party_whole`], shared with every other guard that asks for it.
+pub(crate) fn workspace_indices() -> Vec<(String, Arc<Index>)> {
     let workspace = Workspace::read(&workspace_root()).expect("this workspace");
     workspace
         .packages()
         .iter()
         .filter(|package| !is_vendored(package.directory()))
         .map(|package| {
-            Index::build(&universe_for(package))
-                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
+            let index = Index::shared(&universe_for(package))
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            (package.name().to_owned(), index)
         })
         .collect()
 }
@@ -456,14 +512,43 @@ fn shell_in_argument(index: &Index, (start, end): (usize, usize)) -> Option<Stri
 fn violations(index: &Index) -> Vec<String> {
     let mut found = Vec::new();
     let aliases = use_aliases(index);
+    let mut paths = Vec::new();
     for door in PTY_DOORS {
         let spans = in_test_code(index, Pattern::path(door))
             .into_iter()
             .chain(aliased_uses(index, &aliases, door));
         for span in spans {
+            paths.push(span);
             found.push(format!(
                 "{}: {door} — a test's pseudoconsole child is started through \
                  bt_pty::test_shell::TestShell",
+                place(index, span)
+            ));
+        }
+    }
+    // A method door's call shape, where no path above already named it (`BirthFallback::
+    // spawn_last_resort(…)` is one finding, not two).
+    for door in &METHOD_DOORS {
+        for span in in_test_code(index, Pattern::call(door.name)) {
+            if paths.iter().any(|path| span.within(*path)) {
+                continue;
+            }
+            found.push(format!(
+                "{}: {}( — a test's birth fallback is started through {}",
+                place(index, span),
+                door.name,
+                door.door
+            ));
+        }
+    }
+    for retry in PRODUCT_RETRIES {
+        let spans = in_test_code(index, Pattern::identifier(retry))
+            .into_iter()
+            .chain(aliased_uses(index, &aliases, retry));
+        for span in spans {
+            found.push(format!(
+                "{}: {retry} — a test's shell birth retries through \
+                 pty_door::request_shell_in (Retry::OneShotForATest)",
                 place(index, span)
             ));
         }
@@ -494,6 +579,53 @@ fn violations(index: &Index) -> Vec<String> {
     found
 }
 
+/// **A method door's name is the door's alone** ([`METHOD_DOORS`]): every function of that name
+/// in `indices` (package name, index) other than the one its `impl` of `owner` defines in
+/// `home` is a finding, because the call shape would name its calls as the door's; and a door
+/// that `home` no longer defines is one, because the call shape would then read nothing.
+/// `home` is the door's package — the fixture names its own.
+fn door_definitions(
+    indices: &[(String, Arc<Index>)],
+    home: impl Fn(&MethodDoor) -> String,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    for door in &METHOD_DOORS {
+        let home = home(door);
+        let mut defined = 0usize;
+        for (package, index) in indices {
+            for item in index.items().iter().filter(|item| {
+                item.name() == door.name
+                    && matches!(
+                        item.kind(),
+                        ItemKind::Function | ItemKind::AssociatedFunction
+                    )
+            }) {
+                if *package == home && item.type_owner() == Some(door.owner) {
+                    defined += 1;
+                } else {
+                    found.push(format!(
+                        "{}: fn {} — a second function of a method door's name: its calls \
+                         would read as {}::{}'s",
+                        place(index, item.whole()),
+                        door.name,
+                        door.owner,
+                        door.name
+                    ));
+                }
+            }
+        }
+        if defined != 1 {
+            found.push(format!(
+                "{home} defines {}::{} {defined} times, not once: the call shape `{}(` is \
+                 exact only for the one door",
+                door.owner, door.name, door.name
+            ));
+        }
+    }
+    found.sort();
+    found
+}
+
 /// RED (T-TEST-SHELL-HYGIENE) — **no test in the workspace starts a real shell
 /// except through `bt_pty::test_shell`.**
 ///
@@ -501,10 +633,21 @@ fn violations(index: &Index) -> Vec<String> {
 /// Arc::new(|| {}))` in `bt-app`'s `real_powershell_input_reaches_a_viewport_owned_frame`,
 /// or `Command::new("powershell.exe")` in `bt-pty`'s
 /// `tests/shell_integration_script.rs`, and this names the line. Rename either start
-/// through `use … as …` and the same call remains a finding.
+/// through `use … as …` and the same call remains a finding. Put back
+/// `fallback.spawn_last_resort(…)` in `bt-app`'s
+/// `a_silent_birth_death_falls_back_in_place_and_keeps_every_restored_tab` (plan row 174,
+/// `plant-174-twin-bypasses-the-door.py`) and its line is named by its call shape. Give
+/// `bt-app`'s `pty_door::request_shell_in` `Retry::ThePersons` (plan row 182,
+/// `plant-182-test-door-gives-the-persons-retry.py`), or have the Store PowerShell test ask
+/// `pty_door::request_shell` (`plant-182-test-calls-the-product-door.py`), and the line is named.
 #[test]
 fn every_real_shell_a_test_starts_goes_through_the_test_shell_door() {
-    let found: Vec<String> = workspace_indices().iter().flat_map(violations).collect();
+    let indices = workspace_indices();
+    let found: Vec<String> = indices
+        .iter()
+        .flat_map(|(_, index)| violations(index))
+        .chain(door_definitions(&indices, |door| door.package.to_owned()))
+        .collect();
     assert!(
         found.is_empty(),
         "a test starts a real shell without bt_pty::test_shell, which is how the user's own \
@@ -528,6 +671,20 @@ fn every_real_shell_a_test_starts_goes_through_the_test_shell_door() {
 /// `ComSpec` are not. Replace an aliased door's canonical suffix in
 /// `active_alias_is` with an unrelated one and the three renamed-door rows disappear. Remove the
 /// canonical suffix/identifier search and the three parent-module rows disappear.
+///
+/// Plan row 174: a birth fallback started by the product's method in a test — two method calls
+/// and one path — is named once each; the method called from product code, the test door and an
+/// unrelated `spawn` are not. MUTATION: drop the [`METHOD_DOORS`] pass and rows 84 and 87
+/// disappear; drop its `paths` filter and row 85 is named twice.
+///
+/// Plan row 182: the person's birth retry asked by a test — the product's birth door and the
+/// retry by name, in a test and in a test-build door, by path, through a grouped import (the
+/// import and the bare use), through `super::` and through a glob import — is named; the same
+/// in product code, the test's door and the test's retry are not. MUTATION: drop the
+/// [`PRODUCT_RETRIES`] pass and rows 111, 112, 123, 124, 129, 134, 135, 141 and 148 disappear;
+/// key it by `Pattern::path("pty_door::request_shell")` and `Pattern::path("Retry::ThePersons")`
+/// again and rows 123, 124, 129, 134, 135 and 141 disappear; drop the `in_the_product` filter
+/// and product rows 103 and 104 are named.
 #[test]
 fn the_guard_names_each_raw_shell_start_and_nothing_else() {
     let index = fixture();
@@ -563,9 +720,70 @@ fn the_guard_names_each_raw_shell_start_and_nothing_else() {
          bt_pty::test_shell::Hygiene::command",
         "50: PtySession::spawn — a test's pseudoconsole child is started through \
          bt_pty::test_shell::TestShell",
+        "84: spawn_last_resort( — a test's birth fallback is started through \
+         bt_pty::test_shell::TestShell::spawn_birth_fallback",
+        "85: BirthFallback::spawn_last_resort — a test's pseudoconsole child is started through \
+         bt_pty::test_shell::TestShell",
+        "87: spawn_last_resort( — a test's birth fallback is started through \
+         bt_pty::test_shell::TestShell::spawn_birth_fallback",
+        "111: request_shell — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "112: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "123: request_shell — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "124: request_shell — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "129: request_shell — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "134: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "135: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "141: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
+        "148: ThePersons — a test's shell birth retries through \
+         pty_door::request_shell_in (Retry::OneShotForATest)",
     ];
     expected.sort_unstable();
     let mut lines = lines;
     lines.sort();
     assert_eq!(lines, expected, "{found:#?}");
+}
+
+/// RED (plan row 174) — **a method door's name is the door's alone**: the fixture defines the
+/// door in its own `impl BirthFallback` and a second `spawn_last_resort` on another type; only
+/// the second is named, and a home that defines no door is named as one.
+///
+/// MUTATION: count every definition as the door's (drop the `type_owner` test) — the stray
+/// definition disappears; drop the `defined != 1` line — the doorless home is silent.
+#[test]
+fn a_method_door_is_the_one_function_of_its_name() {
+    let indices = vec![("test_shells".to_owned(), Arc::new(fixture()))];
+    let line_of = |line: &String| -> String {
+        let (place, rest) = line.split_once(": ").expect("a place, then the finding");
+        let line_number = place.rsplit(':').nth(1).expect("file:line:column");
+        format!("{line_number}: {rest}")
+    };
+    let found: Vec<String> = door_definitions(&indices, |_| "test_shells".to_owned())
+        .iter()
+        .map(line_of)
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "77: fn spawn_last_resort — a second function of a method door's name: its calls would \
+          read as BirthFallback::spawn_last_resort's",
+            "98: fn spawn_last_resort — a second function of a method door's name: its calls would \
+          read as BirthFallback::spawn_last_resort's",
+        ],
+        "{found:#?}"
+    );
+    let doorless = door_definitions(&indices, |_| "bt-pty".to_owned());
+    assert!(
+        doorless.iter().any(|line| line
+            == "bt-pty defines BirthFallback::spawn_last_resort 0 times, not once: the call shape \
+                `spawn_last_resort(` is exact only for the one door"),
+        "{doorless:#?}"
+    );
 }

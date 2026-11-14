@@ -40,6 +40,8 @@ use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 use winit::window::WindowId;
 
 use crate::document_request::{DocumentAnswer, DocumentJob, KeptFile, Outcome, Refusal};
+use crate::persist::Ended;
+#[cfg(test)]
 use crate::persist::Reply;
 use crate::preview_provenance::{BlockOrigins, TextOrigin};
 use crate::{AppEvent, TabId};
@@ -1464,9 +1466,15 @@ fn scan_line_marked(line: &str, images: &mut Vec<ImageMark>) -> Vec<Piece> {
     let mut plain = 0usize;
     let mut at = 0usize;
     while at < bytes.len() {
+        // One step of the walk, for the test that holds its work linear in the
+        // line's length (`a_chinese_page_costs_work_in_proportion_to_its_length`).
+        #[cfg(test)]
+        crate::preview_typing::count("inline steps", 1);
         // A claim inside a link's destination is a claim the walk never reaches,
         // because the destination was read off the line in one piece.
         while claims.get(claim).is_some_and(|run| run.start < at) {
+            #[cfg(test)]
+            crate::preview_typing::count("inline steps", 1);
             claim += 1;
         }
         if let Some(run) = claims.get(claim).filter(|run| run.start == at) {
@@ -1956,6 +1964,9 @@ fn push_delimiter_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece
     let mut plain = 0usize;
     let mut index = 0usize;
     while index < bytes.len() {
+        // The same count [`scan_line_marked`] keeps of its own steps.
+        #[cfg(test)]
+        crate::preview_typing::count("inline steps", 1);
         let marker = bytes[index];
         // A `*` or a `_` is one byte and is never a continuation byte, so
         // stepping by bytes reads the same positions stepping by characters
@@ -1966,6 +1977,8 @@ fn push_delimiter_runs(text: &str, at: usize, line: &str, pieces: &mut Vec<Piece
         }
         let mut end = index;
         while end < bytes.len() && bytes[end] == marker {
+            #[cfg(test)]
+            crate::preview_typing::count("inline steps", 1);
             end += 1;
         }
         push_piece_text(&text[plain..index], at + plain, pieces);
@@ -7880,8 +7893,10 @@ pub enum PreviewAnswer {
     Size(Option<u64>),
     /// **How many pages the document at this path holds**, or `None` for a file
     /// whose structure would not say — which the card leaves unsaid rather than
-    /// turning into an error of its own (user ruling 2026-08-25).
-    PageCount(Option<u32>),
+    /// turning into an error of its own (user ruling 2026-08-25) — or
+    /// [`crate::pdf::Held`] for a file another program holds at this moment,
+    /// which the card asks once more (T-HELD-FILE-IN-THE-PDF-LANE).
+    PageCount(Result<Option<u32>, crate::pdf::Held>),
 }
 
 /// How large a file is, without reading it.
@@ -8599,7 +8614,7 @@ fn refusal_said(cause: &Refusal) -> String {
 
 /// **How many saves the preview may have outstanding on the storage worker at once**
 /// (T-STORAGE-WORKER-ON-THE-SEAM, R1): a save counts from its hand-over until its answer is
-/// taken ([`PreviewSaves::take_answers`]) — four tabs' full pools of [`PV_BUFFER_CAP`] buffers,
+/// taken ([`PreviewSaves::answered`]) — four tabs' full pools of [`PV_BUFFER_CAP`] buffers,
 /// every one dirty and saving at once. The preview's share of the storage worker's ledger
 /// (`persist::STORAGE_BOUND`), so a flood of saves never crowds a quit's session write out of
 /// the queue; a save past it is refused on its pane ([`Text::PreviewSaveTooMany`]).
@@ -8668,6 +8683,12 @@ impl PreviewSaves {
             #[cfg(test)]
             sink_said: Vec::new(),
         }
+    }
+
+    /// The storage lane this desk hands its saves to — a test's look at where a harness put it.
+    #[cfg(test)]
+    pub(crate) fn lane(&self) -> &crate::persist::StorageLane {
+        &self.lane
     }
 
     /// **What a landing says** (T-PREVIEW-NO-EXCHANGE-RULING, owner ruling
@@ -8745,27 +8766,61 @@ impl PreviewSaves {
         }
     }
 
-    /// **Every answer the worker has given**, in the order the saves were
-    /// handed over. Never waits. A save that ended unanswered — the worker
-    /// ended with it, or failed on it — is answered here as refused, in its words.
-    pub(crate) fn take_answers(&mut self) -> Vec<SaveAnswer> {
+    /// **Every answer the worker has given below the drain's mark `mark`**
+    /// (`persist::StorageLane::drain_mark`, read once for every asker of one drain,
+    /// `App::storage_answers`; T-STORAGE-LANE-ORDER-BY-CONSTRUCTION), each with its place in
+    /// the order the lane admitted it — the order the drain answers every asker's in. A save at
+    /// or past the mark waits for a later drain even when it has ended since. Never waits. A
+    /// save that ended unanswered — the worker ended with it, or failed on it — is answered here
+    /// as refused, in its words.
+    pub(crate) fn answered(
+        &mut self,
+        mark: &crate::persist::StorageMark,
+    ) -> Vec<(crate::persist::InAdmissionOrder, SaveAnswer)> {
         let mut answers = Vec::new();
         self.owed.retain_mut(|owed| {
-            let answer = match owed.answer.hear() {
-                Reply::Answered(answer) => answer,
-                Reply::Waiting => return true,
-                Reply::Failed(words) => unanswered(owed, Refusal::Failed(words)),
-                Reply::Gone => worker_gone(owed),
+            let Some((order, ended)) = owed.answer.hear_below(mark) else {
+                return true;
             };
-            answers.push(SaveAnswer {
-                incarnation: owed.incarnation,
-                asked_from: owed.asked_from,
-                file: owed.file.clone(),
-                answer,
-            });
+            let answer = match ended {
+                Ended::Answered(answer) => answer,
+                Ended::Failed(words) => unanswered(owed, Refusal::Failed(words)),
+                Ended::Gone => worker_gone(owed),
+            };
+            answers.push((
+                order,
+                SaveAnswer {
+                    incarnation: owed.incarnation,
+                    asked_from: owed.asked_from,
+                    file: owed.file.clone(),
+                    answer,
+                },
+            ));
             false
         });
         answers
+    }
+
+    /// **Every answer the worker has given, at a stop** ([`StopKeeps::keep`]): the storage
+    /// worker has ended or been let go at its bound and the lane delivers nothing after this,
+    /// so no later answer can overtake one heard here — every save that has ended is heard, in
+    /// the order the lane admitted them, whatever is still owed before it — under the lane's
+    /// mark for a take after its worker's end (`persist::StorageLane::mark_after_the_worker_ended`).
+    fn answered_at_the_stop(&mut self) -> Vec<SaveAnswer> {
+        let mark = self.lane.mark_after_the_worker_ended();
+        let answers = self.answered(&mark);
+        answers.into_iter().map(|(_, answer)| answer).collect()
+    }
+
+    /// **This desk alone, drained below its lane's mark** ([`Self::answered`]) — a test's way
+    /// to hear the preview's saves without the application's drain.
+    #[cfg(test)]
+    pub(crate) fn take_answers(&mut self) -> Vec<SaveAnswer> {
+        let mark = self.lane.drain_mark();
+        self.answered(&mark)
+            .into_iter()
+            .map(|(_, answer)| answer)
+            .collect()
     }
 
     /// **Wait for the answer to every save on the worker now**, within the
@@ -8997,7 +9052,7 @@ impl StopKeeps {
             return Vec::new();
         };
         let mut pools = std::mem::take(&mut self.pools);
-        let mut answers = saves.take_answers();
+        let mut answers = saves.answered_at_the_stop();
         let heard = saves.deliver(&mut answers, &mut pools.iter_mut().collect::<Vec<_>>());
         for answer in answers {
             saves.sink(answer);
@@ -10076,8 +10131,9 @@ pub fn scroll_dragged_to(bar: &ScrollBar, along: f32, grab: f32) -> f32 {
 /// prose allows one. Chinese is three bytes a character and has no spaces at
 /// all, so a walk that counts bytes where it meant characters, or that looks for
 /// a word boundary to cut at, comes apart on it and on nothing else. It is held
-/// by the provenance round trip and by the frame budget, which are the two tests
-/// that ask a whole document a question rather than a phrase.
+/// by the provenance round trip and by the counted cost of a keystroke into it
+/// (`a_chinese_page_costs_work_in_proportion_to_its_length`), which are the two
+/// tests that ask a whole document a question rather than a phrase.
 #[cfg(test)]
 pub const CHINESE_PAGE: &str = include_str!("../../../README.zh-CN.md");
 

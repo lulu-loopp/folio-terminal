@@ -819,6 +819,7 @@ fn a_capture(
         button,
         started: None,
         os: None,
+        contacts: bt_platform::ContactMark::default(),
         last: None,
     }
 }
@@ -856,7 +857,7 @@ const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 23] = [
 
 /// Every payload arm in the capture record, which the release dispatch names
 /// one by one.
-const CAPTURE_OWNER_ARMS: [&str; 22] = [
+const CAPTURE_OWNER_ARMS: [&str; 23] = [
     "Divider",
     "TabPress",
     "PanePress",
@@ -879,6 +880,7 @@ const CAPTURE_OWNER_ARMS: [&str; 22] = [
     "SettingsMenuBar",
     "VideoPicture",
     "RowMiddlePress",
+    "FieldSelection",
 ];
 
 /// Owners of every ending policy the slot has had: a tab's surface, a
@@ -1447,8 +1449,16 @@ fn every_lifecycle_door_ends_the_capture() {
     );
     assert_eq!(
         product_callers("Runtime", "end_a_capture_that_lost_its_pointer"),
-        BTreeMap::from([("Runtime::flush_pending_pty_resize".to_owned(), 1)]),
-        "the resize door is the one turn-by-turn sample of the system's capture"
+        BTreeMap::from([
+            (
+                "FolioApp::end_the_capture_that_lost_its_pointer".to_owned(),
+                1
+            ),
+            ("Runtime::flush_pending_pty_resize".to_owned(), 1),
+        ]),
+        "the resize door is the one turn-by-turn sample of the system's capture and the \
+         button, and the application asks it of the owner's window before a pan is spent \
+         (0.4.9 plan row 107)"
     );
 
     // The settings sheet's closers.
@@ -1465,7 +1475,7 @@ fn every_lifecycle_door_ends_the_capture() {
             "the gear",
         ),
         (
-            "crate::Runtime::open_scheme_for_editing",
+            "crate::runtime::preview::Runtime::open_scheme_for_editing",
             "the verb that hands the reader a scheme file",
         ),
     ] {

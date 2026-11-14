@@ -83,7 +83,7 @@ fn the_reduction_happens_on_the_worker_not_the_window_thread() {
         ),
     ] {
         assert!(
-            free_fn_body("run_decoration_worker").contains(&needle),
+            free_fn_body("run_decoration_worker_with").contains(&needle),
             "{what} stands outside the decoration worker's own body"
         );
     }

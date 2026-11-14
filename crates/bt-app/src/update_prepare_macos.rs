@@ -89,9 +89,9 @@ use crate::update_job::{
     Driver, MACOS_ARCHITECTURE, NotEligible, Offer, Poster, Refused, SharedTransport, Step, Stop,
     Transport, Unsupported,
 };
-#[cfg(test)]
-pub(crate) use crate::update_prepare::{AtLaunch, at_launch, sum_for};
-use crate::update_prepare::{WORKER, abandon, discard, fetching, finish, matches_its_sum};
+use crate::update_prepare::{
+    WORKER, abandon, discard, fetching, finish, journal_failed, journal_stop, matches_its_sum,
+};
 use crate::update_txn::{
     Adapter, BundleIdentity, Carried, Cdhash, Event, Home, Journal, Layout, TxnId,
 };
@@ -191,6 +191,11 @@ pub(crate) struct MacPrepare {
     /// The layouts this road's Prepare is called through, by the adapter
     /// the press names ([`PreparePoint`]).
     layouts: Layouts<dyn PreparePoint>,
+    /// The data folder's record of the update homes this account's copies made
+    /// (`update_homes::HOMES_RECORD`, 0.4.10 plan row 68e): the home is written into it before
+    /// it is made, so a home whose app is later removed is found and retired. `None` under a
+    /// test's driver, which has no data folder of its own.
+    record: Option<PathBuf>,
 }
 
 impl MacPrepare {
@@ -208,29 +213,9 @@ impl MacPrepare {
                 tools: Arc::new(System),
                 channel: crate::install_channel::channel(),
                 layouts: own_layouts(),
+                record: Some(crate::persist::storage_dir().join(crate::update_homes::HOMES_RECORD)),
             }),
             None => Box::new(Unsupported),
-        }
-    }
-
-    /// A driver for `bundle`, with `tools` and `channel` — a test's.
-    #[cfg(test)]
-    pub(crate) fn with(bundle: PathBuf, tools: Arc<dyn Tools>, channel: Option<Channel>) -> Self {
-        Self {
-            bundle,
-            tools,
-            channel,
-            layouts: own_layouts(),
-        }
-    }
-
-    /// This driver with `ours` in place of the road's own layout — a test's
-    /// fake layout, which records or refuses (U-41a1).
-    #[cfg(test)]
-    pub(crate) fn laid_out(self, ours: Arc<dyn PreparePoint>) -> Self {
-        Self {
-            layouts: Layouts::of(ours),
-            ..self
         }
     }
 }
@@ -248,11 +233,12 @@ impl Driver for MacPrepare {
         transport: &SharedTransport,
         post: &Poster,
     ) -> Result<(), Refused> {
-        let (bundle, tools, transport, layouts) = (
+        let (bundle, tools, transport, layouts, record) = (
             self.bundle.clone(),
             Arc::clone(&self.tools),
             Arc::clone(transport),
             self.layouts.clone(),
+            self.record.clone(),
         );
         let (offer, post, channel) = (offer.clone(), post.clone(), self.channel);
         bt_platform::spawn_at_priority(
@@ -267,6 +253,7 @@ impl Driver for MacPrepare {
                     tools: tools.as_ref(),
                     channel,
                     layouts: &layouts,
+                    record: record.as_deref(),
                 };
                 finish(worker, &post, prepare_on(worker, &road));
             },
@@ -285,6 +272,8 @@ pub(crate) struct Road<'a> {
     tools: &'a dyn Tools,
     channel: Option<Channel>,
     layouts: &'a Layouts<dyn PreparePoint>,
+    /// Where the home is recorded before it is made ([`MacPrepare`]'s `record`).
+    record: Option<&'a Path>,
 }
 
 /// **A layout's `Prepare` on the macOS road** (0.4.7 ticket U-41a1;
@@ -539,14 +528,29 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     ) else {
         return Err(Stop::NotWritable);
     };
-    let rescue_text = rescue.to_str().ok_or(Stop::Journal)?.to_owned();
+    let Some(rescue_text) = rescue.to_str() else {
+        return Err(journal_stop("the rescue copy's path is not Unicode"));
+    };
+    let rescue_text = rescue_text.to_owned();
+    // The home is recorded before it is made: a home that exists is one the record names, so the
+    // carry pass and the uninstall can retire it once its app is gone (row 68e). A record that
+    // cannot be written is said and the update goes on (E4): the updated copy's first start
+    // records the same home (`update_homes::run_update_homes_step`).
+    if let Some(record) = road.record {
+        crate::update_homes::record_update_home(record, &home);
+    }
     match install_txn::durable_create_dir(home.root()) {
         Ok(()) => {}
         Err(failure) if failure.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return Err(Stop::Journal),
+        Err(failure) => {
+            return Err(journal_failed(
+                "the installation home was not created",
+                &failure,
+            ));
+        }
     }
     let lock = install_txn::try_hold(&home.lock(), Hold::Exclusive)
-        .map_err(|_| Stop::Journal)?
+        .map_err(|failure| journal_failed("the transaction lock was not asked for", &failure))?
         .ok_or(Stop::Busy)?;
     if std::fs::symlink_metadata(home.journal()).is_ok() {
         return Err(crate::update_prepare::journal_there(&home));
@@ -554,7 +558,8 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     let allocated = Journal::allocate(txn, rescue_text, layout.allocated(road, &old))
         .naming(adapter)
         .carrying(carried);
-    install_txn::durable_write(&home.journal(), &allocated.encode()).map_err(|_| Stop::Journal)?;
+    install_txn::durable_write(&home.journal(), &allocated.encode())
+        .map_err(|failure| journal_failed("the journal at Allocated was not written", &failure))?;
 
     // From here a refusal abandons the transaction and leaves nothing.
     let places = [rescue.as_path(), stage.as_path(), mount.as_path()];
@@ -584,11 +589,12 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
                     stop
                 })?;
             }
-            let prepared = allocated
-                .prepare_with(recorded)
-                .map_err(|_| Stop::Journal)?;
-            install_txn::durable_write(&home.journal(), &prepared.encode())
-                .map_err(|_| Stop::Journal)?;
+            let prepared = allocated.prepare_with(recorded).map_err(|refusal| {
+                journal_stop(&format!("the journal refuses Prepared: {refusal:?}"))
+            })?;
+            install_txn::durable_write(&home.journal(), &prepared.encode()).map_err(|failure| {
+                journal_failed("the journal at Prepared was not written", &failure)
+            })?;
             Ok(prepared)
         });
     match staged {
@@ -621,8 +627,13 @@ fn acquire(
         Some(mount.to_path_buf()),
     ];
     for folder in folders {
-        let folder = folder.ok_or(Stop::Journal)?;
-        install_txn::durable_create_dir(&folder).map_err(|_| Stop::Journal)?;
+        let Some(folder) = folder else {
+            return Err(journal_stop(
+                "the staged bundle or the rescue copy has no folder",
+            ));
+        };
+        install_txn::durable_create_dir(&folder)
+            .map_err(|failure| journal_failed("a transaction folder was not created", &failure))?;
     }
     road.go_on()?;
 
@@ -845,7 +856,9 @@ pub(crate) fn resume(
         }
         _ => {
             let _ = discard(worker, staged, &Event::Discarded);
-            Err(Stop::Journal)
+            Err(journal_stop(
+                "the staged journal's layout is not a bundle's",
+            ))
         }
     }
 }
@@ -875,7 +888,9 @@ fn still_valid(
     channel: Option<Channel>,
 ) -> Result<(), Stop> {
     let Layout::Bundle { old, new } = &staged.journal.body.layout else {
-        return Err(Stop::Journal);
+        return Err(journal_stop(
+            "the staged journal's layout is not a bundle's",
+        ));
     };
     let (home, adapter) = eligible(bundle, channel).map_err(|why| stop_for(&why))?;
     if home != staged.home || adapter != staged.journal.body.adapter {
@@ -884,10 +899,9 @@ fn still_valid(
     if identity(worker, bundle).map_err(|_| Stop::Identity)? != *old {
         return Err(Stop::Identity);
     }
-    let stage = staged
-        .home
-        .stage_bundle(staged.journal.txn)
-        .ok_or(Stop::Journal)?;
+    let Some(stage) = staged.home.stage_bundle(staged.journal.txn) else {
+        return Err(journal_stop("the staged bundle has no name"));
+    };
     if check(worker, tools, &stage, &new.version)? != *new {
         return Err(Stop::Identity);
     }

@@ -60,3 +60,90 @@ mod tests {
         let named = "powershell.exe";
     }
 }
+
+/// The method door, defined where the fixture says its home is, and called from product code.
+impl BirthFallback {
+    pub fn spawn_last_resort(self) -> Session {
+        self.spawn_through()
+    }
+}
+
+pub fn the_reaper_starts_a_fallback(fallback: BirthFallback) {
+    let _ = fallback.spawn_last_resort();
+}
+
+/// A second function of the door's name: its calls would read as the door's.
+impl Elsewhere {
+    fn spawn_last_resort(&self) {}
+}
+
+#[cfg(test)]
+mod birth_fallbacks {
+    #[test]
+    fn a_birth_fallback_through_the_product_road() {
+        let _ = fallback().spawn_last_resort();
+        let _ = BirthFallback::spawn_last_resort(fallback());
+        let _ = fallback()
+            .spawn_last_resort();
+    }
+
+    #[test]
+    fn allowed_through_the_door_and_for_other_spawns() {
+        let _ = TestShell::spawn_birth_fallback(fallback(), columns(), rows(), wake(), why());
+        let _ = std::thread::spawn(|| ());
+        let _ = fallback().spawn();
+    }
+}
+
+/// A free function of the door's name: its calls would read as the door's too.
+pub fn spawn_last_resort() {}
+
+/// The product's shell birth, its retry the person's (plan row 182): product code names both.
+pub fn create_leaf_session(spec: ShellSpec) {
+    let _ = pty_door::request_shell(spec, wake());
+    let _ = bear(ctx(), turns(), spec, Retry::ThePersons, wake());
+}
+
+#[cfg(test)]
+mod product_retries {
+    #[test]
+    fn a_birth_with_the_persons_retry() {
+        let _ = crate::pty_door::request_shell(spec(), wake());
+        let _ = bear(ctx(), turns(), spec(), Retry::ThePersons, wake());
+    }
+
+    #[test]
+    fn allowed_through_the_tests_retry() {
+        let _ = crate::pty_door::request_shell_in(turns(), spec(), wake());
+        let _ = bear(ctx(), turns(), spec(), Retry::OneShotForATest, wake());
+    }
+
+    #[test]
+    fn a_birth_through_a_grouped_import() {
+        use crate::pty_door::{ShellSpec, request_shell};
+        let _ = request_shell(spec(), wake());
+    }
+
+    #[test]
+    fn a_birth_through_the_parent_module() {
+        let _ = super::request_shell(spec(), wake());
+    }
+
+    #[test]
+    fn the_persons_retry_through_a_grouped_import() {
+        use super::Retry::{OneShotForATest, ThePersons};
+        let _ = bear(ctx(), turns(), spec(), ThePersons, wake());
+    }
+
+    #[test]
+    fn the_persons_retry_through_a_glob_import() {
+        use super::Retry::*;
+        let _ = bear(ctx(), turns(), spec(), ThePersons, wake());
+    }
+}
+
+/// A test-build door that gives a test's birth the person's retry: test code too.
+#[cfg(test)]
+pub(crate) fn request_shell_in(spec: ShellSpec) {
+    let _ = bear(ctx(), turns(), spec, Retry::ThePersons, wake());
+}

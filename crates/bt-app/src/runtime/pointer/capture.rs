@@ -24,7 +24,7 @@ use winit::event::MouseButton;
 use winit::keyboard::ModifiersState;
 use winit::window::WindowId;
 
-use super::PointerHit;
+use super::{FieldDrag, PointerHit};
 
 /// **Which gesture holds the pointer, and its payload** — one variant per row
 /// of §1.2. A gesture whose surface belongs to a tab names the tab, so it is
@@ -79,6 +79,10 @@ pub(crate) enum CaptureOwner {
     /// 2026-10-23, 0.4.9 plan row 45). The one owner latched by the middle
     /// button.
     RowMiddlePress(RowMiddlePress),
+    /// C25, a selection being drawn across one of the window's one-line fields,
+    /// and which field (0.4.9 plan row 179 for the name editor, row 180 for every
+    /// other).
+    FieldSelection(FieldDrag),
 }
 
 /// **One latched gesture** (§2.2).
@@ -101,6 +105,12 @@ pub(crate) struct PointerCapture {
     /// with no button-up and no blur ([`Runtime::end_a_capture_that_lost_its_pointer`]). `None`
     /// where the platform has no per-thread capture (macOS), so there it never fires.
     pub(crate) os: Option<bt_platform::NativeWindow>,
+    /// **Which touch and pen contacts were already down when the gesture began** (0.4.9 plan row
+    /// 107, review F1), sampled beside [`Self::os`] and by the same rule: the contacts a press
+    /// promoted from a finger may be held by, and no later one — a finger that touches down after
+    /// the latch, the one doing a pan, does not keep a gesture whose button came up
+    /// ([`Runtime::end_a_capture_that_lost_its_pointer`]).
+    pub(crate) contacts: bt_platform::ContactMark,
     /// **The last report a press handed to the program was given** (§2.2's release snapshot),
     /// for the one owner whose ending is a message to somebody else: a forwarded press that ends
     /// without its release tells the program its button came up, at this cell and with these
@@ -504,6 +514,18 @@ impl<B: Backend> Runtime<'_, B> {
         gesture_door!(@window latch self SettingsMenuBar value)
     }
 
+    pub(crate) fn held_field_selection(&self) -> Option<&FieldDrag> {
+        gesture_door!(@window held self FieldSelection)
+    }
+
+    pub(crate) fn latch_field_selection(&mut self, value: FieldDrag) {
+        gesture_door!(@window latch self FieldSelection value)
+    }
+
+    pub(crate) fn drop_field_selection(&mut self) {
+        gesture_door!(@window drop self FieldSelection)
+    }
+
     pub(crate) fn held_pane_press(&self) -> Option<&PanePress> {
         gesture_door!(@tab held self PanePress)
     }
@@ -651,9 +673,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// **Latch a gesture**, replacing what the slot holds
     /// ([`App::latch_capture`]'s reason).
     ///
-    /// **The system's capture is sampled once per gesture.** What the slot already holds here is
-    /// an earlier stage of this same gesture (a pane press becoming a drag), so its sample is the
-    /// one taken at the press and is kept; a gesture's first latch takes it now.
+    /// **The system's capture is sampled once per gesture**, and the touch door's contacts beside
+    /// it. What the slot already holds here is an earlier stage of this same gesture (a pane
+    /// press becoming a drag), so its samples are the ones taken at the press and are kept; a
+    /// gesture's first latch takes them now.
     pub(crate) fn latch_capture(&mut self, owner: CaptureOwner, button: MouseButton) {
         let started = self
             .window
@@ -662,9 +685,14 @@ impl<B: Backend> Runtime<'_, B> {
             .as_ref()
             .and_then(|(_, hit)| hit.clone());
         let window = self.window.window.id();
-        let os = match self.app.pointer_capture.as_ref() {
-            Some(held) if held.window == window && held.button == button => held.os,
-            _ => bt_platform::thread_mouse_capture(),
+        let (os, contacts) = match self.app.pointer_capture.as_ref() {
+            Some(held) if held.window == window && held.button == button => {
+                (held.os, held.contacts)
+            }
+            _ => (
+                bt_platform::thread_mouse_capture(),
+                bt_platform::contacts_seen(),
+            ),
         };
         self.app.latch_capture(PointerCapture {
             window,
@@ -672,6 +700,7 @@ impl<B: Backend> Runtime<'_, B> {
             button,
             started,
             os,
+            contacts,
             last: None,
         });
     }

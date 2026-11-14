@@ -144,6 +144,127 @@ pub struct TermLeafV1 {
     /// pane without one writes exactly the bytes it used to.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_command: String,
+    /// **The agent this pane was running, as the vendor's own resume command needs it** — session
+    /// schema v16 (0.4.9 plan row 195; its `docs/DESIGN.md` entry of 2026-11-02).
+    ///
+    /// Written only when an agent's own hook named its session from inside this pane, and cleared
+    /// when that agent ends by itself; what the restore does with it is the application's (a
+    /// resume through the vendor's command, never a line typed into a shell). A session id is a
+    /// filing key that opens nothing without the account's own sign-in, which stays in the
+    /// vendor's folder; since v17 the record also carries the agent's launch words
+    /// ([`AgentRecordV1::launch`]), the person's own command line, of which the flags whose values
+    /// hold credentials are dropped and only named: inline `--settings`, `--mcp-config` or
+    /// `--agents` JSON, and a Codex `-c` whose key is not on its stated list of keys that hold none
+    /// (`bt-app`'s `agent_resume::CarriedValues`, row 74's R5 and review N2).
+    ///
+    /// Additive and absent when there is none, so every document written before v16 still reads
+    /// and every pane without an agent writes exactly the bytes it used to. A record whose id is
+    /// not UUID-shaped is dropped on the way in ([`LayoutNodeV1::degrade_in_place`]) and the pane
+    /// is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRecordV1>,
+}
+
+/// `agent { "vendor": ..., "resume_id": ..., "cwd": ..., "home"?: ..., "launch"?: ... }` — see
+/// [`TermLeafV1::agent`].
+///
+/// The first four fields are the vendor's resume command's own inputs: which vendor (the attention
+/// family name its hook spoke as), the id that vendor resumes by, the folder the vendor files the
+/// session under, and — only when the hook's environment set one — the vendor's configuration
+/// folder, because a session kept under a second account's folder is not found under the first.
+///
+/// **The fifth is how the agent was started** (session schema v17, 0.4.10 plan row 74): the launch
+/// words its vendor's resume is handed again, so a session started in a permission mode or on a
+/// model comes back in it. `None` is a record written before v17, or by a hook that did not read
+/// the launch — not a launch that was read and held nothing — and resumes as v16 did: with the
+/// vendor's own defaults and nothing said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRecordV1 {
+    pub vendor: String,
+    pub resume_id: String,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home: Option<String>,
+    /// Boxed: most records hold none, and the leaf this rides in stays the size the layout's
+    /// other nodes are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<Box<AgentLaunchV1>>,
+}
+
+impl AgentRecordV1 {
+    /// Whether this record is one a build could have written: a UUID-shaped id
+    /// ([`resume_id_is_well_formed`]), a vendor name and a folder. Its launch is asked separately
+    /// ([`AgentLaunchV1::is_well_formed`]): a launch no build wrote costs the launch, not the
+    /// session.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        resume_id_is_well_formed(&self.resume_id)
+            && !self.vendor.is_empty()
+            && !self.cwd.is_empty()
+            && self.home.as_ref().is_none_or(|home| !home.is_empty())
+    }
+}
+
+/// `launch { "args"?: [...], "dropped"?: [...], "unread"?: true }` — see
+/// [`AgentRecordV1::launch`] (session schema v17, 0.4.10 plan row 74).
+///
+/// * **`args`**: the words the resume is handed after the vendor's own resume words, in the order
+///   the agent was started with them — the flags the vendor's table carries and their values. A
+///   prompt, a flag the resume itself replaces (`--resume`, `--continue`) and a flag that makes a
+///   one-time thing (`--worktree`) are never among them.
+/// * **`dropped`**: the names of the flags the agent was started with that are not carried (the
+///   name alone, never its value), which the resumed pane says it came back without.
+/// * **`unread`**: the launch could not be read — the agent's command line was not there to ask,
+///   or did not fit — and the resumed pane says it came back without its launch arguments.
+///
+/// Each field is absent when empty, so a launch that carried everything and dropped nothing is
+/// `{}`. The words are the person's own command line, kept in the clear like every other string in
+/// this file (the session document's plaintext clause).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLaunchV1 {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread: bool,
+}
+
+impl AgentLaunchV1 {
+    /// **The launch that could not be read** (`{"unread": true}`).
+    #[must_use]
+    pub fn unread() -> Self {
+        Self {
+            args: Vec::new(),
+            dropped: Vec::new(),
+            unread: true,
+        }
+    }
+
+    /// Whether this launch is one a build could have written: an unread launch carries no word,
+    /// and no flag name is empty. What a word may hold is the application's rule, asked where it
+    /// is handed to a command line.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        (!self.unread || (self.args.is_empty() && self.dropped.is_empty()))
+            && self.dropped.iter().all(|flag| !flag.is_empty())
+    }
+}
+
+/// **Whether `id` is shaped like the UUID both resuming vendors file sessions under** —
+/// `8-4-4-4-12` hexadecimal digits, either case.
+///
+/// The one check the record's id passes at every boundary: the hook's process before it sends,
+/// the window's endpoint when it reads the line, and this crate when it reads the file. Claude
+/// Code's `--session-id` says "must be a valid UUID", and `codex resume` takes a "Session id
+/// (UUID)"; an id of any other shape is not one either of them could have handed us.
+#[must_use]
+pub fn resume_id_is_well_formed(id: &str) -> bool {
+    let groups: Vec<&str> = id.split('-').collect();
+    groups.len() == 5
+        && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, width)| {
+            group.len() == width && group.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 /// `preview { "kind": "preview", "pinned": bool }` — see [`LeafNodeV1::Preview`]
@@ -248,6 +369,28 @@ impl LayoutNodeV1 {
                     leaf.last_command.clear();
                     report.dropped_commands += 1;
                 }
+                // **Dropped and the pane kept** (row 195): a record no build could have written
+                // names no session the vendor could resume, and the pane comes back as its profile.
+                if leaf
+                    .agent
+                    .as_ref()
+                    .is_some_and(|agent| !agent.is_well_formed())
+                {
+                    leaf.agent = None;
+                    report.dropped_agents += 1;
+                }
+                // **A launch no build could have written is unread, and the session kept** (row
+                // 74): the resume runs with the vendor's defaults and the pane says so, which is
+                // what a launch that could not be read does.
+                if let Some(launch) = leaf
+                    .agent
+                    .as_mut()
+                    .and_then(|agent| agent.launch.as_mut())
+                    .filter(|launch| !launch.is_well_formed())
+                {
+                    **launch = AgentLaunchV1::unread();
+                    report.unread_launches += 1;
+                }
             }
             LayoutNodeV1::Leaf(_) => {}
         }
@@ -338,6 +481,7 @@ mod tests {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })
     }
 

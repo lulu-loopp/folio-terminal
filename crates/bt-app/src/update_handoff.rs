@@ -74,7 +74,7 @@ use bt_platform::install_txn::{self, Held};
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
-use crate::persist::Reply;
+use crate::persist::Ended;
 use crate::update_apply::{ExitGuard, Leave, Left, Outgoing, WaitClock, WallClock, Window};
 use crate::update_txn::{Class, Event, HeaderOutcome, Home, Journal, Nonce, Refusal, Role, TxnId};
 
@@ -755,16 +755,20 @@ pub(crate) enum Looked {
 /// **A request that ended with no answer is over** (C2), read on the turn the
 /// wake brings rather than at the deadline: no applier is known, and the
 /// window's mark decides. Its terminal says which end it was
-/// (`persist::OnTheWorker`): the worker failed on it — its task panicked, and the
+/// (`persist::Ended`): the worker failed on it — its task panicked, and the
 /// worker went on (T-STORAGE-WORKER-ON-THE-SEAM, R2) — or the worker's end left it
 /// owed (queued behind the end, or inside it); the line names which.
+///
+/// `heard` is what the application's drain heard of the request
+/// (`App::storage_answers`, T-STORAGE-LANE-ORDER-BY-CONSTRUCTION): the hand-over
+/// takes no answer of its own; `None` while nothing has been heard.
 pub(crate) fn look(
-    answer: Option<&mut crate::persist::OnTheWorker<HandedOff>>,
+    heard: Option<crate::persist::Ended<HandedOff>>,
     txn: TxnId,
     overdue: bool,
 ) -> Looked {
-    match answer.map(crate::persist::OnTheWorker::hear) {
-        Some(Reply::Failed(words)) => Looked::Over {
+    match heard {
+        Some(Ended::Failed(words)) => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over had no answer: the storage worker failed on it \
                  ({words}) and went on; the window's mark decides who opens Folio as this process \
@@ -772,28 +776,28 @@ pub(crate) fn look(
             ),
             applier: None,
         },
-        Some(Reply::Gone) => Looked::Over {
+        Some(Ended::Gone) => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over had no answer: the storage worker stopped; the \
                  window's mark decides who opens Folio as this process leaves"
             ),
             applier: None,
         },
-        Some(Reply::Answered(handed)) => Looked::Over {
+        Some(Ended::Answered(handed)) => Looked::Over {
             line: handed.line(txn),
             applier: match handed {
                 HandedOff::Started { applier } => Some(applier),
                 _ => None,
             },
         },
-        None | Some(Reply::Waiting) if overdue => Looked::Over {
+        None if overdue => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over did not answer in time; the window's mark decides \
                  who opens Folio as this process leaves"
             ),
             applier: None,
         },
-        None | Some(Reply::Waiting) => Looked::Waiting,
+        None => Looked::Waiting,
     }
 }
 
@@ -993,6 +997,11 @@ mod tests {
     ///
     /// MUTATION: call `bt_platform::message_box` in any road `show_here` (or in
     /// `leave_armed`) again.
+    ///
+    /// **And every box with the state it is raised in** (0.4.10 plan row 72): owned by a
+    /// standing Folio window at the two stops that raise one while their windows stand, and
+    /// ownerless — wearing the program's icon itself — everywhere else. MUTATION: raise a box
+    /// at a site the table has no state for, and the table is one row short.
     #[test]
     fn every_road_process_shows_its_failure_window_without_an_application() {
         use bt_source::{Found, Index, Search, View, needle};
@@ -1032,12 +1041,14 @@ mod tests {
         }
         // **Every caller of the application's box, each with why it may raise one** — the box
         // is the product's one modal, allowed only where there is no window to put a card on. A
-        // controlled stop's lost-change notice is not here: it asks `a_box_would_be_seen` first
-        // and raises a `SeenBox` (T-STOP-NOTICE-BOX-QUERY-MACOS).
+        // controlled stop's lost-change notice and a frame-shape stop's crash alert
+        // (`announce_frame_shape_stop`) are not here: each asks `a_box_would_be_seen` first and
+        // raises a `SeenBox` (T-STOP-NOTICE-BOX-QUERY-MACOS, T-FRAME-SHAPE-STOP-BOX-QUERY).
         let allowed = [
             (
-                "crate::announce_panic",
-                "the panic hook, when the resident run has no console to write to",
+                "crate::SystemBox::say_the_crash",
+                "the panic hook's box (`announce_panic`), when the resident run has no console \
+                 to write to",
             ),
             (
                 "crate::say_at_the_front_door",
@@ -1065,6 +1076,91 @@ mod tests {
             callers(search(needle!("bt_platform::standalone_alert("))),
             ["leave_armed", "show_here"],
             "the road processes' failure windows"
+        );
+        // **Every box the product raises, with the state it is raised in** (0.4.10 plan row 72,
+        // T-MESSAGE-BOX-WEARS-THE-ICON). A box raised while a Folio window stands is owned by it
+        // (`BoxOver`) and has no taskbar button or Alt+Tab entry of its own; every other box is
+        // the process's only window there, or is raised on a thread a window's owner could not
+        // answer from, and wears the program's icon itself (`bt_platform::message_box`'s hook).
+        // A new box joins this table with its state.
+        let states = [
+            (
+                "crate::FolioApp::fail",
+                "owned: a frame-shape stop's alert, its windows standing",
+            ),
+            (
+                "crate::FolioApp::stop_every_window_keeping_in",
+                "owned: a stop's lost change, before a window closes",
+            ),
+            (
+                "crate::SystemBox::say_the_crash",
+                "ownerless (R1): on whichever thread panicked, which may not be the window's",
+            ),
+            (
+                "crate::say_at_the_front_door",
+                "ownerless: a launch refused before it has a window",
+            ),
+            (
+                "crate::uninstall::leave_armed",
+                "ownerless: the uninstaller's start, after the loop has closed every window",
+            ),
+            (
+                "crate::uninstall::run_within",
+                "ownerless: the uninstall door's own process, which has no window",
+            ),
+            (
+                "crate::update_handoff::leave_armed",
+                "ownerless: the update's exit guard, after the loop has closed every window",
+            ),
+            (
+                "crate::update_apply_macos::Machine::show_here",
+                "ownerless: the macOS applier, a road process",
+            ),
+            (
+                "crate::update_apply_windows::Machine::show_here",
+                "ownerless: the Windows applier, a road process",
+            ),
+            (
+                "crate::update_recover::Machine::show_here",
+                "ownerless: the recovery build, a road process",
+            ),
+        ];
+        let sites = |found: Found| -> Vec<String> {
+            let mut sites: Vec<String> = found
+                .in_the_product(index)
+                .owners(index)
+                .into_keys()
+                .map(|identity| match identity.type_owner {
+                    Some(owner) => format!("{}::{owner}::{}", identity.module_path, identity.name),
+                    None => format!("{}::{}", identity.module_path, identity.name),
+                })
+                .collect();
+            sites.sort();
+            sites.dedup();
+            sites
+        };
+        let stated = |owned: bool| -> Vec<String> {
+            let mut stated: Vec<String> = states
+                .iter()
+                .filter(|(_, state)| state.starts_with("owned:") == owned)
+                .map(|(site, _)| (*site).to_owned())
+                .collect();
+            stated.sort();
+            stated
+        };
+        assert_eq!(
+            sites(search(needle!("BoxOver("))),
+            stated(true),
+            "every box raised over a standing window, at its stop"
+        );
+        let mut ownerless = sites(search(needle!("bt_platform::message_box(")));
+        ownerless.extend(sites(search(needle!("bt_platform::standalone_alert("))));
+        ownerless.sort();
+        ownerless.dedup();
+        assert_eq!(
+            ownerless,
+            stated(false),
+            "every box with no window to be owned by, which wears the program's icon itself"
         );
     }
 
@@ -1257,7 +1353,7 @@ mod tests {
             .hand_off(handoff)
             .expect("the storage worker takes the hand-over");
         crate::lane::wait_for_a_wake(&wakes, "the worker's wake after the hand-over's answer");
-        match look(Some(&mut answer), TxnId::new(TXN), false) {
+        match look(answer.heard_alone(), TxnId::new(TXN), false) {
             Looked::Over { applier, .. } => assert_eq!(
                 applier,
                 Some(crate::update_apply::this_process()),
@@ -1811,7 +1907,7 @@ mod tests {
     ) -> String {
         for turn in 0..2_000 {
             match look(
-                Some(&mut *answer),
+                answer.heard_alone(),
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(at(turn)),
             ) {
@@ -1870,14 +1966,14 @@ mod tests {
         quit.handoff_sent(sent);
         assert_eq!(
             look(
-                Some(&mut answer),
+                answer.heard_alone(),
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(sent)
             ),
             Looked::Waiting
         );
         let line = match look(
-            Some(&mut answer),
+            answer.heard_alone(),
             TxnId::new(TXN),
             quit.handoff_is_overdue(sent + crate::quit::HANDOFF_DEADLINE),
         ) {
@@ -2392,7 +2488,7 @@ mod tests {
     /// releases the first holder, so the second ask takes the duty without a
     /// sleep or a fresh budget.
     ///
-    /// MUTATION: in `update_apply::ask_for_the_window_until`, return the first
+    /// MUTATION: in `update_apply::ask_for_the_window_by`, return the first
     /// contended `Window::Refused`.
     #[test]
     fn both_appliers_reask_a_contended_election_within_the_same_budget() {
@@ -2919,7 +3015,16 @@ mod tests {
     /// round-4 ballot scheme the second contender read the dead value without
     /// waiting and overwrote it.
     ///
-    /// MUTATION: in `update_apply::take_the_window_within`, skip the lock.
+    /// **"It waits" is its first pause, not a sleep**
+    /// (T-STALE-MARK-RACE-ON-A-COUNTED-CLOCK): the contender's wait for the
+    /// lock is read and paused on a [`crate::update_apply::CountedClock`]
+    /// (`update_apply::take_the_window_on`), which never sleeps. Its first
+    /// pause — taken only after an ask the test's hold refused — tells the
+    /// test, and lasts until the test has written the live owner and let the
+    /// lock go; the contender's next ask takes it. No real window decides the
+    /// verdict, and the contender's budget is the clock's count.
+    ///
+    /// MUTATION: in `update_apply::take_the_window_within_using`, skip the lock.
     #[test]
     fn a_contender_waits_for_the_election_and_never_overwrites_a_live_owner() {
         let folder = Folder::new("election-order");
@@ -2936,20 +3041,44 @@ mod tests {
         .expect("the test is inside the election");
         let home = staged.home.clone();
         let late = Running { pid: 1, started: 1 };
-        let contender = std::thread::spawn(move || {
-            crate::update_apply::take_the_window(
-                None,
-                &home,
-                txn,
-                late,
-                Instant::now() + crate::update_apply::ELECTION_WITHIN,
-            )
+        let (waits, waiting) = mpsc::channel();
+        let (let_in, let_go) = mpsc::channel::<()>();
+        // The clock lives on the contender's thread only: a contender that
+        // never pauses drops it, and with it `waits`, as it answers.
+        let clock = crate::update_apply::CountedClock::new(move |pause| {
+            if pause == 1 {
+                waits.send(()).unwrap();
+                let _ = let_go.recv();
+            }
         });
-        std::thread::sleep(Duration::from_millis(300));
-        assert!(!contender.is_finished(), "the contender waits for the lock");
+        let contender = bt_platform::spawn_at_priority(
+            "bt-u34-election-order",
+            bt_platform::ThreadPriority::Normal,
+            move |worker| {
+                let answer = crate::update_apply::take_the_window_on(
+                    worker,
+                    &clock,
+                    &home,
+                    txn,
+                    late,
+                    crate::update_apply::ELECTION_WITHIN,
+                );
+                (answer, clock.pauses())
+            },
+        )
+        .expect("the contender");
+        if waiting.recv().is_err() {
+            panic!(
+                "the contender did not wait for the lock: {:?}",
+                contender.join().unwrap()
+            );
+        }
         std::fs::write(&mark, format!("{}:{}", me.pid, me.started)).unwrap();
         drop(inside);
-        assert_eq!(contender.join().unwrap(), Window::Theirs(me));
+        let_in.send(()).unwrap();
+        let (answer, pauses) = contender.join().unwrap();
+        assert_eq!(answer, Window::Theirs(me));
+        assert_eq!(pauses, 1, "taken at the ask after its first pause");
         assert_eq!(
             crate::update_apply::window_owner(&staged.home, txn),
             Some(me)
@@ -2999,17 +3128,34 @@ mod tests {
                 },
             )
         });
-        entered.recv().unwrap();
-        let second = crate::update_apply::take_the_window_within(
-            None,
-            &staged.home,
-            txn,
-            Running { pid: 1, started: 1 },
-            Duration::ZERO,
-            crate::update_apply::Applier,
-        );
+        crate::lane::receive(&entered, "the first contender inside the election");
+        // The second ask is made on a thread of its own while the first stands inside the
+        // election, and awaited within the lane suite's patience; the first is let go before the
+        // verdict, so an ask that ignored its zero budget and waited for the lock is red, never a
+        // hang.
+        let (answered, second) = std::sync::mpsc::channel();
+        let asking = {
+            let home = staged.home.clone();
+            std::thread::spawn(move || {
+                let _ = answered.send(crate::update_apply::take_the_window_within(
+                    None,
+                    &home,
+                    txn,
+                    Running { pid: 1, started: 1 },
+                    Duration::ZERO,
+                    crate::update_apply::Applier,
+                ));
+            })
+        };
+        let mut came_back = None;
+        let _ = crate::lane::within_patience(|| {
+            came_back = second.try_recv().ok();
+            came_back.is_some()
+        });
         release.send(()).unwrap();
         let first = first.join().unwrap();
+        let second = came_back.expect("the second ask waited for the lock past its zero budget");
+        asking.join().unwrap();
 
         assert!(first.is_mine(), "{first:?}");
         assert!(matches!(second, Window::Refused(_)), "{second:?}");

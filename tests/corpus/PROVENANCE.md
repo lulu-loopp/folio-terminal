@@ -23,16 +23,19 @@ Scrub classes, without the original values:
 | Windows home root above the user directory | a same-length neutral directory name |
 | repository parent directory on the recording machine | a same-length neutral directory name |
 | organisation label derived from the mail address | a same-length neutral account label |
+| software-install folder at a drive root (2026-11-02, the 36 `PATH` entries under it in `cargo-build-flood.btcr`) | a same-length neutral folder name; the folders and programs below it are left as recorded |
 
 The project's own name, crate names, tool versions and every control sequence are untouched: they
-identify the software, not a person.
+identify the software, not a person. The program folders on the recorded `PATH` (operating-system,
+vendor and tool directories) are untouched for the same reason: they name software any machine
+may have installed, and only the folder this machine installs it under was replaced.
 
 ## Recordings
 
 | file | source | licence | scrubbed |
 |---|---|---|---|
 | `pwsh-daily.btcr` | first-party recording of `tests/corpus/daily.ps1` under ConPTY (100×24) | repository terms | 2026-08-27 — repository parent directory |
-| `cargo-build-flood.btcr` | first-party recording of a verbose `cargo build` of this workspace under ConPTY (120×20) | repository terms | 2026-08-27 — given name, home root, repository parent directory |
+| `cargo-build-flood.btcr` | first-party recording of a verbose `cargo build` of this workspace under ConPTY (120×20) | repository terms | 2026-08-27 — given name, home root, repository parent directory; 2026-11-02 — software-install folder |
 | `claude-code-session.btcr` | first-party recording of a real interactive Claude Code 2.1.210 session under ConPTY (100×28), driven by `tests/corpus/claude-interactive.plan` | repository terms | 2026-08-27 — given name, mail address, account banner, organisation label, home root, repository parent directory |
 | `editor-alt-screen.btcr` | first-party recording of `tests/corpus/editor-alt-screen.ps1` under ConPTY (60×12) | repository terms | not needed — carried no identity |
 | `tui-redraw.btcr` | first-party recording of `tests/corpus/tui-redraw.ps1` under ConPTY (60×10) | repository terms | not needed — carried no identity |

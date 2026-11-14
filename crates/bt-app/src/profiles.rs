@@ -940,7 +940,33 @@ pub(crate) struct ShellFamily {
     pub(crate) integration: Integration,
     /// Whether this family launches a shell in WSL's path namespace.
     pub(crate) wsl_launcher: bool,
+    /// How it is told to run one command as the interactive shell a person types into, or `None`
+    /// for a family whose spelling this product has not verified — see [`command_flags`].
+    pub(crate) command_flags: Option<CommandFlags>,
 }
+
+/// **The two words that make a shell run one command as the interactive shell a person types
+/// into, and then leave**: `-i` and `-c` for zsh, bash and the Bourne family (T-AGENT-RESUME-ON-MACOS,
+/// 0.4.10 plan row 15). An agent resumed on macOS is started this way, through the pane's own
+/// shell, so that the shell's own startup files give it the `PATH` it was typed under
+/// (`crate::agent_resume::Road::ThroughTheShell`).
+///
+/// **A family without them is a family whose spelling nobody has checked**, not one that has
+/// none: fish and nu take `-i -c` too, but neither is a shell Folio marks commands in, and csh's
+/// `-l` must be its only argument. Each is added from a verified fact, the way a vendor is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CommandFlags {
+    /// The flag that makes the shell interactive although it is handed a command.
+    pub(crate) interactive: &'static str,
+    /// The flag whose next argument is the command.
+    pub(crate) command: &'static str,
+}
+
+/// The interactive one-command spelling zsh, bash and the Bourne family share.
+const POSIX_COMMAND_FLAGS: CommandFlags = CommandFlags {
+    interactive: "-i",
+    command: "-c",
+};
 
 /// Every shell family this product knows by name.
 ///
@@ -965,6 +991,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::PowerShell,
         integration: Integration::PowerShellOptIn,
         wsl_launcher: false,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["cmd"],
@@ -972,6 +999,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Cmd,
         integration: Integration::CmdPrompt,
         wsl_launcher: false,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["bash"],
@@ -979,6 +1007,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::BashInitFile,
         wsl_launcher: false,
+        command_flags: Some(POSIX_COMMAND_FLAGS),
     },
     ShellFamily {
         stems: &["wsl"],
@@ -986,6 +1015,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::BashInitFile,
         wsl_launcher: true,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["zsh"],
@@ -993,6 +1023,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::ZshDotDir,
         wsl_launcher: false,
+        command_flags: Some(POSIX_COMMAND_FLAGS),
     },
     ShellFamily {
         stems: &["sh", "dash", "ksh", "mksh"],
@@ -1000,6 +1031,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::None,
         wsl_launcher: false,
+        command_flags: Some(POSIX_COMMAND_FLAGS),
     },
     ShellFamily {
         stems: &["fish"],
@@ -1007,6 +1039,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Fish,
         integration: Integration::None,
         wsl_launcher: false,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["csh", "tcsh"],
@@ -1014,6 +1047,7 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Csh,
         integration: Integration::None,
         wsl_launcher: false,
+        command_flags: None,
     },
     ShellFamily {
         stems: &["nu"],
@@ -1021,8 +1055,16 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         grammar: crate::shell_literal::ShellGrammar::Nushell,
         integration: Integration::None,
         wsl_launcher: false,
+        command_flags: None,
     },
 ];
+
+/// **The words that make `program` run one command as an interactive shell** ([`CommandFlags`]),
+/// or `None` for a program of no family, or of a family whose spelling is not verified.
+#[must_use]
+pub(crate) fn command_flags(program: &ProgramSource) -> Option<CommandFlags> {
+    shell_family(program)?.command_flags
+}
 
 /// The family `program` belongs to, or `None` for a program no row names.
 fn shell_family(program: &ProgramSource) -> Option<&'static ShellFamily> {
@@ -9882,6 +9924,10 @@ pub struct GitPromptLook<'a> {
     /// the field you are typing into, and a toast at the corner of the window
     /// would be the answer arriving somewhere other than the question.
     pub fault: Option<crate::git::RefNameFault>,
+    /// **Where the field's selection is washed**, in window pixels cut to the name's run — `None`
+    /// for a bare caret (0.4.9 plan row 180, ruling 1). The window reads it off the run it keeps
+    /// for a press; the layout never needs it.
+    pub selection: Option<[f32; 2]>,
 }
 
 /// Everything the menu needs to lay itself out and draw.
@@ -9927,6 +9973,14 @@ impl GitPromptRects {
         let left = self.field[0] + px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
         let right = self.field[2] - px(GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX);
         [left, self.field[1], right.max(left), self.field[3]]
+    }
+
+    /// Whether a point is inside the field — the part of the prompt a press puts a caret in
+    /// (0.4.9 plan row 180); the rest of the menu only swallows a press.
+    #[must_use]
+    pub fn field_holds(&self, x: f64, y: f64) -> bool {
+        let (x, y) = (x as f32, y as f32);
+        contains(self.field, x, y)
     }
 
     /// **The caret's line box** — its x from [`Self::caret_x`], its top and bottom
@@ -9987,7 +10041,7 @@ const GIT_PROMPT_MIN_WIDTH_LOGICAL_PX: f32 = 230.0;
 const GIT_PROMPT_FIELD_HEIGHT_LOGICAL_PX: f32 = 26.0;
 const GIT_PROMPT_FIELD_RADIUS_LOGICAL_PX: f32 = 5.0;
 const GIT_PROMPT_FIELD_PADDING_X_LOGICAL_PX: f32 = 8.0;
-const GIT_PROMPT_FONT_LOGICAL_PX: f32 = 12.5;
+pub(crate) const GIT_PROMPT_FONT_LOGICAL_PX: f32 = 12.5;
 const GIT_PROMPT_CAPTION_LINE_LOGICAL_PX: f32 = 14.0;
 const GIT_PROMPT_HINT_LINE_LOGICAL_PX: f32 = 14.0;
 const GIT_PROMPT_GAP_LOGICAL_PX: f32 = 5.0;
@@ -10201,6 +10255,15 @@ pub fn git_menu_build(layout: &GitMenuLayout, look: &GitMenuLook<'_>) -> Vec<Ove
         ));
         let typed = !prompt.text.is_empty();
         let text_rect = rects.text_run(layout.scale);
+        // The selection behind the name, at the caret bar's height — the settings dialog's wash.
+        if let Some([from, to]) = prompt.selection {
+            let inset = px(GIT_PROMPT_CARET_INSET_LOGICAL_PX).round();
+            quads.push(OverlayQuad {
+                rect: [from, rects.field[1] + inset, to, rects.field[3] - inset],
+                color: palette.accent,
+                alpha: crate::text_field::SELECTION_WASH_ALPHA,
+            });
+        }
         labels.push(ChromeLabel {
             mono: false,
             text: if typed {
@@ -17554,7 +17617,7 @@ mod tests {
     #[test]
     fn a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else() {
         let scale = 1.0;
-        let vault = [term(r"D:\Developer\folio-terminal\crates", None, 30)];
+        let vault = [term(r"D:\Developer\lunar-workshop\crates", None, 30)];
         // **Laid out on the machine it is tipped on**, which since 2026-08-29 is
         // not a formality: the list a bare box gets is what it can start, so a
         // menu laid out as `equipped` and tipped as `bare` would be a fixture
@@ -17640,7 +17703,7 @@ mod tests {
             vec![(
                 MenuRow::Recent(0),
                 whole.recent[0],
-                r"D:\Developer\folio-terminal\crates".to_owned()
+                r"D:\Developer\lunar-workshop\crates".to_owned()
             )],
         );
         assert_eq!(
@@ -18679,7 +18742,7 @@ mod tests {
                 crate::pty_door::gone_place(
                     Some(crate::pty_door::GoneSpec {
                         folder: folder.clone(),
-                        arguments: Vec::new(),
+                        arguments: Some(Vec::new()),
                         working_directory: nowhere.working_directory.clone(),
                     }),
                     &Path::is_dir,
@@ -19334,8 +19397,8 @@ mod tests {
         for (windows, wsl) in [
             (r"C:\Users\Alice", "/mnt/c/Users/Alice"),
             (
-                r"D:\Developer\folio-terminal",
-                "/mnt/d/Developer/folio-terminal",
+                r"D:\Developer\lunar-workshop",
+                "/mnt/d/Developer/lunar-workshop",
             ),
             // The letter is lower-cased going out and upper-cased coming back:
             // `/mnt/C` is not one of WSL's mounts, and `c:\` is not how Windows
@@ -19426,8 +19489,8 @@ mod tests {
     /// at is standing" — quietly not kept for three quarters of the table.
     #[test]
     fn a_new_tab_inherits_a_folder_whenever_the_shell_it_starts_can_name_it() {
-        let windows = Path::new(r"D:\Developer\folio-terminal");
-        let mounted = Path::new("/mnt/d/Developer/folio-terminal");
+        let windows = Path::new(r"D:\Developer\lunar-workshop");
+        let mounted = Path::new("/mnt/d/Developer/lunar-workshop");
         let inside = Path::new("/home/alice/src");
         for (source, profile) in shipped_rows().iter().enumerate() {
             for (target, other) in shipped_rows().iter().enumerate() {
@@ -19694,7 +19757,7 @@ mod tests {
     /// `PATH`.**
     ///
     /// Red gate, and it is not hypothetical: this ticket's own first real-machine
-    /// check ran on a box with Git at `D:\App\Tool\Git`, which is under none of
+    /// check ran on a box with Git at `D:\Kit\Tool\Git` (path neutralised), under none of
     /// the three installers' default roots. A well-known-paths list can only
     /// enumerate defaults, so on that machine — and on everyone else's who chose
     /// their own directory — the row would have been greyed `not installed` over
@@ -19717,17 +19780,17 @@ mod tests {
             &FakeMachine::default()
                 .with_var(
                     "PATH",
-                    std::env::join_paths([r"C:\Other", r"D:\App\Tool\Git\cmd"])
+                    std::env::join_paths([r"C:\Other", r"D:\Kit\Tool\Git\cmd"])
                         .expect("test PATH joins cleanly")
                         .to_str()
                         .expect("ASCII test paths"),
                 )
-                .with_file(r"D:\App\Tool\Git\cmd\git.exe")
-                .with_file(r"D:\App\Tool\Git\bin\bash.exe"),
+                .with_file(r"D:\Kit\Tool\Git\cmd\git.exe")
+                .with_file(r"D:\Kit\Tool\Git\bin\bash.exe"),
         );
         assert_eq!(
             custom.program("gitbash"),
-            Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe")),
+            Some(OsStr::new(r"D:\Kit\Tool\Git\bin\bash.exe")),
             "a Git that is on the path is a Git we can find, wherever it was put"
         );
 
@@ -19738,12 +19801,12 @@ mod tests {
             &FakeMachine::default()
                 .with_var(
                     "PATH",
-                    std::env::join_paths([r"D:\App\Tool\Git\cmd"])
+                    std::env::join_paths([r"D:\Kit\Tool\Git\cmd"])
                         .expect("test PATH joins cleanly")
                         .to_str()
                         .expect("ASCII test paths"),
                 )
-                .with_file(r"D:\App\Tool\Git\cmd\git.exe"),
+                .with_file(r"D:\Kit\Tool\Git\cmd\git.exe"),
         );
         assert!(!tool_only.is_available("gitbash"));
 
@@ -19753,19 +19816,19 @@ mod tests {
             &FakeMachine::default()
                 .with_var(
                     "PATH",
-                    std::env::join_paths([r"D:\App\Tool\Git\cmd"])
+                    std::env::join_paths([r"D:\Kit\Tool\Git\cmd"])
                         .expect("test PATH joins cleanly")
                         .to_str()
                         .expect("ASCII test paths"),
                 )
                 .with_var("ProgramFiles", r"C:\Program Files")
-                .with_file(r"D:\App\Tool\Git\cmd\git.exe")
-                .with_file(r"D:\App\Tool\Git\bin\bash.exe")
+                .with_file(r"D:\Kit\Tool\Git\cmd\git.exe")
+                .with_file(r"D:\Kit\Tool\Git\bin\bash.exe")
                 .with_file(r"C:\Program Files\Git\bin\bash.exe"),
         );
         assert_eq!(
             both.program("gitbash"),
-            Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe"))
+            Some(OsStr::new(r"D:\Kit\Tool\Git\bin\bash.exe"))
         );
     }
 
@@ -21112,7 +21175,7 @@ mod tests {
             // `||` in the mock-up falls through an empty string: a row captioned
             // with nothing is a row you cannot tell from the one above it.
             term("C:\\Users\\Alice\\empty", Some(""), 120),
-            files("D:\\Developer\\folio-terminal\\", 180),
+            files("D:\\Developer\\lunar-workshop\\", 180),
         ];
         let layout = layout(
             anchor(1.0),
@@ -21139,7 +21202,7 @@ mod tests {
             .iter()
             .map(|label| label.text.as_str())
             .collect();
-        for name in ["build", "notes", "empty", "folio-terminal"] {
+        for name in ["build", "notes", "empty", "lunar-workshop"] {
             assert!(drawn.contains(&name), "{name} is missing from {drawn:?}");
         }
     }
@@ -25772,6 +25835,7 @@ mod tests {
             before_caret: "feature",
             preedit: "",
             fault: None,
+            selection: None,
         };
         let look = GitMenuLook {
             target: &target,
@@ -27379,7 +27443,7 @@ mod tests {
                     .unless_gone
                     .map(|gone| crate::pty_door::GoneSpec {
                         folder: gone.folder,
-                        arguments: gone.place.arguments,
+                        arguments: Some(gone.place.arguments),
                         working_directory: gone.place.working_directory,
                     })
             };

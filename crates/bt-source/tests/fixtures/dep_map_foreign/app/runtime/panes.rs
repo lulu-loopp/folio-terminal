@@ -1,6 +1,7 @@
 // A topic calling the subject's traits on the other package's types: by a
 // method call and by the type's path.
 use crate::Runtime;
+use crate::aliased::Aliased;
 use crate::imported::Other;
 use crate::ports::{Nudge, Ports};
 
@@ -25,4 +26,8 @@ pub fn renamed(runtime: &mut Runtime) {
 
 pub fn qualified(runtime: &mut Runtime) {
     <term_fixture::Session as Ports>::port(&mut runtime.leaf.session);
+}
+
+pub fn renamed_crate(runtime: &mut Runtime) {
+    runtime.leaf.session.aliased();
 }

@@ -15,7 +15,7 @@
 //! rung by `create_leaf_session`; a split, a duplicate and every rebuilt view are handed
 //! [`TextScale::ACTUAL`], a restarted shell is handed the rung of the leaf it replaces) and the
 //! move of the leaf itself (tear-out, merge and a transfer to another window carry the
-//! `LeafSession`, and the rung with it). `text_size_tests::the_rung_has_one_owner` holds it.
+//! `ShellSession`, and the rung with it). `text_size_tests::the_rung_has_one_owner` holds it.
 //!
 //! **Who reads it.** The derivation, the pane head's indicator (which shows the requested rung,
 //! not the effective size) and nothing else.

@@ -21,12 +21,23 @@ prompt. The text says a file cannot be found and names a path ending in
 
 **Why.** If you switched the PowerShell integration on, Folio added one line to
 your `$PROFILE` — the startup file PowerShell runs for you, which is yours and
-not Folio's. The line is one of these two shapes:
+not Folio's. A Folio before 0.4.3 wrote one of these two shapes:
 
 ```powershell
 . "$env:APPDATA\Folio\shell-integration\folio.ps1"
 . 'D:\some\other\path\folio.ps1'
 ```
+
+Folio 0.4.3 and later write a guarded line instead, which looks for the script
+first and prints nothing when it is gone:
+
+```powershell
+if (Test-Path -LiteralPath "$env:APPDATA\Folio\shell-integration\folio.ps1" -PathType Leaf) { . "$env:APPDATA\Folio\shell-integration\folio.ps1" } # Folio shell integration v1
+```
+
+Folio 0.4.10 and later rewrite an older line to the guarded one when they start,
+so the error means an older Folio wrote the line and none since 0.4.10 has
+started on this account.
 
 The script it names lives in `%APPDATA%\Folio`, so deleting the program folder
 alone leaves the line working. Deleting `%APPDATA%\Folio` as well takes the
@@ -60,9 +71,9 @@ Delete **only** that one line and save. Everything else in the file is your own.
 If you see more than one such line, they are all the same line written twice and
 all of them can go.
 
-Folio also left a dated copy of this file, `<profile>.bak-<YYYYMMDD>`, beside it
-on the day it first wrote the line. You may keep or delete that copy as you
-like; nothing reads it.
+An older Folio may also have left a dated copy of this file,
+`<profile>.bak-<YYYYMMDD>`, beside it on the day it changed the line. You may
+keep or delete that copy as you like; nothing reads it.
 
 **How to check.** Open a new PowerShell window. It reaches its prompt with
 nothing printed. If you see the error in both PowerShell 7 and Windows

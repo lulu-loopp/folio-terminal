@@ -2,9 +2,9 @@
 //!
 //! ```text
 //! (root)    the PLANTED paths into a topic module (T1 a `use`, T2 a full path with no `use`,
-//!           T5 a group, T7 a rename and a glob, T8 a statement's own gate, T9 a macro's
-//!           argument) and the passing controls (T3 a test-gated `use`, T4 the re-export road,
-//!           T10 a doc link and a string, a field gated to tests)
+//!           T5 a group, T7 a rename and a glob, T8b a statement's own platform gate, T9 a
+//!           macro's argument) and the passing controls (T3 a test-gated `use`, T4 the re-export
+//!           road, T8 a test-gated statement, T10 a doc link and a string, a field gated to tests)
 //! other     a module outside `runtime/`: T6's shapes — a field type, an `impl` header, UFCS
 //! (end)     F1's foreign heads (G2, G3, G1), F2's body group, glob and rename, a glob into a
 //!           topic and a nested module's `use`, F3's comment inside a path
@@ -48,12 +48,18 @@ pub fn the_road() -> u8 {
 }
 
 pub fn gated_statement() -> u8 {
-    // T8 — PLANTED: a statement's own gate, which the item grain does not read.
+    // T8 — a statement's own test gate: out of the product by the query's gate grain (plan
+    // row 77), so accepted.
     #[cfg(test)]
     let a = runtime::clipboard::copy(0);
     #[cfg(not(test))]
     let a = 0;
-    a
+    // T8b — PLANTED: a statement's own platform gate, still refused by the guard's statement rule.
+    #[cfg(windows)]
+    let b = runtime::clipboard::copy(0);
+    #[cfg(not(windows))]
+    let b = 0;
+    a + b
 }
 
 pub fn in_a_macro() -> Vec<u8> {

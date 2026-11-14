@@ -857,6 +857,30 @@ pub struct PaletteLayout {
 }
 
 impl PaletteLayout {
+    /// **The run the input's text is laid out in**, its left and right edge: the field inside its
+    /// own padding. One derivation for the painter and the run a press reads (0.4.9 plan
+    /// row 180).
+    #[must_use]
+    pub fn text_run(&self) -> [f32; 2] {
+        let padding = FIELD_PADDING_X_LOGICAL_PX * self.scale;
+        let left = self.field[0] + padding;
+        [left, (self.field[2] - padding).max(left)]
+    }
+
+    /// Whether a point is inside the input's own box — the part of the palette a press puts a
+    /// caret in (0.4.9 plan row 180); the rest of the box only swallows a press.
+    #[must_use]
+    pub fn field_holds(&self, x: f64, y: f64) -> bool {
+        let (x, y) = (x as f32, y as f32);
+        contains(self.field, x, y)
+    }
+
+    /// The size the input's text is set at, in physical pixels.
+    #[must_use]
+    pub fn field_font_px(&self) -> f32 {
+        FIELD_FONT_LOGICAL_PX * self.scale
+    }
+
     /// The caret's own bar, which is the **one** derivation the painter and the
     /// IME both read.
     ///
@@ -1265,6 +1289,10 @@ pub fn build(
     layout: &PaletteLayout,
     palette: &ChromePalette,
     selected: usize,
+    // **Where the input's selection is washed**, in window pixels cut to the text's run — `None`
+    // for a bare caret (0.4.9 plan row 180, ruling 1). The window reads it off the run it keeps
+    // for a press, which this module never shapes.
+    selection: Option<[f32; 2]>,
 ) -> Vec<OverlayLayer> {
     let scale = layout.scale;
     let px = |logical: f32| logical * scale;
@@ -1298,12 +1326,17 @@ pub fn build(
     };
 
     // ── the input ──────────────────────────────────────────────────────────
-    let field_text_rect = [
-        layout.field[0] + px(FIELD_PADDING_X_LOGICAL_PX),
-        layout.field[1],
-        layout.field[2] - px(FIELD_PADDING_X_LOGICAL_PX),
-        layout.field[3],
-    ];
+    let [text_left, text_right] = layout.text_run();
+    let field_text_rect = [text_left, layout.field[1], text_right, layout.field[3]];
+    // The selection behind the query, at the caret bar's height — the settings dialog's wash.
+    if let Some([from, to]) = selection {
+        let inset = FIELD_CARET_INSET_LOGICAL_PX * scale;
+        layer.quads.push(OverlayQuad {
+            rect: [from, layout.field[1] + inset, to, layout.field[3] - inset],
+            color: palette.accent,
+            alpha: crate::text_field::SELECTION_WASH_ALPHA,
+        });
+    }
     layer.labels.push(ChromeLabel {
         mono: false,
         text: layout.shown.clone(),
@@ -2762,7 +2795,7 @@ mod list_tests {
             &mut ten_per_char,
         );
         let colours = bt_render::chrome_palette();
-        let painted = super::build(&layout, &colours, 0);
+        let painted = super::build(&layout, &colours, 0, None);
         let layer = painted.first().expect("one layer, one fade");
         let list = layout.list;
         // The row the selection is on is the top one, and half of it is above

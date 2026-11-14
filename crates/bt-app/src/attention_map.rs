@@ -503,6 +503,16 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "Stop",
         via: Via::Stop,
         words: Words::Transcript("transcript_path"),
+        // The same payload names the session the turn ended in and the folder it is filed under
+        // (row 195): `claude --resume <session_id>` in `cwd` brings it back.
+        resume: Resume::Fields {
+            id: "session_id",
+            cwd: "cwd",
+            // Claude Code's payload names no client: a nested headless `claude -p` is not told
+            // apart from the pane's own agent (a named limit, `docs/DESIGN.md` 2026-11-02).
+            only_client: None,
+        },
+        nowhere: Nowhere::Says,
     },
     // **And this one deliberately cannot**, though its payload names the same file. A turn that
     // ended in failure did not end on the sentence the transcript ends with: that sentence is from
@@ -513,12 +523,33 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "StopFailure",
         via: Via::StopFailure,
         words: Words::None,
+        // Its hook is spawned without the payload (`args_for`): a turn that failed is followed by
+        // the next `Stop`, which names the same session.
+        resume: Resume::None,
+        nowhere: Nowhere::Says,
     },
+    // **codex's `Stop` hook**, which since 0.4.10 (plan row 69) is the entry Folio installs for
+    // codex 0.148 and later. Its request is quoted from upstream at `rust-v0.166.0`
+    // (`codex-rs/hooks/src/events/stop.rs`, `stop.command.input.schema.json`): `session_id`,
+    // `turn_id`, `transcript_path`, `cwd`, `hook_event_name`, `model`, `permission_mode`,
+    // `stop_hook_active` and `last_assistant_message`, the last being the sentence itself.
     TurnEnd {
         family: CODEX,
         event: "stop",
         via: Via::Stop,
-        words: Words::None,
+        words: Words::Field("last_assistant_message"),
+        // `codex resume <session_id>` in `cwd` brings the session back.
+        resume: Resume::Fields {
+            id: "session_id",
+            cwd: "cwd",
+            // The hook's request names no client, unlike `notify`'s: a nested `codex exec` the
+            // pane's codex started is not told apart from the pane's own session, the limit
+            // Claude Code's `claude -p` already has (`docs/DESIGN.md` 2026-11-04).
+            only_client: None,
+        },
+        // codex runs its hooks in every session, in a Folio pane or not, and shows a hook that
+        // exited non-zero as failed: a turn that ended where nobody is watching is not a failure.
+        nowhere: Nowhere::Quiet,
     },
     // codex's `notify` program, whose only observed `type` is `agent-turn-complete` — and which the
     // survey found **silent** while a real approval box was on screen. It says "I have finished
@@ -533,6 +564,16 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "agent-turn-complete",
         via: Via::Notify,
         words: Words::Field("last-assistant-message"),
+        // The recording's payload carries `thread-id` and `cwd` (row 195): `codex resume
+        // <thread-id>` brings the session back.
+        resume: Resume::Fields {
+            id: "thread-id",
+            cwd: "cwd",
+            // The same payload says which client ran the turn (`"client":"codex-tui"` in the
+            // recording): a `codex exec` an agent in the pane started is not the pane's session.
+            only_client: Some(("client", "codex-tui")),
+        },
+        nowhere: Nowhere::Says,
     },
     // pi's whole contribution. "Fires only once a run fully settles."
     TurnEnd {
@@ -540,6 +581,8 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "agent_settled",
         via: Via::AgentSettled,
         words: Words::None,
+        resume: Resume::None,
+        nowhere: Nowhere::Says,
     },
     // copilot's, and the only one of its thirteen hook events that says a turn is over: "The main
     // agent finishes a turn." Its payload's `stopReason` is quoted as the single value `"end_turn"`.
@@ -555,6 +598,10 @@ pub(crate) const TURN_END: &[TurnEnd] = &[
         event: "agentStop",
         via: Via::Stop,
         words: Words::None,
+        // copilot has a resume command (`copilot --resume <id>`) and its payload a `sessionId`; it
+        // lands vendor by vendor, from its own verified facts, as a row in `agent_resume::VENDORS`.
+        resume: Resume::None,
+        nowhere: Nowhere::Says,
     },
 ];
 
@@ -567,6 +614,57 @@ pub(crate) struct TurnEnd {
     pub(crate) via: Via,
     /// Where the words are, when there are any.
     pub(crate) words: Words,
+    /// Where the session this turn ended in is named, when the family names one this build can
+    /// resume (0.4.9 plan row 195).
+    pub(crate) resume: Resume,
+    /// What the verb's exit says when there is nowhere to say it: no Folio pane, or no window
+    /// behind it any more.
+    pub(crate) nowhere: Nowhere,
+}
+
+/// **The verb's exit when a turn ended where no Folio window can hear it** (0.4.10 plan row 69).
+///
+/// The verb exits 1 there, and for a hook only Folio installs, run only from Folio's panes, that is
+/// a fact worth a status line. A program that runs its hooks in every session it ever starts, in a
+/// pane or not, and shows a non-zero exit as a failed hook, reads the same 1 as something gone
+/// wrong in every session started outside Folio — which nothing did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Nowhere {
+    /// Exit 1: the hook says it reached nobody.
+    Says,
+    /// Exit 0: a turn that ended where nobody is watching is not a failure.
+    Quiet,
+}
+
+/// **Where a turn-end payload names its session and its folder** — the third declared field the
+/// attention wire may carry (`crate::agent_resume`).
+///
+/// Declared per row for [`Words`]'s reason: the families spell the same two facts differently
+/// (`session_id` beside `thread-id`), and a build that went looking for an id in whatever arrived
+/// would one day hand a vendor's resume command somebody else's string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Resume {
+    /// The row names no session.
+    None,
+    /// The payload's top-level `id` field is the vendor's session id and `cwd` its folder.
+    /// `only_client`, when declared, is a field naming the client that ran the turn and the value
+    /// the vendor's interactive client gives it: a payload whose field says any other client names
+    /// no session this pane can resume (row 195, review F1). Nor does a payload without the field
+    /// (re-review RN1): the survey's recording of the interactive client carries it.
+    Fields {
+        id: &'static str,
+        cwd: &'static str,
+        only_client: Option<(&'static str, &'static str)>,
+    },
+}
+
+impl Resume {
+    /// Whether this row names a session — which, like [`Words::are_somewhere`], is also whether
+    /// its hook needs a payload at all.
+    #[must_use]
+    pub(crate) fn is_declared(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 /// **Where a turn's last sentence is to be found**, declared per row (§12.1 R1's fifth column).
@@ -626,6 +724,100 @@ pub(crate) fn turn_end_row(family: &str, event: &str) -> Option<&'static TurnEnd
     TURN_END
         .iter()
         .find(|row| row.family == family && row.event == event)
+}
+
+/// **The third table: events that only happen while a turn is running** (0.4.10 plan row 75).
+///
+/// The tab's blue dot says *finished, and you have not looked* (DESIGN §7.1.5b). For a pane whose
+/// program is an agent, "finished" is the end of a turn ([`TURN_END`]), and a turn that has started
+/// again since is work in flight, which outranks a finished claim (D35). The start of a turn is
+/// already declared — a clear whose `begins_turn` is true. What is declared here is the rest of the
+/// evidence that a turn is under way: an arrival that cannot happen between turns, because it is
+/// the agent's own work reporting in. Claude Code's hooks reference says `UserPromptSubmit` also
+/// fires on turns Claude Code starts on its own (a `/loop` iteration, a background subagent
+/// reporting back) and is silent about others; these rows are what is heard of a turn whose start
+/// no hook announced.
+///
+/// **A separate table, for [`TURN_END`]'s reason.** These rows are clears on the queue lane as
+/// well, and what they mean there — a receipt, a kind's own boundary — is a different sentence
+/// from "the agent is working". A column on [`ROWS`] would ask every row the question, including
+/// the waits, and a wait is not evidence of a running turn: `Notification.agent_needs_input` is a
+/// *background* session asking, and a quota wait is an agent standing still. Every row here names
+/// an event [`ROWS`] carries, so it is installed wherever the clears are — pinned below.
+///
+/// **What is not here.** `SessionEnd` / `sessionEnd` (a session ending is not a turn running),
+/// `Notification.agent_completed` (a background session finished, not this pane's turn) and
+/// `Notification.quota_auto_resume_disabled` (the agent stays stopped). codex and pi contribute
+/// nothing: neither has an installed row that is heard inside a turn or says one began, so their
+/// panes are read by their turns' ends alone — codex's `Stop` hook (`stop`) or `notify`'s
+/// `agent-turn-complete`, pi's `agent_settled` — and a dot one of them earned while the user was
+/// away stays through its next turn, until that turn ends or the pane is looked at (a named limit,
+/// `docs/DESIGN.md` 2026-11-06).
+pub(crate) const TURN_WITHIN: &[TurnWithin] = &[
+    // "Runs immediately after a tool completes successfully."
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "PostToolUse",
+    },
+    // "Runs after a user responds to an MCP elicitation."
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "ElicitationResult",
+    },
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "Notification.elicitation_complete",
+    },
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "Notification.elicitation_response",
+    },
+    // The quota reset and the agent carried on by itself: a turn is running.
+    TurnWithin {
+        family: CLAUDE_CODE,
+        event: "Notification.quota_auto_resume_fired",
+    },
+];
+
+/// One row of [`TURN_WITHIN`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TurnWithin {
+    pub(crate) family: &'static str,
+    pub(crate) event: &'static str,
+}
+
+/// **What one arrival says about the pane's turn** — read off the three tables and nothing else
+/// (0.4.10 plan row 75). [`crate::agent_turns`] is what the pane does with it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TurnStep {
+    /// A turn ended ([`TURN_END`]).
+    Ended,
+    /// A turn began: a clear that declares `begins_turn`.
+    Began,
+    /// The agent's own work reported in from inside a turn ([`TURN_WITHIN`]).
+    Within,
+}
+
+/// The [`TurnStep`] a `<family>:<event>` is, if it is one.
+///
+/// The end is asked first, and the order is the declaration rather than a preference: `Stop` is a
+/// clear in [`ROWS`] and a turn's end in [`TURN_END`], and of those two sentences only the second is
+/// about the turn.
+#[must_use]
+pub(crate) fn turn_step(family: &str, event: &str) -> Option<TurnStep> {
+    if turn_end_row(family, event).is_some() {
+        return Some(TurnStep::Ended);
+    }
+    if let Some(MappedAction::Clear {
+        begins_turn: true, ..
+    }) = row(ROWS, family, event).map(|row| row.action)
+    {
+        return Some(TurnStep::Began);
+    }
+    TURN_WITHIN
+        .iter()
+        .any(|row| row.family == family && row.event == event)
+        .then_some(TurnStep::Within)
 }
 
 /// **R2, made a function**: the rows one machine actually has installed.
@@ -998,9 +1190,10 @@ mod tests {
 
     /// **Where a sentence may be quoted from is a column, and it is closed.**
     ///
-    /// Two families declare a source today and the other four declare none, and this walks the
-    /// whole table rather than the two — because the failure this is about is not a row that says
-    /// the wrong thing, it is a row that ends up saying *something* when nobody decided it should.
+    /// Three rows of two families declare a source today and the other three declare none, and
+    /// this walks the whole table rather than the three — because the failure this is about is not
+    /// a row that says the wrong thing, it is a row that ends up saying *something* when nobody
+    /// decided it should.
     /// A `Words` inherited by a family whose payload was never read would put a tool name, a file
     /// path or a prompt on somebody's desktop.
     #[test]
@@ -1016,10 +1209,14 @@ mod tests {
             Some(Words::Field("last-assistant-message")),
             "the field codex's `notify` payload has carried since the survey recorded it"
         );
+        assert_eq!(
+            words(CODEX, "stop"),
+            Some(Words::Field("last_assistant_message")),
+            "the field codex's `Stop` hook request names the sentence with, at rust-v0.166.0"
+        );
         // Everything else, named one by one so that adding a source is a line typed on purpose.
         for silent in [
             (CLAUDE_CODE, "StopFailure"),
-            (CODEX, "stop"),
             (PI, "agent_settled"),
             (COPILOT, "agentStop"),
         ] {
@@ -1036,8 +1233,8 @@ mod tests {
                 .iter()
                 .filter(|row| row.words.are_somewhere())
                 .count(),
-            2,
-            "two rows can quote; a third is a decision, not a refactor"
+            3,
+            "three rows can quote; a fourth is a decision, not a refactor"
         );
         // **A row that only ever raises a wait has nowhere to declare a source**, because this is
         // the announcement lane's table and it is not on it. That is red line 14 read from the
@@ -1504,6 +1701,63 @@ mod tests {
                 row.family,
                 row.event
             );
+        }
+    }
+
+    /// **Every row of [`TURN_WITHIN`] is a clear [`ROWS`] carries, and none is a turn's end**
+    /// (0.4.10 plan row 75): a row here is only heard if the installer installs its event, which
+    /// it does for every row of [`ROWS`] — and a row that were also in [`TURN_END`] would be read
+    /// as the end, so writing it here would be a sentence nobody can hear.
+    #[test]
+    fn every_turn_within_row_is_an_installed_clear_and_not_an_end() {
+        for within in TURN_WITHIN {
+            let clear = row(ROWS, within.family, within.event).unwrap_or_else(|| {
+                panic!("{}:{} has no row to install", within.family, within.event)
+            });
+            assert!(
+                matches!(
+                    clear.action,
+                    MappedAction::Clear {
+                        begins_turn: false,
+                        ..
+                    }
+                ),
+                "{}:{} is a clear that begins no turn",
+                within.family,
+                within.event
+            );
+            assert_eq!(turn_end(within.family, within.event), None);
+            assert_eq!(
+                turn_step(within.family, within.event),
+                Some(TurnStep::Within)
+            );
+        }
+    }
+
+    /// **What each family's arrivals say about a turn, from the tables alone** (row 75). A turn's
+    /// end wins over the clear the same event also is; a clear that begins a turn says so; a wait,
+    /// a session's end and a background session's news say nothing about this pane's turn.
+    #[test]
+    fn each_familys_turn_steps_come_from_its_rows() {
+        for (family, event, step) in [
+            (CLAUDE_CODE, "Stop", Some(TurnStep::Ended)),
+            (CLAUDE_CODE, "StopFailure", Some(TurnStep::Ended)),
+            (CLAUDE_CODE, "UserPromptSubmit", Some(TurnStep::Began)),
+            (CLAUDE_CODE, "PostToolUse", Some(TurnStep::Within)),
+            (CLAUDE_CODE, "PermissionRequest", None),
+            (CLAUDE_CODE, "Notification.agent_needs_input", None),
+            (CLAUDE_CODE, "Notification.agent_completed", None),
+            (CLAUDE_CODE, "SessionEnd", None),
+            (CODEX, "stop", Some(TurnStep::Ended)),
+            (CODEX, "agent-turn-complete", Some(TurnStep::Ended)),
+            (CODEX, "user-prompt-submit", Some(TurnStep::Began)),
+            (COPILOT, "agentStop", Some(TurnStep::Ended)),
+            (COPILOT, "userPromptSubmitted", Some(TurnStep::Began)),
+            (COPILOT, "notification.permission_prompt", None),
+            (COPILOT, "sessionEnd", None),
+            (PI, "agent_settled", Some(TurnStep::Ended)),
+        ] {
+            assert_eq!(turn_step(family, event), step, "{family}:{event}");
         }
     }
 }

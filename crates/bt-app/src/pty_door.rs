@@ -142,21 +142,25 @@ pub(crate) struct ShellSpec {
 /// [`ShellSpec::unless_gone`].
 pub(crate) struct GoneSpec {
     pub(crate) folder: PathBuf,
-    pub(crate) arguments: Vec<OsString>,
+    /// The command line to start instead, or `None` to start nothing: a resumed agent is never run
+    /// in a folder its session was not filed under (row 195, review F3).
+    pub(crate) arguments: Option<Vec<OsString>>,
     pub(crate) working_directory: Option<PathBuf>,
 }
 
 /// **What a shell's birth answers**: the session, or why there is none, and whether the folder
 /// the pane carried was found gone — the pane then stands where no folder would have put it.
+/// `session` is `None` when nothing was asked of `bt-pty`: the folder was gone and the birth's
+/// [`GoneSpec`] starts nothing in its place.
 pub(crate) struct Born {
-    pub(crate) session: Result<PtySession, PtyError>,
+    pub(crate) session: Option<Result<PtySession, PtyError>>,
     pub(crate) folder_gone: bool,
 }
 
 impl From<Result<PtySession, PtyError>> for Born {
     fn from(session: Result<PtySession, PtyError>) -> Self {
         Self {
-            session,
+            session: Some(session),
             folder_gone: false,
         }
     }
@@ -208,11 +212,12 @@ fn plan_birth<'r>(
 /// folder asked about ([`gone_place`]), the PowerShell load composed (naming the script prepares
 /// it), the current account's environment read and the declarations derived from it, then
 /// `bt-pty`'s spawn — the folder's existence check, the pseudoconsole, the process, and the
-/// one-shot retry to the last-resort shell.
+/// one-shot retry to the last-resort shell, started with the arguments `retry` gives it.
 fn bear(
     ctx: &WorkerCtx,
     turns: &crate::packaged_turns::PackagedTurns,
     spec: ShellSpec,
+    retry: Retry,
     wake: OutputWake,
 ) -> Born {
     let ShellSpec {
@@ -231,7 +236,20 @@ fn bear(
     let gone = gone_place(unless_gone, &Path::is_dir);
     let folder_gone = gone.is_some();
     let (arguments, working_directory) = match gone {
-        Some(gone) => (gone.arguments, gone.working_directory),
+        Some(GoneSpec {
+            arguments: Some(arguments),
+            working_directory,
+            ..
+        }) => (arguments, working_directory),
+        // A birth that starts nothing when its folder is gone (row 195, review F3).
+        Some(GoneSpec {
+            arguments: None, ..
+        }) => {
+            return Born {
+                session: None,
+                folder_gone,
+            };
+        }
         None => (arguments, working_directory),
     };
     // **A Windows PowerShell 5.1 birth composes from the edition's known language mode**
@@ -254,7 +272,7 @@ fn bear(
     );
     let composed = planned.composed;
     let args = composed.arguments;
-    let fallback_args = planned.last_resort;
+    let fallback_args = retry.retry_arguments(planned.last_resort);
     let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     // **A carried environment this system cannot give a shell refuses the birth** (F-SWEEP-2-048
     // round 3): said in the diagnostics and on the window's "Shell not started" card, never cut.
@@ -263,7 +281,7 @@ fn bear(
     {
         crate::diagnostics::stderr_line(line.to_string());
         return Born {
-            session: Err(PtyError::Backend(line)),
+            session: Some(Err(PtyError::Backend(line))),
             folder_gone,
         };
     }
@@ -333,7 +351,7 @@ fn bear(
             }
         });
     Born {
-        session,
+        session: Some(session),
         folder_gone,
     }
 }
@@ -344,17 +362,75 @@ fn bear(
 /// handed too, so a pane moved to another window while it is being born is woken there. Answers at
 /// once; only a thread that cannot be started is an error here.
 pub(crate) fn request_shell(spec: ShellSpec, wake: OutputWake) -> Result<ShellBirth, PtyError> {
-    request_shell_in(&crate::packaged_turns::TURNS, spec, wake)
+    let reader_wake = wake.clone();
+    request(
+        move |ctx| {
+            bear(
+                ctx,
+                &crate::packaged_turns::TURNS,
+                spec,
+                Retry::ThePersons,
+                reader_wake,
+            )
+        },
+        wake,
+    )
 }
 
-/// [`request_shell`] in `turns` — the process's, or a test's own.
+/// [`request_shell`] in a test's own `turns`, its failed-start retry a one-shot without the
+/// profile ([`Retry::OneShotForATest`]): the product's retry is the account's interactive
+/// PowerShell, which no test may start (plan row 182).
+#[cfg(all(test, windows))]
 pub(crate) fn request_shell_in(
     turns: &'static crate::packaged_turns::PackagedTurns,
     spec: ShellSpec,
     wake: OutputWake,
 ) -> Result<ShellBirth, PtyError> {
     let reader_wake = wake.clone();
-    request(move |ctx| bear(ctx, turns, spec, reader_wake), wake)
+    request(
+        move |ctx| bear(ctx, turns, spec, Retry::OneShotForATest, reader_wake),
+        wake,
+    )
+}
+
+/// **Which arguments a birth's last-resort retry is started with** (plan row 182): the
+/// composed ones a pane's retry is started with ([`Self::ThePersons`]), or, in a test build, a
+/// one-shot that runs no profile and no line editor (`Self::OneShotForATest`). The retry is
+/// the shell that starts when the asked program would not, and the one the session keeps for a
+/// death at birth; for the person it is the interactive last-resort shell, unchanged.
+enum Retry {
+    /// The person's retry: the composed last-resort arguments, as given.
+    ThePersons,
+    /// A test's retry: [`A_TESTS_RETRY`], whatever was composed.
+    #[cfg(all(test, windows))]
+    OneShotForATest,
+}
+
+/// A test's last-resort retry ([`Retry::OneShotForATest`]): the test's own first start's
+/// shape — one command, no profile, no prompt — with an exit code of its own.
+#[cfg(all(test, windows))]
+const A_TESTS_RETRY: [&str; 5] = [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "exit 6",
+];
+
+impl Retry {
+    /// The retry's argument list, given the one the birth composed (`composed`).
+    fn retry_arguments<'r>(
+        self,
+        composed: Box<dyn Fn() -> Vec<OsString> + 'r>,
+    ) -> Box<dyn Fn() -> Vec<OsString> + 'r> {
+        match self {
+            Self::ThePersons => composed,
+            #[cfg(all(test, windows))]
+            Self::OneShotForATest => {
+                Box::new(|| A_TESTS_RETRY.iter().map(OsString::from).collect())
+            }
+        }
+    }
 }
 
 /// **The process's shell births**: the last number given, the answers published and not yet
@@ -395,7 +471,7 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 
 /// A session nobody will take, taken apart on a thread of its own (`bt_pty::retire_session`).
 fn retire(answer: Born) {
-    if let Ok(session) = answer.session {
+    if let Some(Ok(session)) = answer.session {
         bt_pty::retire_session(session);
     }
 }
@@ -583,6 +659,30 @@ mod tests {
 
     use super::*;
 
+    /// RED (plan row 182) — **a test's birth retry is a one-shot without the profile**: the
+    /// arguments `Retry::OneShotForATest` gives the last-resort retry, whatever the birth
+    /// composed, are `-NoProfile -NonInteractive -Command` without `-NoExit`, read for the
+    /// last-resort shell without starting it. So the retry `request_shell_in` gives a test's
+    /// birth — started when the asked program will not start, or kept for a death at birth —
+    /// never runs the account's profile or line editor.
+    ///
+    /// MUTATION: have `Retry::retry_arguments` hand `OneShotForATest` the composed arguments
+    /// (`plant-182-one-shot-is-the-persons.py`) — the composed retry is `-NoLogo` alone, an
+    /// interactive shell with the profile, and this names it.
+    #[cfg(windows)]
+    #[test]
+    fn a_tests_birth_retry_is_a_one_shot_without_the_profile() {
+        let composed = Box::new(|| shell_integration::last_resort_arguments(false));
+        let retry = (Retry::OneShotForATest.retry_arguments(composed))();
+        assert!(
+            shell_integration::is_a_profile_free_one_shot(
+                Path::new(bt_pty::LAST_RESORT_SHELL),
+                &retry,
+            ),
+            "a test's last-resort retry {retry:?} runs the profile or waits at a prompt"
+        );
+    }
+
     /// RED (T-PANIC-ROWS-HONEST) — **a birth that panics under the resident panic hook is born as
     /// a `PtyError::Backend`**, published once and followed by the wake. The product's hook ends
     /// the process for a panic it is not told is contained, before any catch runs; the birth runs
@@ -615,7 +715,7 @@ mod tests {
         let born = shell
             .take()
             .expect("the answer is published before the wake");
-        let Err(PtyError::Backend(said)) = born.session else {
+        let Some(Err(PtyError::Backend(said))) = born.session else {
             panic!("a panicked birth is a backend error");
         };
         assert_eq!(said, BIRTH_PANICKED, "and says none of the panic's text");

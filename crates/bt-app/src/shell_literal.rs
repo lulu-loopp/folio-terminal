@@ -90,6 +90,19 @@ impl Refusal {
             Self::NushellUnmeasured => Text::PastePathNushell,
         }
     }
+
+    /// The reason's word in a paste refusal line (plan row 81) — a kind, never the path.
+    pub fn log_word(self) -> &'static str {
+        match self {
+            Self::Encoding => "encoding",
+            Self::Control => "control",
+            Self::PowerShellQuote => "powershell-quote",
+            Self::DoubleQuote => "double-quote",
+            Self::CmdPercent => "cmd-percent",
+            Self::CmdDelayedExpansion => "cmd-delayed-expansion",
+            Self::NushellUnmeasured => "nushell-unmeasured",
+        }
+    }
 }
 
 pub fn representable(path: &Path) -> Result<&str, Refusal> {
@@ -114,6 +127,13 @@ fn windows_path(text: &str) -> bool {
 
 fn posix(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// **One word in POSIX single quotes**, whatever it holds: a quote of its own is closed, escaped and
+/// reopened. What the Mac's resume road hands a shell for each of an agent's launch words
+/// (`agent_resume::Vendor::shell_command`, 0.4.10 plan row 74).
+pub(crate) fn posix_literal(text: &str) -> String {
+    posix(text)
 }
 
 /// A csh/tcsh word. Those shells perform history expansion even inside single

@@ -208,6 +208,23 @@ impl TextField {
         std::borrow::Cow::Owned(composed)
     }
 
+    /// **The selection as it stands in [`Self::composed`]** — what a painter that
+    /// draws the composed string draws the selection and the caret from
+    /// (T-SETTINGS-FIELDS-IME-POSITION).
+    ///
+    /// [`Self::selection`] while nothing is being composed. During a composition it
+    /// is a bare caret just past the pre-edit: the letters being composed push the
+    /// caret along and are not a selection, and the selection they will replace on
+    /// commit is not shown over the composed string it no longer lines up with.
+    #[must_use]
+    pub fn composed_selection(&self) -> std::ops::Range<usize> {
+        if self.preedit.is_empty() {
+            return self.selection();
+        }
+        let caret = self.caret + self.preedit.len();
+        caret..caret
+    }
+
     /// What the IME is composing right now, or nothing when it has finished.
     pub fn set_preedit(&mut self, text: &str) {
         self.preedit.clear();
@@ -282,6 +299,25 @@ impl TextField {
     pub fn select_all(&mut self) {
         self.anchor = 0;
         self.caret = self.text.len();
+    }
+
+    /// **Put the caret at `at`**, keeping the selection's other end where it is
+    /// when `extend` and dropping it onto the caret otherwise: a press puts a
+    /// caret, a drag or a `Shift`+press carries the far end of a selection that
+    /// began wherever the anchor stands (0.4.9 plan row 179).
+    ///
+    /// `at` is the pointer's answer ([`caret_at_x`]) and lands on a character
+    /// boundary for the reason every motion above does: an offset past the end
+    /// is the end, and one inside a character is the boundary in front of it.
+    pub fn place(&mut self, at: usize, extend: bool) {
+        let mut at = at.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        self.caret = at;
+        if !extend {
+            self.anchor = at;
+        }
     }
 
     /// Empty the field and the composition with it.
@@ -391,6 +427,145 @@ impl TextField {
 /// beside it.
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// **Where a press at `x` puts the caret in a line drawn from `from` on**
+/// (0.4.9 plan row 179): the byte offset of the seam nearest `x`, where a seam
+/// is a grapheme boundary of `text[from..]` and `seam_x(at)` is how far the
+/// seam at byte `at` stands from the drawn window's left edge.
+///
+/// **The nearest seam and not the letter the pointer is inside**, which is this
+/// window's rule on every face it has (§7.1.3q, `preview_edit::byte_at_x`): a
+/// press on the right half of a character puts the caret after it, and a press
+/// exactly on a character's middle belongs to the seam in front of it. A seam
+/// is a grapheme boundary and never a `char` one, so a press never lands inside
+/// a cluster — between a letter and its accent, or inside an emoji sequence.
+///
+/// A press left of the first seam is the first seam — the drawn window's own
+/// start, which is where a box scrolled along a long draft begins — and one
+/// past the last is the end of the line.
+///
+/// A free function over a closure because this module knows nothing about
+/// fonts: the caller has the shaped run, and this is only the walk along it.
+pub fn caret_at_x(text: &str, from: usize, x: f32, seam_x: impl Fn(usize) -> f32) -> usize {
+    let mut best = from;
+    let mut best_distance = (seam_x(from) - x).abs();
+    let mut at = from;
+    for cluster in bt_unicode::graphemes(&text[from..]) {
+        at += cluster.len();
+        let distance = (seam_x(at) - x).abs();
+        // Strictly nearer: a tie stays with the seam in front.
+        if distance < best_distance {
+            best = at;
+            best_distance = distance;
+        }
+    }
+    best
+}
+
+/// **How strongly a selection inside a one-line chrome field is washed**: the
+/// accent at this alpha, behind the text (0.4.9 plan row 180, ruling 1 — the
+/// settings dialog's own recipe, §7.1.6c-6b, now every field's).
+pub const SELECTION_WASH_ALPHA: f32 = 0.30;
+
+/// **One line of a field as a painter laid it out** (0.4.9 plan rows 179 and
+/// 180): where the line's first seam would stand in the window, how far the
+/// line has been pushed left inside its box, the string on the glass, and where
+/// each of that string's boundaries fell.
+///
+/// **Left behind by the painter and read by the press**, never measured a
+/// second time: a press finds the seam under the pointer in the very table the
+/// frame was laid out from, so the caret it puts and the letters on the glass
+/// cannot disagree. One type for every field the window draws — the name
+/// editor's six subjects, the find bar, the graph's search, the palette's box,
+/// the git prompt and each field of the settings dialog.
+///
+/// The scroll is a distance in pixels and not a byte, because a settings field
+/// is pushed left by exactly as much as keeps its caret inside the box, which is
+/// rarely a seam. A box that scrolls by whole seams (the name editor's
+/// `first_visible`) says the same thing as `advances.upto(first_visible)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawnRun {
+    /// The window pixel the run's own left edge stands on — the box's inside
+    /// edge, where the first visible seam is drawn.
+    pub left: f32,
+    /// How far the run has been pushed left inside its box: the pixel of the
+    /// line that stands at [`Self::left`].
+    pub scroll_px: f32,
+    /// The string on the glass, a composition included
+    /// ([`TextField::composed`]); empty while a placeholder is drawn in its
+    /// place, which is no text a caret can stand in.
+    pub shown: String,
+    /// Every boundary of [`Self::shown`], as the shaper placed it.
+    pub advances: bt_render::ChromeTextAdvances,
+}
+
+impl DrawnRun {
+    /// **The seam a press at window pixel `x` names** — the nearest one
+    /// ([`caret_at_x`]), with a press left of the run's box taken as a press on
+    /// its edge: a press in a field's padding, or on the tab body around a name,
+    /// is a press at the first letter drawn and never on a letter scrolled out
+    /// of sight (row 179 R6).
+    #[must_use]
+    pub fn press_at(&self, x: f32) -> usize {
+        self.seam_nearest(x.max(self.left))
+    }
+
+    /// **The seam a drag at window pixel `x` reaches** — the nearest one, the
+    /// letters scrolled out of the box included (row 179's review F5): a drag
+    /// carried past either edge of a scrolled box reaches the seam that far
+    /// along the line, and the box scrolls to the caret as it does for a key.
+    /// So the hidden head is revealed by dragging left exactly as the hidden
+    /// tail is by dragging right — one walk, two directions.
+    #[must_use]
+    pub fn drag_to(&self, x: f32) -> usize {
+        self.seam_nearest(x)
+    }
+
+    fn seam_nearest(&self, x: f32) -> usize {
+        caret_at_x(&self.shown, 0, x - self.left + self.scroll_px, |at| {
+            self.advances.upto(at)
+        })
+    }
+
+    /// **Where a selection of [`Self::shown`] is washed**, as the window pixels
+    /// of its two ends cut to the run's box (`left` to `right`); `None` for a
+    /// bare caret and for a selection scrolled wholly out of the box.
+    #[must_use]
+    pub fn selection_span(
+        &self,
+        selection: std::ops::Range<usize>,
+        right: f32,
+    ) -> Option<[f32; 2]> {
+        selection_span(
+            &self.advances,
+            selection,
+            self.left - self.scroll_px,
+            [self.left, right],
+        )
+    }
+}
+
+/// **Where a selection is washed**, from the shaped run it is a range of: the
+/// window pixels of its two ends, the run's first seam standing at `origin`,
+/// cut to `clip` (the run's box, left and right) — `None` for a bare caret or
+/// for a selection wholly outside the box.
+///
+/// The one span every field's selection is drawn in (0.4.9 plan row 180,
+/// ruling 1), read off the same table the press reads.
+#[must_use]
+pub fn selection_span(
+    advances: &bt_render::ChromeTextAdvances,
+    selection: std::ops::Range<usize>,
+    origin: f32,
+    clip: [f32; 2],
+) -> Option<[f32; 2]> {
+    if selection.is_empty() {
+        return None;
+    }
+    let from = (origin + advances.upto(selection.start)).max(clip[0]);
+    let to = (origin + advances.upto(selection.end)).min(clip[1]);
+    (from < to).then_some([from, to])
 }
 
 /// **What a clipboard can put into a field that holds one line.**
@@ -688,6 +863,189 @@ mod tests {
             one_line("\u{4f60}\u{597d}\nthere"),
             "\u{4f60}\u{597d}",
             "the cut is by line and not by byte"
+        );
+    }
+
+    /// The seams of `ab中cd` as a font would draw them: ten pixels a letter,
+    /// twenty for the ideograph — `(byte offset, pixels from the line's start)`.
+    const SEAMS: [(usize, f32); 6] = [
+        (0, 0.0),
+        (1, 10.0),
+        (2, 20.0),
+        (5, 40.0),
+        (6, 50.0),
+        (7, 60.0),
+    ];
+
+    /// How far the seam at a byte offset stands from the left edge of a window
+    /// drawn from `from` on, read off [`SEAMS`].
+    fn seam_x(from: usize) -> impl Fn(usize) -> f32 {
+        let x = |at: usize| {
+            SEAMS
+                .iter()
+                .find(|(offset, _)| *offset == at)
+                .map(|(_, x)| *x)
+                .expect("asked only at a seam")
+        };
+        move |at| x(at) - x(from)
+    }
+
+    /// RED (0.4.9 plan row 179) — **a press lands on the nearest seam, and a
+    /// press exactly on a character's middle on the seam in front of it**,
+    /// ideographs included: the left half of `中` puts the caret before it, the
+    /// right half after it.
+    ///
+    /// MUTATION: take a tie to the far seam (`<=` for `<`) — the middle of `a`
+    /// and the middle of `中` go red.
+    #[test]
+    fn a_press_lands_on_the_nearest_seam_and_a_middle_on_the_one_in_front() {
+        let text = "ab\u{4e2d}cd";
+        let at = |x: f32| caret_at_x(text, 0, x, seam_x(0));
+        assert_eq!(at(4.0), 0, "the left half of `a`");
+        assert_eq!(at(6.0), 1, "the right half of `a`");
+        assert_eq!(at(5.0), 0, "the middle of `a` belongs to the seam in front");
+        assert_eq!(at(29.0), 2, "the left half of the ideograph");
+        assert_eq!(at(31.0), 5, "the right half of the ideograph");
+        assert_eq!(
+            at(30.0),
+            2,
+            "the ideograph's middle belongs to the seam in front"
+        );
+        assert_eq!(at(-8.0), 0, "left of the text is its start");
+        assert_eq!(at(400.0), text.len(), "past the text is its end");
+    }
+
+    /// RED (row 179) — **a line drawn from `from` on is measured from there**:
+    /// a box scrolled along its draft has its first visible seam at its left
+    /// edge, and nothing in front of `from` is a seam a press can reach.
+    #[test]
+    fn a_press_in_a_scrolled_line_counts_from_the_first_seam_drawn() {
+        let text = "ab\u{4e2d}cd";
+        let at = |x: f32| caret_at_x(text, 2, x, seam_x(2));
+        assert_eq!(at(-30.0), 2, "left of the window is the window's start");
+        assert_eq!(at(1.0), 2);
+        assert_eq!(at(21.0), 5, "past the ideograph's middle");
+        assert_eq!(at(31.0), 6, "just right of the seam after `c`");
+        assert_eq!(at(36.0), 7, "past `d`'s middle is the end");
+    }
+
+    /// RED (row 179) — **a seam is a grapheme boundary**: `e` with a combining
+    /// acute is one cluster of three bytes, and no press lands between the
+    /// letter and its accent, however close to the letter's edge it is.
+    #[test]
+    fn a_press_never_lands_inside_a_cluster() {
+        let text = "e\u{301}x";
+        let seams = |at: usize| match at {
+            0 => 0.0,
+            3 => 10.0,
+            4 => 20.0,
+            _ => panic!("byte {at} is no seam"),
+        };
+        assert_eq!(caret_at_x(text, 0, 9.0, seams), 3);
+        assert_eq!(caret_at_x(text, 0, 1.0, seams), 0);
+    }
+
+    /// RED (row 179) — **a placed caret drops the selection, and an extended
+    /// one carries its far end**, and either lands on a character boundary.
+    #[test]
+    fn placing_the_caret_collapses_or_extends_the_selection() {
+        let mut field = TextField::holding_selected("ab\u{4e2d}cd", 7);
+        field.place(1, false);
+        assert_eq!((field.caret(), field.selection()), (1, 1..1));
+        field.place(5, true);
+        assert_eq!((field.caret(), field.selection()), (5, 1..5));
+        field.place(0, true);
+        assert_eq!((field.caret(), field.selection()), (0, 0..1));
+        field.place(3, false);
+        assert_eq!(
+            field.caret(),
+            2,
+            "inside the ideograph is the seam in front of it"
+        );
+        field.place(99, false);
+        assert_eq!(field.caret(), 7, "past the end is the end");
+    }
+
+    /// `abcdef`, ten pixels a letter, its run's left edge at pixel 100 and pushed left by
+    /// `scroll_px`: a box that shows from the letter at `scroll_px / 10`.
+    fn ten_a_letter(scroll_px: f32) -> DrawnRun {
+        DrawnRun {
+            left: 100.0,
+            scroll_px,
+            shown: "abcdef".to_owned(),
+            advances: bt_render::ChromeTextAdvances::from_stops(
+                (0..=6_u8).map(|at| (usize::from(at), 10.0 * f32::from(at))),
+            ),
+        }
+    }
+
+    /// RED (0.4.9 plan row 180) — **a press counts from the first letter drawn**: in a box pushed
+    /// left by two letters, the box's edge is the seam before `c`, a press inside the box finds the
+    /// seam under it, and a press left of the box (in its padding) is a press on its edge — never a
+    /// letter scrolled out of sight (row 179 R6).
+    ///
+    /// MUTATION (`plant-180-a-press-finds-the-seam-under-it-in-a-scrolled-run.py`): drop the
+    /// press's clamp to the run's left edge — a press in the padding lands on a hidden letter.
+    #[test]
+    fn a_press_finds_the_seam_under_it_in_a_scrolled_run() {
+        let run = ten_a_letter(20.0);
+        assert_eq!(
+            run.press_at(100.0),
+            2,
+            "the box's edge is the first seam drawn"
+        );
+        assert_eq!(
+            run.press_at(114.0),
+            3,
+            "and a press inside it the seam under it"
+        );
+        assert_eq!(
+            run.press_at(60.0),
+            2,
+            "a press left of the box is a press on its edge"
+        );
+        assert_eq!(run.press_at(400.0), 6, "and one past the text its end");
+    }
+
+    /// RED (row 179's review F5, decided in row 180) — **a drag carried past the left edge of a
+    /// scrolled box reaches the letters scrolled out of it**, as one carried past the right edge
+    /// reaches the tail: the drag is not clamped to the box the way the press is.
+    ///
+    /// MUTATION (`plant-180-f5-drag-clamped.py`): clamp `drag_to` as `press_at` is — the drag
+    /// stops at the seam before `c`.
+    #[test]
+    fn a_drag_past_the_left_edge_of_a_scrolled_box_reaches_the_hidden_head() {
+        let run = ten_a_letter(20.0);
+        assert_eq!(
+            run.drag_to(90.0),
+            1,
+            "one letter left of the box is the seam before `b`"
+        );
+        assert_eq!(run.drag_to(-500.0), 0, "and far past it the line's start");
+    }
+
+    /// RED (row 180, ruling 1) — **a selection is washed between its two seams on the glass**,
+    /// cut to the run's box, and a bare caret or a selection scrolled wholly out of the box draws
+    /// no wash.
+    #[test]
+    fn a_selection_is_washed_between_its_seams_and_cut_to_the_box() {
+        let run = ten_a_letter(20.0);
+        assert_eq!(run.selection_span(3..5, 200.0), Some([110.0, 130.0]));
+        assert_eq!(
+            run.selection_span(0..4, 200.0),
+            Some([100.0, 120.0]),
+            "the part scrolled out of the box is not washed"
+        );
+        assert_eq!(
+            run.selection_span(1..6, 125.0),
+            Some([100.0, 125.0]),
+            "nor the part past the box's right edge"
+        );
+        assert_eq!(run.selection_span(4..4, 200.0), None, "a bare caret");
+        assert_eq!(
+            run.selection_span(0..2, 200.0),
+            None,
+            "a selection out of the box"
         );
     }
 }

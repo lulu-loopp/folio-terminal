@@ -13,11 +13,11 @@ use crate::{
     PresentIntent, PreviewSurface, Runtime, STARTUP_PTY_POLL_INTERVAL, ScaleWorkerRequest,
     SearchRefresh, ShellAddress, TabPress, TabState, cmdrail, computation_lane,
     disable_math_worker_state, files, foreground_program, git, handoff_lane, hang_watch,
-    hyperlink_activation, i18n, ime_outbound, lane, mark_leaf_painted, notify, pace,
-    present_diagnostics, present_gate, preview, seats, settings, settling, taskbar_lane,
-    termscroll, toast, update, webhost,
+    hyperlink_activation, i18n, ime_outbound, lane, notify, pace, present_diagnostics,
+    present_gate, preview, seats, settings, settling, taskbar_lane, termscroll, toast, update,
+    webhost,
 };
-use crate::{LeafSession, TermView, TermViewPorts};
+use crate::{ShellSession, TermView, TermViewPorts};
 use anyhow::Context;
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -117,15 +117,79 @@ impl<B: Backend> Runtime<'_, B> {
                 return Ok(());
             }
             self.window.chrome_present_pending = true;
-            hang_watch::during(hang_watch::Station::WindowRedraw, || {
-                self.window.window.request_redraw()
-            });
+            self.ask_for_present();
             return Ok(());
         }
         self.publish_frame(FrameTrigger {
             occurred_at: now,
             source: FrameSource::Expose,
         })
+    }
+
+    /// **Ask for the present this window now owes** (T-TWO-BARE-TURNS-PER-MARK-STEP).
+    ///
+    /// The caller has already filed the debt: a frame in the slot, or
+    /// `chrome_present_pending`. What is left is who pays it.
+    ///
+    /// - **Inside this window's turn**, the turn pays it at its own end
+    ///   ([`Self::pay_the_turns_present`]), after every clock that could add to it. One step of
+    ///   the working mark, one caret blink, one drained burst of output is then one turn of the
+    ///   loop. A paint asked of the platform from here would come back as a second turn: a wake,
+    ///   the `RedrawRequested`, and every clock of `about_to_wait` run again. On the VM that
+    ///   second turn cost 515 µs of a 3774 µs mark step with three panes.
+    /// - **Anywhere else** (an event handler, Windows' modal size loop), the platform is asked
+    ///   for a paint, as it always was: no turn end is coming that would pay it.
+    pub(in crate::runtime) fn ask_for_present(&mut self) {
+        if self.window.turn_pays_presents {
+            self.window.turn_owes_a_present = true;
+            return;
+        }
+        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+            self.window.window.request_redraw()
+        });
+    }
+
+    /// **The turn pays the present it was asked for**, once, after its last clock and before
+    /// its deadline fold (T-TWO-BARE-TURNS-PER-MARK-STEP).
+    ///
+    /// It pays through [`Self::redraw`], the same function `RedrawRequested` runs, so the frame
+    /// is the one the paint would have drawn. Only the turn that pays it is different. Before
+    /// the fold, because the fold books every frame-clamped deadline (a refused frame's, the
+    /// strip's and the clocks clamped to the frame) from `last_present_at`, which this present
+    /// moves: paid after it, they would be booked from the picture it replaces, up to a frame
+    /// early.
+    ///
+    /// **A window on no screen is asked for the paint instead** (ruling R2): a minimized or
+    /// cloaked window, or one not shown yet, is a window the platform sends no paint until it
+    /// can be seen, and that stays exactly as it was.
+    ///
+    /// The flag is lowered first, so an ask that reaches [`Self::ask_for_present`] while this
+    /// present runs goes to the platform: no later turn end would pay it. (The presenter's own
+    /// retry and the skirt ask the platform directly and never come through here.)
+    fn pay_the_turns_present(&mut self) -> Result<()> {
+        self.window.turn_pays_presents = false;
+        if !std::mem::take(&mut self.window.turn_owes_a_present) {
+            return Ok(());
+        }
+        if self.window.window_shown && !self.window.window_hidden {
+            return hang_watch::during(hang_watch::Station::TurnPresent, || self.redraw());
+        }
+        hang_watch::during(hang_watch::Station::WindowRedraw, || {
+            self.window.window.request_redraw()
+        });
+        Ok(())
+    }
+
+    /// **After a turn, whatever it left**: the window stops deferring, and a present the turn
+    /// was asked for but did not pay (it returned an error before its end) is asked of the
+    /// platform. After a turn that ran to its end this does nothing: its end has already paid.
+    pub(crate) fn end_the_turns_presents(&mut self) {
+        self.window.turn_pays_presents = false;
+        if std::mem::take(&mut self.window.turn_owes_a_present) {
+            hang_watch::during(hang_watch::Station::WindowRedraw, || {
+                self.window.window.request_redraw()
+            });
+        }
     }
 
     pub(in crate::runtime) fn publish_frame_inner(
@@ -176,9 +240,7 @@ impl<B: Backend> Runtime<'_, B> {
             // Answering `false` is then literally true: no picture entered the slot.
             if self.focused().is_none() {
                 self.window.chrome_present_pending = true;
-                hang_watch::during(hang_watch::Station::WindowRedraw, || {
-                    self.window.window.request_redraw()
-                });
+                self.ask_for_present();
                 return Ok(false);
             }
             // Real-machine decoration-state trace (`BT_DECOR_TRACE=<path>`). Runs on every frame trigger
@@ -222,20 +284,20 @@ impl<B: Backend> Runtime<'_, B> {
             // `lines_measured` is exactly that number. Off unless the switch is set,
             // and the reading costs one `u64` load when it is not.
             let trace_perf = self.app.trace_perf;
-            let measurements_before = self.shell().view.projection.line_text_measurements();
+            let measurements_before = self.shell_pane().view.projection.line_text_measurements();
             // **Which road the projection took**, beside how many lines it measured
             // (T-MATH-MARKS-IN-SOURCE-FACE). A frame of a change of face measures no
             // lines at all either way — the cache answers for every one of them — so
             // `lines_measured` alone cannot tell a band moved where it stands from a
             // band that made the whole document be pushed through two trees again.
-            let rebuilds_before = self.shell().view.projection.rebuilds();
-            let bands_moved_before = self.shell().view.projection.bands_moved();
+            let rebuilds_before = self.shell_pane().view.projection.rebuilds();
+            let bands_moved_before = self.shell_pane().view.projection.bands_moved();
             let projected = {
                 // Bound once, to the focused leaf: `session` and `projection` are
                 // two fields of one shell, and reaching each through its own deref
                 // would be two borrows of the tab rather than one borrow of the
                 // leaf.
-                let leaf = self.window.tabs[active].shell_mut();
+                let leaf = self.window.tabs[active].shell_pane_mut();
                 let projection_started_at = trace_perf.then(Instant::now);
                 // The frame, and the paths it drew that nobody has answered for yet
                 // (§7.1.5j): `bt_compose::project` files those as the session's
@@ -243,7 +305,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // every line and the session is what owns a worker. It schedules
                 // nothing: the hold below decides first.
                 let projected = bt_compose::project(bt_compose::Pane {
-                    session: &mut leaf.session,
+                    session: &mut leaf.session.session,
                     view: &mut leaf.view.projection,
                 })
                 .context("project terminal grid into viewport frame")?;
@@ -294,8 +356,13 @@ impl<B: Backend> Runtime<'_, B> {
                     crate::diagnostics::stderr_line(format!(
                         "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
                         trigger.source,
-                        u8::from(self.shell().view.projection.review_hold()),
-                        u8::from(self.shell().view.projection.exact_source_reprint_hold()),
+                        u8::from(self.shell_pane().view.projection.review_hold()),
+                        u8::from(
+                            self.shell_pane()
+                                .view
+                                .projection
+                                .exact_source_reprint_hold()
+                        ),
                     ));
                 }
                 return Ok(false);
@@ -326,7 +393,7 @@ impl<B: Backend> Runtime<'_, B> {
                 columns: terminal_frame.columns.get(),
                 references: self.shell().session.frame_image_references(&terminal_frame),
             };
-            self.shell_mut().view.frame_image_references = scan;
+            self.shell_pane_mut().view.frame_image_references = scan;
             // The pointer's marks, but only if the pointer is standing in *this* pane. The link's
             // underline and the verified reference's solid underline both follow the pointer
             // immediately; only what a hover *reveals* — a tooltip there, a thumbnail here — waits out
@@ -457,9 +524,7 @@ impl<B: Backend> Runtime<'_, B> {
                 .pending_frames
                 .publish(composed.frame, trigger)
                 .context("reject non-rectangular frame at publish boundary")?;
-            hang_watch::during(hang_watch::Station::WindowRedraw, || {
-                self.window.window.request_redraw()
-            });
+            self.ask_for_present();
             Ok(true)
         })
     }
@@ -1251,7 +1316,7 @@ impl<B: Backend> Runtime<'_, B> {
                     path_work_filed,
                     ..
                 } = bt_compose::project(bt_compose::Pane {
-                    session: &mut leaf.session,
+                    session: &mut leaf.session.session,
                     view: &mut leaf.view.projection,
                 })
                 .context("project an unfocused pane's grid into a viewport frame")?;
@@ -1260,7 +1325,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // No hold is read here: a pane the user is not typing in holds nothing, and
                 // the hold is the focused leaf's, decided in `publish_frame_inner`.
                 owes_the_engine |= hang_watch::during(hang_watch::Station::DetectionPass, || {
-                    bt_compose::schedule(&mut leaf.session, &projected)
+                    bt_compose::schedule(&mut leaf.session.session, &projected)
                 }) != 0;
                 if hover_pane == Some(pane.seat) {
                     apply_hover_marks(
@@ -1505,12 +1570,12 @@ impl<B: Backend> Runtime<'_, B> {
                     {
                         if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&pane.seat) {
                             leaf.view.commit_presented(projected, *metrics);
-                            mark_leaf_painted(leaf);
+                            mark_leaf_painted(&mut leaf.session);
                         }
                     }
                     if let Some(leaf) = self.window.tabs[active].sessions.get_mut(&focused_leaf) {
                         leaf.view.commit_presented(frame.clone(), frame_metrics[0]);
-                        mark_leaf_painted(leaf);
+                        mark_leaf_painted(&mut leaf.session);
                     }
                     self.window.last_presented_frame = Some(frame);
                     // What UI Automation is told is these frames: the next clock run publishes
@@ -1580,8 +1645,8 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// The only writer of [`WindowRuntime::observed_place`] and the four fields it is written
     /// with (`window_hidden`, `window_exposed`, `taskbar_reading`, `attention_sampled_at`),
-    /// and the only caller of [`sample_window_place`]. Called from three places, and each is
-    /// the moment a delivery can be decided:
+    /// and the only caller of [`sample_window_place`]. Called from these places, and each is
+    /// the moment a delivery, or the owner of a stop's box, can be decided:
     ///
     /// * **the head of [`Self::turn`]** — one reading shared by `drain_pty` and
     ///   `advance_strip_animation`, which used to take one each on the same turn (owner's
@@ -1594,7 +1659,11 @@ impl<B: Backend> Runtime<'_, B> {
     ///   turn would wait for the hand to let go of the frame;
     /// * **the re-placing of a taskbar flash** the taskbar lane's newest answer contradicts
     ///   (`Runtime::replace_contradicted_flash`, ticket 62), so the delivery is decided again on
-    ///   a reading that carries the answer.
+    ///   a reading that carries the answer;
+    /// * **a stop about to raise its box** (`FolioApp::fail` and
+    ///   `FolioApp::stop_every_window_keeping_in`, 0.4.10 plan row 72, re-review R2), on every
+    ///   standing window before the box's owner is chosen: a window left behind on another
+    ///   virtual desktop takes no turn, so its last reading can say it is on the screen.
     ///
     /// "Every turn, never cached across them" (user rulings 2026-08-28 and 2026-09-01) holds for
     /// hidden, exposed and focus: a turn's head replaces the reading before anything in that turn
@@ -1622,7 +1691,9 @@ impl<B: Backend> Runtime<'_, B> {
 
     /// **Nothing in this window is moving, and nothing is owed to its glass**: no
     /// journey running, no refused animation frame, no frame waiting to be presented,
-    /// no chrome present pending, no picture or card owing a frame.
+    /// no chrome present pending, no picture or card owing a frame, and no debt the
+    /// strip's look wrote down (`strip_owes_a_frame`, `strip_panes_owe_a_frame`;
+    /// T-STRIP-ASKS-ON-ITS-TICK) that no frame has drawn yet.
     ///
     /// The idle test the turn's `BT_PERF_TRACE idle_wake` line was written with, named
     /// so that the web engine's warm-up asks the same question (ticket 54) rather than
@@ -1640,7 +1711,9 @@ impl<B: Backend> Runtime<'_, B> {
                 || self.window.pending_frames.pending_frame().is_some()
                 || self.window.chrome_present_pending
                 || self.window.pictures_owe_a_frame
-                || self.window.cards.owes_frame(),
+                || self.window.cards.owes_frame()
+                || self.window.strip_owes_a_frame
+                || self.window.strip_panes_owe_a_frame,
             resize_owed,
         }
     }
@@ -1650,6 +1723,10 @@ impl<B: Backend> Runtime<'_, B> {
         now: Instant,
         application_clocks: bool,
     ) -> Result<Option<(WakeOwner, Instant)>> {
+        // **From here to the turn's own end, a present asked for is this turn's to pay**
+        // (T-TWO-BARE-TURNS-PER-MARK-STEP): see [`Self::ask_for_present`] and, at the foot of
+        // the clock run, [`Self::pay_the_turns_present`].
+        self.window.turn_pays_presents = true;
         self.check_picture_freshness(now, false);
         // **The frame debt belongs to the turn that incurs it** (owner's report
         // 2026-09-18). Opened here rather than cleared wherever it is paid,
@@ -1708,10 +1785,10 @@ impl<B: Backend> Runtime<'_, B> {
         self.apply_folder_pick_result()?;
         self.apply_image_pick_result()?;
         self.apply_save_pick_result()?;
-        // **What the clipboard lane answered this window, and the pastes it no longer wants**
-        // (`clipboard_lane`): before the drain, so a paste that has landed goes to its shell ahead
-        // of the turn's output; and on every turn, so a lost wake loses no answer and a paste's
-        // deadline is kept on the turn it falls in.
+        // **The pastes the window no longer wants, and what its holds can spend**
+        // (`clipboard_lane`): on every turn, so a paste's deadline is kept on the turn it falls
+        // in. The lane's answers are taken on its wake's turn, for every window at once
+        // (`FolioApp::answer_clipboard`), never here.
         hang_watch::during(hang_watch::Station::ClipboardRead, || {
             self.settle_clipboard(now)
         })?;
@@ -2112,6 +2189,13 @@ impl<B: Backend> Runtime<'_, B> {
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
+        // **The present this turn was asked for, paid by this turn** (T-TWO-BARE-TURNS-PER-
+        // MARK-STEP). After every clock above and the PTY gate, because each of them can publish
+        // the frame it pays; and before the fold below, because the fold books every
+        // frame-clamped deadline (a refused frame's, the strip's and the clocks clamped to the
+        // frame) from `last_present_at`, which this present moves: paid after it, they would be
+        // booked from the picture it replaces, up to a frame early.
+        self.pay_the_turns_present()?;
         // **And the input method's caret area, on the same terms** (ticket 63). Every
         // road above — the drain's frames, the IME events' frames, a preview repainted,
         // the caret offer at the head of the clock run, and the frame a resize the PTY
@@ -2316,14 +2400,13 @@ impl<B: Backend> Runtime<'_, B> {
             // A standing credential's ten minutes, and only while one is standing. A window whose
             // panes are asking for nothing reports nothing and costs no wake-ups at all — which is
             // every window, almost always.
-            // Spent by `settle_attention`, which runs behind the strip's tick and the window's frame
-            // gate (`advance_strip_animation`), so it is booked no earlier than the turn that gate
-            // admits (T-WINDOW-THREAD-UNDER-LOAD): a due credential refused by the gate is an
-            // instant the loop would otherwise spin on until the gate opens.
-            attention_ledger_deadline(&self.window.tabs).map(|due| {
-                self.strip_animation_next_tick(self.window.frame_clock.interval())
-                    .map_or(due, |tick| due.max(tick))
-            }),
+            // Spent by `settle_attention`, which runs on every turn, above both of the strip's
+            // gates (`advance_strip_animation`; T-STRIP-ASKS-ON-ITS-TICK, ruling R3), so it is
+            // booked as it stands: the turn it comes due on spends it. It was clamped to the
+            // strip's next tick while the pass stood behind those gates
+            // (T-WINDOW-THREAD-UNDER-LOAD), when a due credential refused by them was an instant
+            // the loop would otherwise have spun on until they opened.
+            attention_ledger_deadline(&self.window.tabs),
             // The tip's 380ms while one is settling, and the fade's own frames
             // until it lands. A window with no tip under the pointer reports
             // nothing and costs no wake-ups at all.
@@ -2754,7 +2837,7 @@ impl<B: Backend> Runtime<'_, B> {
             .iter()
             .filter(|(seat, leaf)| {
                 leaf.view.projection.scroll_extent_subpixels() > 0
-                    && !leaf.session.terminal_modes().alternate_screen
+                    && !leaf.session.session.terminal_modes().alternate_screen
                     && !leaf.view.projection.is_scrolled()
                     && self.terminal_thumb_hover != Some(**seat)
                     && self
@@ -2773,7 +2856,7 @@ impl<B: Backend> Runtime<'_, B> {
                     .iter()
                     .filter(|(seat, leaf)| {
                         leaf.view.projection.horizontal().max_x_origin().0 > 0
-                            && !leaf.session.terminal_modes().alternate_screen
+                            && !leaf.session.session.terminal_modes().alternate_screen
                             && !leaf.view.projection.horizontal().is_scrolled()
                             && self
                                 .held_terminal_column_drag()
@@ -3033,6 +3116,55 @@ impl<B: Backend> Runtime<'_, B> {
             seats::preview_play_button_sprites(body, hovered, scale, &bt_render::chrome_palette());
         self.window.chrome_marks.resolve(&sprites)
     }
+}
+
+/// How much of a shell the user has seen, one present on.
+///
+/// **Painting is seeing.** The ledger is squared against [`super::terminal::output_revision`] at
+/// the exact moment this leaf's cells go to the glass, and at no other moment —
+/// which makes "seen" a fact about pixels rather than a fact about which tab
+/// held the keyboard.
+///
+/// The rule this replaces was "the active tab's ledger keeps up", advanced once
+/// per event-loop turn. It was wrong in both directions at once. Forward: the
+/// pass ran *after* the switch had already changed the active tab, so anything
+/// published between the previous turn and the switch was stranded behind a tab
+/// that had just gone quiet, and the tab the user had been reading lit up behind
+/// them for output that never existed. Backward: a pane that is on screen but
+/// not holding the keyboard never publishes at all, so a tab could go on saying
+/// nothing while a shell inside it talked.
+///
+/// Both disappear here. A leaf that was painted owes nothing, whichever pane of
+/// whichever tab it is; a leaf that was not painted keeps its backlog, including
+/// output that arrived in the same turn as the switch away and never reached the
+/// glass. That last case is the one worth stating: it is *correctly* unread.
+pub(crate) fn seen_revision(previous_seen: u64, output: u64, leaf_was_painted: bool) -> u64 {
+    if leaf_was_painted {
+        output
+    } else {
+        previous_seen
+    }
+}
+
+/// This leaf's cells have just gone to the glass.
+///
+/// One function so that the two halves of the present — the pane holding the
+/// keyboard and every pane beside it — cannot answer the question differently.
+/// They are written separately in [`Runtime::redraw`] only because the borrow
+/// checker sees one `&mut` tab and a list taken by value; nothing about the rule
+/// distinguishes them, and a rule that lived in two places is how a sibling pane
+/// ends up owing a debt it paid in plain sight.
+///
+/// Unlike [`crate::mark_leaf_seen`] this retires no latch. A bell that rings while you
+/// are looking is answered by [`crate::attention_is_consumed`], which asks about the
+/// *window's* focus as well — being painted into a window nobody has in front of
+/// them is not hearing it.
+pub(crate) fn mark_leaf_painted(leaf: &mut ShellSession) {
+    leaf.mark_seen(seen_revision(
+        leaf.last_seen_revision,
+        leaf.output_revision,
+        true,
+    ));
 }
 
 /// **The computation lane's request door for a pane's decoration work** (C1): the task goes to
@@ -3400,7 +3532,7 @@ pub(crate) fn sample_window_place(
 pub(crate) fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
     tabs.iter()
         .flat_map(|tab| tab.leaves())
-        .filter_map(|(_, leaf): (&SeatId, &LeafSession)| leaf.attention.clock.deadline())
+        .filter_map(|(_, leaf): (&SeatId, &ShellSession)| leaf.attention.clock.deadline())
         .min()
 }
 
@@ -3607,3 +3739,7 @@ mod tests;
 #[cfg(test)]
 #[path = "wake_fold_tests.rs"]
 mod wake_fold_tests;
+
+#[cfg(test)]
+#[path = "turn_present_tests.rs"]
+mod turn_present_tests;

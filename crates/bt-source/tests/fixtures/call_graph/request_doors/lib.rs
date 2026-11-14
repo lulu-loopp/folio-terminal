@@ -329,6 +329,30 @@ pub mod elsewhere {
     pub fn armed() {}
 }
 
+/// Plan row 76: one module path on two arms (bt-platform's `video` and its `#[path]` portable
+/// twin): an `# effects` row names the item of the arm it writes, and `-` names neither.
+#[cfg(windows)]
+pub mod media {
+    pub fn quiet() {}
+}
+
+#[cfg(not(windows))]
+pub mod media {
+    pub fn quiet() {}
+}
+
+/// Plan row 76: two `impl` blocks of one type, one method name, one arm — a row naming
+/// `Pair::get` names two items and is refused.
+pub struct Pair<T>(pub T);
+
+impl Pair<u8> {
+    pub fn get(&self) {}
+}
+
+impl Pair<u16> {
+    pub fn get(&self) {}
+}
+
 /// Nit 5: a Win32 file-system function, a Win32 type's constructor (not a call of the module), a
 /// path's question to the disk, and a park.
 pub fn submit_asks_the_disk(lane: &'static Lane, job: u32) {
@@ -368,6 +392,35 @@ pub fn submit_reads_a_value(lane: &'static Lane, job: u32, meta: &std::fs::Metad
     submit(lane, job);
 }
 
+/// Row 116: the methods of a collected child's status and output read the value; the wait that
+/// collected it is the effect.
+pub fn submit_reads_a_status(
+    lane: &'static Lane,
+    job: u32,
+    status: std::process::ExitStatus,
+    output: &std::process::Output,
+) {
+    let _ = status.code();
+    let _ = status.success();
+    let _ = std::process::ExitStatus::from_raw(0);
+    let _ = output.clone();
+    submit(lane, job);
+}
+
+/// Row 116: waiting for a child stays an effect, and so does an `ExitStatusError`'s method, which
+/// the rule leaves out of its scope.
+pub fn submit_waits_for_a_child(
+    lane: &'static Lane,
+    job: u32,
+    child: &mut std::process::Child,
+    failure: &std::process::ExitStatusError,
+) {
+    let _ = child.wait();
+    let _ = child.try_wait();
+    let _ = failure.code();
+    submit(lane, job);
+}
+
 /// R2: the worker's lock under an alias of `Mutex`.
 pub type Held = Mutex<u32>;
 
@@ -389,4 +442,72 @@ impl Lane {
 pub fn submit_peeks_through_alias(lane: &'static Lane, job: u32) {
     let _ = lane.peek_through_alias();
     submit_through(lane, job);
+}
+
+/// Plan row 52: a gesture door cut at its enqueue — it enqueues, then answers on the window.
+pub fn gesture(lane: &'static Lane, job: u32) {
+    gesture_enqueue(lane, job);
+    gesture_answer(job);
+    gesture_glances();
+}
+
+/// The gesture's enqueue: the mailbox, the notify, the worker handed to the thread door.
+pub fn gesture_enqueue(lane: &'static Lane, job: u32) {
+    lane.offer(job);
+    spawn(move || lane.serve());
+}
+
+/// The gesture's answer, beside its enqueue: a file write and an owner door's body.
+pub fn gesture_answer(job: u32) {
+    record(job);
+    present();
+}
+
+/// Beside the gesture's enqueue: two names nothing holds.
+pub fn gesture_glances() {
+    nowhere();
+    let _ = nowhere_made();
+}
+
+/// A cut door with a direct callee its row names in neither cell.
+pub fn gesture_strays(lane: &'static Lane, job: u32) {
+    gesture_enqueue(lane, job);
+    gesture_answer(job);
+    let _ = lane.peek(); // gesture_strays
+}
+
+/// A beside helper that runs the closure its caller writes.
+pub fn answer_with(job: u32, then: impl FnOnce()) {
+    let _ = job;
+    then();
+}
+
+/// A cut door whose enqueue is called only inside a closure literal.
+pub fn gesture_in_a_closure(lane: &'static Lane, job: u32) {
+    answer_with(job, move || gesture_enqueue(lane, job)); // gesture_in_a_closure
+}
+
+/// A cut door that writes a file in the closure it hands to a beside call.
+pub fn gesture_hands_beside(lane: &'static Lane, job: u32) {
+    gesture_enqueue(lane, job);
+    answer_with(job, move || record(job));
+}
+
+/// R6: the worker handed to a typed standard thread builder's spawn.
+pub fn submit_on_a_builder(lane: &'static Lane, job: u32) {
+    lane.offer(job);
+    let builder: std::thread::Builder = std::thread::Builder::new();
+    let _ = builder.spawn(move || lane.serve());
+}
+
+/// Plan row 52 (ruling 2026-11-04): a cut door whose enqueue meets one boundary entry (the notify)
+/// and whose beside side meets the other (the thread door, started beside the enqueue).
+pub fn gesture_starts_beside(lane: &'static Lane, job: u32) {
+    lane.offer(job);
+    gesture_starts(lane);
+}
+
+/// Beside `gesture_starts_beside`'s enqueue: the worker handed to the thread door.
+pub fn gesture_starts(lane: &'static Lane) {
+    spawn(move || lane.serve());
 }

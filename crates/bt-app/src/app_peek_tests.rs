@@ -606,7 +606,9 @@ fn a_picture_opened_again_after_a_rename_is_read_off_the_disk() {
                 height_px,
                 ..
             } => Some((*width_px, *height_px)),
-            PeekCacheEntry::Pending { .. } | PeekCacheEntry::Failed(_) => None,
+            PeekCacheEntry::Pending { .. }
+            | PeekCacheEntry::Unanswered { .. }
+            | PeekCacheEntry::Failed(_) => None,
         }
     }
 
@@ -802,6 +804,7 @@ fn the_cards_page_cache_keeps_what_the_hand_is_nearest() {
         fit: (280, 160),
         mtime: None,
         asked: BTreeSet::new(),
+        asked_again: BTreeSet::new(),
         pages: Vec::new(),
     };
     for page in 0..PEEK_PAGE_CACHE as u32 {
@@ -851,6 +854,158 @@ fn the_cards_page_cache_keeps_what_the_hand_is_nearest() {
         !slot.wanted(0),
         "a page that is not held is not made recent by being asked about"
     );
+}
+
+/// RED (T-HELD-FILE-IN-THE-PDF-LANE) — **a PDF another program holds is not refused by the
+/// glance card: it is asked once more by itself, and then only on a new card.** Both of the card's
+/// records carry the class's pair. The count: a held answer is filed `Unanswered { asked_again:
+/// false }` — the card prints no count, as for a file whose structure would not say — and the next
+/// rebuild asks it once (`ask_once_more`, filing `Asked { once_more: true }`); that ask's held
+/// answer is `{ asked_again: true }`, which no rebuild asks however often the card is drawn, and a
+/// new card (a new record) asks again. A page: a held answer leaves `asked` once
+/// (`hear_held`), so the next rebuild's ask — `file_peek_pages`'s `slot.asked.insert` — goes out;
+/// a second held answer stays asked; the card coming down (`card_down`) lets it be asked again.
+/// The file's own answer after a hold is filed as itself.
+///
+/// **Only the answer a question awaits is filed** (the class's rule; review F1). A held count
+/// arriving after the file's own answer takes no count off the card, and one arriving after the
+/// one more ask was spent opens no other; a held page arriving after its card came down — the
+/// slot outlives the card — spends nothing of the next card's one more ask. And the file changing
+/// under the card (`stamped`, a new stamp over drawn pages) is a new look: a page that spent its
+/// one more ask is asked once more again (review N1).
+///
+/// MUTATION: have `PeekPageSlot::hear_held` and `PeekFacts::hear` file a held answer as a
+/// refusal (`plant-187-pdf-held-filed-as-refused.py`) — the first "asked once more" assertion goes
+/// red. Or have them ask every held answer again (`plant-187-pdf-retry-never-stops.py`) — the
+/// "once: a redraw is no new input" assertions go red, by count. Or plant the page half alone
+/// (`plant-187-pdf-page-held-filed-as-refused.py`) — the page's "asked once more by the next
+/// rebuild" goes red. Or drop the `asked.contains` guard from `hear_held`
+/// (`plant-187-pdf-late-page-answer-spends-the-next-cards-ask.py`) — "a late answer spends
+/// nothing" goes red.
+#[test]
+fn a_pdf_another_program_holds_is_asked_once_more_and_then_only_on_a_new_card() {
+    let path = PathBuf::from("D:/\u{88ab}\u{5360}\u{7528}/held \u{62a5}\u{544a}.pdf");
+    let held = || Err(crate::pdf::Held);
+
+    // The count.
+    let held_twice = |facts: &mut PeekFacts| {
+        assert!(!facts.ask_once_more(), "the first read is still out");
+        facts.hear(held());
+        assert_eq!(
+            facts.answer,
+            PeekFactsAnswer::Unanswered { asked_again: false },
+            "held, not a file with no count"
+        );
+        assert_eq!(
+            facts.stated_pages(),
+            None,
+            "and the card prints the size alone"
+        );
+        assert!(facts.ask_once_more(), "asked once more by the next rebuild");
+        assert_eq!(facts.answer, PeekFactsAnswer::Asked { once_more: true });
+        facts.hear(held());
+        assert_eq!(
+            facts.answer,
+            PeekFactsAnswer::Unanswered { asked_again: true },
+            "held again: asked again already"
+        );
+        for _ in 0..5 {
+            assert!(!facts.ask_once_more(), "once: a redraw is no new input");
+        }
+    };
+    let mut facts = PeekFacts::asked(path.clone());
+    held_twice(&mut facts);
+    // A new card is a new record, and asks.
+    let mut facts = PeekFacts::asked(path.clone());
+    held_twice(&mut facts);
+    let mut facts = PeekFacts::asked(path.clone());
+    facts.hear(held());
+    assert!(facts.ask_once_more());
+    facts.hear(Ok(Some(3)));
+    assert_eq!(
+        facts.stated_pages(),
+        Some(3),
+        "let go of: the count the file says"
+    );
+    assert!(!facts.ask_once_more(), "and an answer is never asked again");
+
+    // A page.
+    let mut slot = PeekPageSlot {
+        path,
+        fit: (280, 160),
+        mtime: None,
+        asked: BTreeSet::new(),
+        asked_again: BTreeSet::new(),
+        pages: Vec::new(),
+    };
+    let held_twice = |slot: &mut PeekPageSlot| {
+        assert!(slot.asked.insert(0), "the card asks for its cover");
+        slot.hear_held(0);
+        assert!(slot.asked.insert(0), "asked once more by the next rebuild");
+        slot.hear_held(0);
+        for _ in 0..5 {
+            assert!(!slot.asked.insert(0), "once: a redraw is no new input");
+        }
+    };
+    held_twice(&mut slot);
+    slot.card_down();
+    held_twice(&mut slot);
+    slot.card_down();
+    assert!(slot.asked.insert(0), "and a new card asks again");
+
+    // Late answers. A held count after the file's own answer takes no count off the card, and one
+    // after the one more ask was spent opens no other.
+    let mut facts = PeekFacts::asked(PathBuf::from("D:/late.pdf"));
+    facts.hear(Ok(Some(3)));
+    facts.hear(held());
+    assert_eq!(
+        facts.stated_pages(),
+        Some(3),
+        "a late held answer takes no count off the card"
+    );
+    assert!(!facts.ask_once_more(), "and asks nothing");
+    let mut facts = PeekFacts::asked(PathBuf::from("D:/late.pdf"));
+    facts.hear(held());
+    assert!(facts.ask_once_more());
+    facts.hear(held());
+    facts.hear(held());
+    assert_eq!(
+        facts.answer,
+        PeekFactsAnswer::Unanswered { asked_again: true }
+    );
+    assert!(
+        !facts.ask_once_more(),
+        "a late held answer opens no other ask"
+    );
+
+    // A held page landing after its card came down is the answer to a question nobody asks: the
+    // next card keeps its one more ask.
+    slot.card_down();
+    slot.hear_held(0);
+    assert!(
+        slot.asked_again.is_empty(),
+        "a late answer spends nothing of the next card's"
+    );
+    held_twice(&mut slot);
+
+    // The file changing is a new look: page 0 spent its one more ask, and a new stamp over drawn
+    // pages lets it be asked once more again.
+    slot.keep(
+        1,
+        PeekPageRaster {
+            key: "page-1".to_owned(),
+            rgba: Arc::from(vec![0_u8; 4].into_boxed_slice()),
+            width_px: 1,
+            height_px: 1,
+        },
+    );
+    slot.stamped(Some(std::time::SystemTime::UNIX_EPOCH), 1);
+    assert!(slot.pages.is_empty(), "the old document's pages go");
+    assert!(
+        slot.asked_again.is_empty(),
+        "and the one more ask a held page spent"
+    );
+    held_twice(&mut slot);
 }
 
 /// RED (35) — **a second press on a `⌄` pins a peek, and closes only a pinned
@@ -1163,7 +1318,8 @@ fn a_ctrl_click_on_the_foot_reveals_the_file() {
 /// RED (T-PEEK-CACHE-QUESTION-RECORDS) — **the peek cache's records of questions outlive weight
 /// pressure, and no redraw asks them again.**
 ///
-/// A `Pending`, a `Failed` and the unstarted record each hold no pixels, and an evicted one reads
+/// A `Pending`, a `Failed` and the unstarted record (an `Unanswered` asked again,
+/// T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) each hold no pixels, and an evicted one reads
 /// as *never asked*: the pane's resolve ([`surface_pixels`]) answered
 /// [`SurfacePixels::Nothing`] with `asked: false`, the page's ([`answer_one_picture`]) set
 /// `needs_pixels`, and the flyout's re-entry read the file ([`peek_reads_the_file`]) — a
@@ -1189,9 +1345,10 @@ fn a_peek_records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them()
     );
     cache.insert(
         key(&unstarted),
-        PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(
-            DECODE_UNSTARTED.to_owned(),
-        )),
+        PeekCacheEntry::Unanswered {
+            asked_again: true,
+            said: None,
+        },
     );
     let shots: Vec<String> = (0..4)
         .map(|n| key(&PathBuf::from(format!(r"D:\shots\{n}.png"))))
@@ -1221,19 +1378,25 @@ fn a_peek_records_of_questions_outlive_weight_pressure_and_no_redraw_asks_them()
     assert!(
         matches!(
             cache.peek(&key(&unstarted)),
-            Some(PeekCacheEntry::Failed(_))
+            Some(PeekCacheEntry::Unanswered {
+                asked_again: true,
+                ..
+            })
         ),
         "nor an open whose thread could not be started"
     );
 
     // A redraw of a pane showing each file, with no raster of its own on the glass.
-    for path in [&broken, &unstarted] {
-        let pixels = surface_pixels(&mut cache, None, None, None, &key(path));
-        assert!(
-            matches!(pixels, SurfacePixels::Failed(_)),
-            "a pane's redraw reads the failure and asks nothing: {pixels:?}"
-        );
-    }
+    let pixels = surface_pixels(&mut cache, None, None, None, &key(&broken));
+    assert!(
+        matches!(pixels, SurfacePixels::Failed(_)),
+        "a pane's redraw reads the failure and asks nothing: {pixels:?}"
+    );
+    let pixels = surface_pixels(&mut cache, None, None, None, &key(&unstarted));
+    assert!(
+        matches!(pixels, SurfacePixels::Unanswered(None)),
+        "and the unanswered read asked again, asking nothing: {pixels:?}"
+    );
     let pixels = surface_pixels(&mut cache, None, None, None, &key(&reading));
     assert!(
         matches!(pixels, SurfacePixels::Nothing { asked: true }),
@@ -1331,7 +1494,13 @@ fn a_failure_for_a_file_no_surface_names_files_no_record() {
     let named = BTreeSet::from([shown.clone()]);
     for (key, asked) in [(&shown, 1), (&left, 2)] {
         let asked = crate::computation_lane::ComputationId::from(asked);
-        cache.insert(key.clone(), PeekCacheEntry::Pending { asked });
+        cache.insert(
+            key.clone(),
+            PeekCacheEntry::Pending {
+                asked,
+                once_more: false,
+            },
+        );
         assert!(file_peek_answer(
             &mut cache,
             &named,
@@ -1422,7 +1591,7 @@ fn a_pane_walks(
 /// The read the window awaits for `path`, if one is out.
 fn read_awaited(cache: &PeekCache, path: &Path) -> Option<crate::computation_lane::ComputationId> {
     match cache.peek(&normalized_local_image_path_key(path)) {
-        Some(PeekCacheEntry::Pending { asked }) => Some(*asked),
+        Some(PeekCacheEntry::Pending { asked, .. }) => Some(*asked),
         _ => None,
     }
 }
@@ -1479,9 +1648,21 @@ fn a_peek_answer_for_an_older_ask_is_set_aside_not_filed() {
         let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
         let mut video_facts = BTreeMap::new();
         let mut pictures = MarkdownPictures::default();
-        cache.insert(key.clone(), PeekCacheEntry::Pending { asked: older });
+        cache.insert(
+            key.clone(),
+            PeekCacheEntry::Pending {
+                asked: older,
+                once_more: false,
+            },
+        );
         forget_a_picture(&mut cache, &mut video_facts, &mut pictures, &path);
-        cache.insert(key.clone(), PeekCacheEntry::Pending { asked: newer });
+        cache.insert(
+            key.clone(),
+            PeekCacheEntry::Pending {
+                asked: newer,
+                once_more: false,
+            },
+        );
         let old_bytes = || Ok(a_decode("\u{65e7} old bytes", (4, 2), 32));
         let new_bytes = || Ok(a_decode("\u{65b0} new bytes", (8, 4), 128));
         if newer_first {
@@ -1710,7 +1891,13 @@ fn a_decode_offered_to_the_peek_never_lands_over_a_read_in_flight() {
     let source = bt_term::InlineImageSource::LocalPath(path.clone());
     let asked = crate::computation_lane::ComputationId::from(7);
     let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
-    cache.insert(key.clone(), PeekCacheEntry::Pending { asked });
+    cache.insert(
+        key.clone(),
+        PeekCacheEntry::Pending {
+            asked,
+            once_more: false,
+        },
+    );
 
     remember_decode(&mut cache, &source, &decoded);
     assert!(
@@ -1754,5 +1941,512 @@ fn a_decode_offered_to_the_peek_never_lands_over_a_read_in_flight() {
             Some(PeekCacheEntry::Ready { width_px: 4, .. })
         ),
         "a failure is no question in flight: the decode the terminal earned replaces it"
+    );
+}
+
+/// **A video the window asks about, by a name no other test uses** — never created: the door
+/// asks about a path, and the scripted lane never reads it.
+fn a_video_path(tag: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/peek-tests")
+        .join(format!("{}.mp4", bt_testpath::unique_name(tag)))
+}
+
+/// **The facts a read that got no frame still has** — the file's size alone.
+fn size_only_facts() -> preview::VideoFacts {
+    preview::VideoFacts {
+        duration_ms: None,
+        native: None,
+        bytes: Some(4_096),
+    }
+}
+
+/// RED (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL) — **a first frame that ran out is not filed as a
+/// refusal, and a refusal still is.**
+///
+/// On a busy machine a good recording's first frame can run out of its budget; the worker hands
+/// that back as [`bt_platform::video::NoFrame::RanOut`], and the window used to file it as
+/// "no decoder for this container", a fact about the file that was not one. Here the read is
+/// asked through the one door, its answer is a run-out, and what is filed is the record of a
+/// question not answered — and by the rule the window's facts door files by
+/// ([`video_facts_to_file`]), the facts an earlier answer filed (the recording's length and size)
+/// are not replaced by a read that learned only the file's size. A refusal of the same file is
+/// the `Failed` it always was, and its facts are filed.
+///
+/// MUTATION: file the run-out as `Failed(Decode("no decoder for this container"))` again (plant
+/// `plant-164-decode-filed-again.py`) — the first assertion names it. File a run-out's facts
+/// over the earlier answer's in `video_facts_to_file` — the first facts assertion names it. Read a
+/// held video's `NoFrame::Held` as a refusal in `frame_not_answered` (plant
+/// `plant-177-held-facts-arm-dropped.py`) — the held facts assertion names it
+/// (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE).
+#[test]
+fn a_first_frame_that_ran_out_is_not_filed_as_a_refusal() {
+    crate::test_support::install_host_answers();
+    let lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::new(crate::lane::Gate::default()),
+    ));
+    let path = a_video_path("\u{5f55}\u{5c4f} ran out");
+    let key = normalized_local_image_path_key(&path);
+    let named = BTreeSet::from([key.clone()]);
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    let earlier = preview::VideoFacts {
+        duration_ms: Some(5_000),
+        native: Some((1_920, 1_080)),
+        bytes: Some(4_096),
+    };
+
+    let PeekAsk::Asked(asked) = ask_for_peek_pixels(&mut cache, &lane.lane, probe_leaf(), &path)
+    else {
+        panic!("a local video is asked about");
+    };
+    assert!(file_peek_video_answer(
+        &mut cache,
+        &named,
+        &path,
+        asked,
+        Err(bt_platform::video::NoFrame::RanOut),
+        None,
+    ));
+    assert!(
+        matches!(
+            cache.peek(&key),
+            Some(PeekCacheEntry::Unanswered {
+                asked_again: false,
+                ..
+            })
+        ),
+        "a first frame that ran out is a question not answered, not a refusal of the file"
+    );
+    assert_eq!(
+        video_facts_to_file(
+            Some(&earlier),
+            size_only_facts(),
+            Some(bt_platform::video::NoFrame::RanOut)
+        ),
+        earlier,
+        "and a read that got no frame does not unsay what an earlier answer said"
+    );
+    assert_eq!(
+        video_facts_to_file(
+            Some(&earlier),
+            size_only_facts(),
+            Some(bt_platform::video::NoFrame::Held)
+        ),
+        earlier,
+        "nor does a read that met a file another program is writing"
+    );
+    assert_eq!(
+        video_facts_to_file(
+            None,
+            size_only_facts(),
+            Some(bt_platform::video::NoFrame::RanOut)
+        ),
+        size_only_facts(),
+        "though with nothing said before, the file's size is still the card's to say"
+    );
+
+    peek_card_opened(&mut cache, &path);
+    let PeekAsk::Asked(asked) = ask_for_peek_pixels(&mut cache, &lane.lane, probe_leaf(), &path)
+    else {
+        panic!("the card's new look asks again");
+    };
+    assert!(file_peek_video_answer(
+        &mut cache,
+        &named,
+        &path,
+        asked,
+        Err(bt_platform::video::NoFrame::Refused),
+        None,
+    ));
+    assert!(
+        matches!(
+            cache.peek(&key),
+            Some(PeekCacheEntry::Failed(bt_term::InlineImageDecodeError::Decode(reason)))
+                if reason == "no decoder for this container"
+        ),
+        "a refusal is filed as the refusal it is"
+    );
+    assert_eq!(
+        video_facts_to_file(
+            Some(&earlier),
+            size_only_facts(),
+            Some(bt_platform::video::NoFrame::Refused)
+        ),
+        size_only_facts(),
+        "and its facts are what the refusing read found"
+    );
+    assert_eq!(
+        video_facts_to_file(Some(&earlier), size_only_facts(), None),
+        size_only_facts(),
+        "as a frame's read files what it found"
+    );
+}
+
+/// RED (T-FIRST-FRAME-RUN-OUT-IS-NOT-A-REFUSAL) — **a first frame that ran out is asked again
+/// exactly once with no new input, and then only on a new look.**
+///
+/// A preview pane standing on a video never looks again by itself, so a run-out filed like a
+/// refusal left it pictureless for as long as it stood there. The pane's walk
+/// ([`a_pane_walks`], `refit_preview_picture`'s) is taken many times over each state, the way
+/// redraws take it, and the reads out are counted:
+///
+/// 1. the first walk asks; the answer runs out — `Unanswered`, not asked again;
+/// 2. the walks after it ask **once** (the one more ask, `once_more` on its `Pending`); that
+///    answer runs out too — `Unanswered`, asked again;
+/// 3. the walks after that ask **nothing**, however many there are;
+/// 4. a new look (a card opening over the file) asks again, as a fresh question.
+///
+/// The hover flyout's rule ([`peek_reads_the_file`]) is the same: a run-out not asked again is
+/// read on a re-entry; one asked again only on a peek that settles.
+///
+/// MUTATIONS: never file a run-out as asked again (plant `plant-164-retry-never-stops.py`) —
+/// the record step 2's run-out leaves names it (`Unanswered { asked_again: true, .. }` expected): a
+/// retry that never stops, caught by state before any walk of step 3 is taken. File the run-out
+/// as a refusal (plant `plant-164-decode-filed-again.py`) — the record step 1's run-out leaves
+/// names it (`Unanswered { asked_again: false, .. }` expected).
+#[test]
+fn a_first_frame_that_ran_out_is_asked_again_once_and_then_only_on_a_new_look() {
+    crate::test_support::install_host_answers();
+    let lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::new(crate::lane::Gate::default()),
+    ));
+    let path = a_video_path("\u{5f55}\u{5c4f} asked again");
+    let key = normalized_local_image_path_key(&path);
+    let named = BTreeSet::from([key.clone()]);
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    // Every read out across `walks` walks of the pane, in the order they were asked.
+    let reads_over = |cache: &mut PeekCache, walks: usize| {
+        let mut reads: Vec<crate::computation_lane::ComputationId> = Vec::new();
+        for _ in 0..walks {
+            a_pane_walks(cache, &lane.lane, &path);
+            if let Some(asked) = read_awaited(cache, &path)
+                && !reads.contains(&asked)
+            {
+                reads.push(asked);
+            }
+        }
+        reads
+    };
+    let run_out = |cache: &mut PeekCache, asked| {
+        assert!(file_peek_video_answer(
+            cache,
+            &named,
+            &path,
+            asked,
+            Err(bt_platform::video::NoFrame::RanOut),
+            None,
+        ));
+    };
+
+    let first = reads_over(&mut cache, 1);
+    assert_eq!(first.len(), 1, "the pane asks for its picture");
+    run_out(&mut cache, first[0]);
+    assert!(matches!(
+        cache.peek(&key),
+        Some(PeekCacheEntry::Unanswered {
+            asked_again: false,
+            ..
+        })
+    ));
+    assert!(
+        peek_reads_the_file(cache.peek(&key), true, false),
+        "a run-out not asked again is read on the flyout's re-entry too"
+    );
+
+    let again = reads_over(&mut cache, 8);
+    assert_eq!(
+        again.len(),
+        1,
+        "eight walks over a run-out ask it again exactly once: {again:?}"
+    );
+    assert!(matches!(
+        cache.peek(&key),
+        Some(PeekCacheEntry::Pending {
+            once_more: true,
+            ..
+        })
+    ));
+    run_out(&mut cache, again[0]);
+    assert!(matches!(
+        cache.peek(&key),
+        Some(PeekCacheEntry::Unanswered {
+            asked_again: true,
+            ..
+        })
+    ));
+
+    let after = reads_over(&mut cache, 8);
+    assert!(
+        after.is_empty(),
+        "a run-out asked again already is not asked again by a pane that only redraws: {after:?}"
+    );
+    assert!(
+        !peek_reads_the_file(cache.peek(&key), true, false),
+        "nor by the flyout's re-entry"
+    );
+    assert!(
+        peek_reads_the_file(cache.peek(&key), true, true),
+        "a hover that settles is a new look, and reads it"
+    );
+
+    peek_card_opened(&mut cache, &path);
+    let fresh = reads_over(&mut cache, 8);
+    assert_eq!(
+        fresh.len(),
+        1,
+        "a card opening over the file asks again, once"
+    );
+    assert!(
+        matches!(
+            cache.peek(&key),
+            Some(PeekCacheEntry::Pending {
+                once_more: false,
+                ..
+            })
+        ),
+        "as a fresh question, with its own one more ask still to come"
+    );
+}
+
+/// A picture's path for the peek tests, by [`a_video_path`]'s rule: a local name no test reads.
+fn a_picture_path(tag: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/peek-tests")
+        .join(format!("{}.png", bt_testpath::unique_name(tag)))
+}
+
+/// RED (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) — **a read whose thread could not be
+/// started is not filed as a failure of the file, and is asked again only on a new look.**
+///
+/// The computation lane's thread door refuses the start, as a machine out of threads would
+/// (`Gate::refuse_next_start`). The read used to be filed as `Failed(Decode("the decoder could
+/// not be started"))`: every pane that opened the file afterwards printed that as the file's
+/// failure, and a video's pane printed a picture's sentence. It is the record of a question not
+/// answered, already asked again: refused at the door, inside the asking surface's resolve, it
+/// has no answer to come back and be asked again on. So no redraw asks it (a pane's walks, the
+/// flyout's re-entry) and a new look does (a hover that settles, a card that opens), when the
+/// thread starts. A picture's pane says this window could not draw it and offers the default
+/// app; a video's pane says nothing. Both kinds, each on a lane of its own.
+///
+/// MUTATION: file the unstarted read as `Failed(Decode(..))` again in `ask_for_peek_pixels`
+/// (plant `plant-177-unstarted-filed-as-decode.py`) — the first record assertion names it.
+#[test]
+fn a_read_whose_thread_could_not_be_started_is_unanswered_and_asked_again_on_a_new_look() {
+    crate::test_support::install_host_answers();
+    for path in [
+        a_picture_path("\u{672a}\u{5f00}\u{5de5} picture"),
+        a_video_path("\u{672a}\u{5f00}\u{5de5} video"),
+    ] {
+        let gate = Arc::new(crate::lane::Gate::default());
+        let lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+            Arc::clone(&gate),
+        ));
+        let key = normalized_local_image_path_key(&path);
+        let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+        gate.refuse_next_start();
+        assert!(
+            matches!(
+                ask_for_peek_pixels(&mut cache, &lane.lane, probe_leaf(), &path),
+                PeekAsk::Unstarted
+            ),
+            "the thread door refused the read's start for {path:?}"
+        );
+        assert!(
+            matches!(
+                cache.peek(&key),
+                Some(PeekCacheEntry::Unanswered {
+                    asked_again: true,
+                    said: None,
+                })
+            ),
+            "a read whose thread could not be started is a question not answered, not a \
+             failure of the file: {path:?}"
+        );
+        for _ in 0..8 {
+            a_pane_walks(&mut cache, &lane.lane, &path);
+        }
+        assert!(
+            read_awaited(&cache, &path).is_none(),
+            "no redraw of a pane asks it again"
+        );
+        assert!(
+            !peek_reads_the_file(cache.peek(&key), true, false),
+            "nor the flyout's re-entry"
+        );
+        assert!(
+            peek_reads_the_file(cache.peek(&key), true, true),
+            "a hover that settles is a new look, and reads it"
+        );
+        peek_card_opened(&mut cache, &path);
+        a_pane_walks(&mut cache, &lane.lane, &path);
+        assert!(
+            read_awaited(&cache, &path).is_some(),
+            "a card opening over the file is a new look: it asks, and the thread starts"
+        );
+    }
+
+    let picture = crate::runtime::preview::unanswered_picture_refusal(
+        &a_picture_path("\u{672a}\u{5f00}\u{5de5} said"),
+        None,
+    )
+    .expect("a picture's pane says why there is no picture");
+    assert_eq!(
+        picture.notice,
+        crate::i18n::Text::PreviewFailedImageWorker.text(),
+        "this window could not draw it, which is true of the window and not of the file"
+    );
+    assert!(
+        picture.offers_the_default_app,
+        "so the default app is worth offering"
+    );
+    assert!(
+        crate::runtime::preview::unanswered_picture_refusal(
+            &a_video_path("\u{672a}\u{5f00}\u{5de5} said"),
+            None,
+        )
+        .is_none(),
+        "a video's pane says nothing, as for a refusal"
+    );
+}
+
+/// RED (T-DECODE-UNSTARTED-FILED-AS-A-DECODE-FAILURE) — **a picture another program holds is
+/// asked again exactly once with no new input, then only on a new look, and its pane says the
+/// operating system's words.**
+///
+/// The worker's decode answers `HeldElsewhere` when the file's open meets a sharing violation (a program
+/// holding it exclusively); it used to be filed as the disk's refusal, `Failed(Io)`, and a pane
+/// standing on the picture never asked again, though the holder may let go a moment later. The
+/// answer is filed as `Runtime::complete_peek_image` files it ([`file_peek_answer`]) and the
+/// pane's walk ([`a_pane_walks`]) is taken many times over each state, with the reads counted.
+/// It is row 164's bound, the same bound: the first walk asks and the file is held; the walks
+/// after it ask once (the one more ask); that is held too, and the walks after ask nothing; a
+/// card opening asks again. The pane's sentence is the held answer's, without the default app
+/// (the same program would meet the same holder). A video another program is writing
+/// (`NoFrame::Held`) is filed the same way, and its pane says nothing.
+///
+/// MUTATIONS: never file a held read as asked again (plant `plant-177-retry-never-stops.py`) —
+/// the record the second held answer leaves names it (`asked_again: true` expected), caught by
+/// state before any walk is taken over it. File `HeldElsewhere` as `Failed` in `file_peek_answer` — the
+/// first record assertion names it. Read `NoFrame::Held` as a refusal in `frame_not_answered`
+/// (plant `plant-177-held-facts-arm-dropped.py`) — the video's record assertion names it.
+#[test]
+fn a_picture_another_program_holds_is_asked_again_once_and_then_only_on_a_new_look() {
+    crate::test_support::install_host_answers();
+    let lane = crate::computation_lane::fixtures::watched(crate::lane::Executor::scripted(
+        Arc::new(crate::lane::Gate::default()),
+    ));
+    let path = a_picture_path("\u{88ab}\u{5360}\u{7528} held");
+    let key = normalized_local_image_path_key(&path);
+    let named = BTreeSet::from([key.clone()]);
+    let mut cache = PeekCache::with_budget(MAX_PEEK_CACHE_BYTES);
+    let words = "The process cannot access the file because it is being used by another process. \
+                 (os error 32)";
+    let held = || bt_term::InlineImageDecodeError::HeldElsewhere(words.to_owned());
+    let reads_over = |cache: &mut PeekCache, walks: usize| {
+        let mut reads: Vec<crate::computation_lane::ComputationId> = Vec::new();
+        for _ in 0..walks {
+            a_pane_walks(cache, &lane.lane, &path);
+            if let Some(asked) = read_awaited(cache, &path)
+                && !reads.contains(&asked)
+            {
+                reads.push(asked);
+            }
+        }
+        reads
+    };
+    let answered_held = |cache: &mut PeekCache, asked| {
+        assert!(file_peek_answer(
+            cache,
+            &named,
+            key.clone(),
+            asked,
+            Err(held())
+        ));
+    };
+
+    let first = reads_over(&mut cache, 1);
+    assert_eq!(first.len(), 1, "the pane asks for its picture");
+    answered_held(&mut cache, first[0]);
+    assert!(
+        matches!(
+            cache.peek(&key),
+            Some(PeekCacheEntry::Unanswered {
+                asked_again: false,
+                said: Some(bt_term::InlineImageDecodeError::HeldElsewhere(_)),
+            })
+        ),
+        "a file another program holds is a question not answered, not a refusal of the disk"
+    );
+
+    let again = reads_over(&mut cache, 8);
+    assert_eq!(
+        again.len(),
+        1,
+        "eight walks over a held file ask it again exactly once: {again:?}"
+    );
+    answered_held(&mut cache, again[0]);
+    assert!(
+        matches!(
+            cache.peek(&key),
+            Some(PeekCacheEntry::Unanswered {
+                asked_again: true,
+                ..
+            })
+        ),
+        "held again: asked again already"
+    );
+    let after = reads_over(&mut cache, 8);
+    assert!(
+        after.is_empty(),
+        "a held file asked again already is not asked by a pane that only redraws: {after:?}"
+    );
+    let pixels = surface_pixels(&mut cache, None, None, None, &key);
+    let SurfacePixels::Unanswered(said) = pixels else {
+        panic!("the pane reads the unanswered record: {pixels:?}");
+    };
+    let refusal = crate::runtime::preview::unanswered_picture_refusal(&path, said.as_ref())
+        .expect("a picture's pane says why there is no picture");
+    assert_eq!(
+        refusal.notice,
+        crate::i18n::preview_failed(words),
+        "in the operating system's words"
+    );
+    assert!(
+        !refusal.offers_the_default_app,
+        "and without the default app, which would meet the same holder"
+    );
+
+    peek_card_opened(&mut cache, &path);
+    let fresh = reads_over(&mut cache, 8);
+    assert_eq!(
+        fresh.len(),
+        1,
+        "a card opening over the file asks again, once"
+    );
+
+    // A video another program is writing: the same record, and nothing for its pane to say.
+    let video = a_video_path("\u{5f55}\u{5c4f} being written");
+    let video_key = normalized_local_image_path_key(&video);
+    let PeekAsk::Asked(asked) = ask_for_peek_pixels(&mut cache, &lane.lane, probe_leaf(), &video)
+    else {
+        panic!("a local video is asked about");
+    };
+    assert!(file_peek_video_answer(
+        &mut cache,
+        &BTreeSet::from([video_key.clone()]),
+        &video,
+        asked,
+        Err(bt_platform::video::NoFrame::Held),
+        None,
+    ));
+    assert!(
+        matches!(
+            cache.peek(&video_key),
+            Some(PeekCacheEntry::Unanswered {
+                asked_again: false,
+                said: None,
+            })
+        ),
+        "a video another program is writing is a question not answered, not a refusal"
     );
 }

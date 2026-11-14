@@ -118,6 +118,7 @@ use windows::{
 };
 
 use crate::https_download::{DOWNLOAD_CHUNK_BYTES, Deadlines, Destination, Partial, admit_length};
+use crate::launch_clock::{LaunchClock, RealClock};
 
 /// The one request this module knows how to make.
 ///
@@ -518,7 +519,8 @@ unsafe extern "system" fn on_status(
 
 /// How long closing an abandoned request may wait for WinHTTP to say the
 /// handle is gone. Past it the handle's count is left to WinHTTP, which is a
-/// leak of one buffer and never a use after free.
+/// leak of one buffer and never a use after free. Real time in the product:
+/// [`download_from`] hands the door [`RealClock`].
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
 /// **An asynchronous request handle, with its callback and its context.**
@@ -593,30 +595,37 @@ impl Request {
         })
     }
 
-    /// **The door: close the handle and wait, up to `bound`, for WinHTTP to say
-    /// it is gone.** Answers whether it did. Past the bound the handle's count
-    /// is left to WinHTTP, which gives it back at `HANDLE_CLOSING`: a leak of one
-    /// buffer until then, never a use after free.
-    fn close_within(mut self, bound: Duration) -> bool {
+    /// **The door: close the handle and wait, up to `bound` on `clock`, for
+    /// WinHTTP to say it is gone.** Answers whether it did. Past the bound the
+    /// handle's count is left to WinHTTP, which gives it back at
+    /// `HANDLE_CLOSING`: a leak of one buffer until then, never a use after free.
+    ///
+    /// The wait is one [`LaunchClock::wait`] (T-WINHTTP-CLOSE-DOOR-ON-A-CLOCK):
+    /// [`RealClock`] in the product, which makes it once on the real clock for
+    /// the whole bound; a counted clock in a test. `closed` is read only inside
+    /// that wait, so the clock alone judges whether the bound ended first.
+    fn close_within(mut self, bound: Duration, clock: &dyn LaunchClock) -> bool {
         let handle = std::mem::replace(&mut self.handle, std::ptr::null_mut());
         // SAFETY: a live handle, closed once: the door takes it out of `self`,
         // so the drop that follows finds nothing to close.
         let _ = unsafe { WinHttpCloseHandle(handle) };
-        let started = Instant::now();
-        let mut signals = self.shared.locked();
-        while !signals.closed {
-            let left = bound.saturating_sub(started.elapsed());
-            if left.is_zero() {
-                return false;
+        let shared = &self.shared;
+        clock.wait(bound, &mut |within: Duration| {
+            let started = Instant::now();
+            let mut signals = shared.locked();
+            while !signals.closed {
+                let left = within.saturating_sub(started.elapsed());
+                if left.is_zero() {
+                    return false;
+                }
+                let (next, _) = shared
+                    .raised
+                    .wait_timeout(signals, left)
+                    .expect("the download's signals are not held across a panic");
+                signals = next;
             }
-            let (next, _) = self
-                .shared
-                .raised
-                .wait_timeout(signals, left)
-                .expect("the download's signals are not held across a panic");
-            signals = next;
-        }
-        true
+            true
+        })
     }
 }
 
@@ -749,7 +758,7 @@ fn download_from(
     // of the exchange, an error's included, comes back here to close it.
     let exchange = Request::arm(handle)?;
     let transferred = transfer(&exchange, request, &mut deadlines);
-    let _ = exchange.close_within(CLOSE_WAIT);
+    let _ = exchange.close_within(CLOSE_WAIT, &RealClock);
     let (partial, announced) = transferred?;
     partial.finish(announced)
 }
@@ -864,10 +873,18 @@ mod tests {
     };
     use crate::https_download::{
         DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT,
-        loopback::{Step, begun, body, head, ok, serve},
+        loopback::{Entry, Step, begun, body, head, ok, serve},
     };
+    use crate::launch_clock::{CountedClock, Turn};
 
-    const IDLE: Duration = Duration::from_secs(5);
+    /// The idle bound every download here that must get an answer is handed: the
+    /// suite's patience, not a 5 s race with the loopback server's thread (plan
+    /// row 163). It is both WinHTTP's four phase timeouts (`WinHttpSetTimeouts`)
+    /// and the silence deadline. Running out of it is still a real bound, the
+    /// suite's convention: the test's red, by name, not a 5 s race. The tests
+    /// that are about a deadline hand their own (`stretch`,
+    /// `DOWNLOAD_IDLE_TIMEOUT`).
+    const IDLE: Duration = crate::door_skipped::PATIENCE;
     /// Longer than any of these exchanges takes: the redirect loop's bound.
     const BUDGET: Duration = Duration::from_secs(20);
 
@@ -944,9 +961,8 @@ mod tests {
         let directory = scratch("whole");
         let bytes = body(300_000);
         let served = bytes.clone();
-        let port = serve(1, move |_| {
-            vec![Step::Send(ok(&served, Some(served.len())))]
-        });
+        let server = serve(move |_| vec![Step::Send(ok(&served, Some(served.len())))]);
+        let port = server.port();
         let monitor = quiet();
         let done = fetch(
             port,
@@ -973,9 +989,8 @@ mod tests {
         let directory = scratch("at-ceiling");
         let bytes = body(70_000);
         let served = bytes.clone();
-        let port = serve(1, move |_| {
-            vec![Step::Send(ok(&served, Some(served.len())))]
-        });
+        let server = serve(move |_| vec![Step::Send(ok(&served, Some(served.len())))]);
+        let port = server.port();
         let done = fetch(
             port,
             &directory,
@@ -1000,7 +1015,8 @@ mod tests {
     fn unknown_length_stream_is_bounded() {
         let directory = scratch("over-unknown");
         let served = body(70_001);
-        let port = serve(1, move |_| vec![Step::Send(ok(&served, None))]);
+        let server = serve(move |_| vec![Step::Send(ok(&served, None))]);
+        let port = server.port();
         let monitor = quiet();
         let error = fetch(
             port,
@@ -1024,16 +1040,19 @@ mod tests {
     /// right, and not one byte of it reaches a file.
     ///
     /// MUTATION: skip `admit_length` in `download_from`, and this waits for
-    /// the idle timeout and fails at the body stage instead.
+    /// the idle timeout and fails at the body stage instead. The server's
+    /// pause is twice the idle bound, so it is the idle deadline that ends the
+    /// wait, never the server's close.
     #[test]
     fn an_announced_length_over_the_ceiling_is_refused_before_the_body() {
         let directory = scratch("announced-over");
-        let port = serve(1, |_| {
+        let server = serve(|_| {
             vec![
                 Step::Send(begun(&["Content-Length: 1073741824".to_owned()])),
-                Step::Pause(Duration::from_secs(10)),
+                Step::Pause(IDLE * 2),
             ]
         });
+        let port = server.port();
         let started = Instant::now();
         let error = fetch(
             port,
@@ -1067,11 +1086,12 @@ mod tests {
     #[test]
     fn a_truncated_body_never_takes_the_name() {
         let directory = scratch("truncated");
-        let port = serve(1, |_| {
+        let server = serve(|_| {
             let mut bytes = head(200, "OK", &["Content-Length: 100000".to_owned()]);
             bytes.extend_from_slice(&body(40_000));
             vec![Step::Send(bytes)]
         });
+        let port = server.port();
         let error = fetch(
             port,
             &directory,
@@ -1092,7 +1112,7 @@ mod tests {
     #[test]
     fn a_status_that_is_not_200_makes_no_file() {
         let directory = scratch("status");
-        let port = serve(1, |_| {
+        let server = serve(|_| {
             let page = b"<h1>Not Found</h1>";
             let mut bytes = head(
                 404,
@@ -1102,6 +1122,7 @@ mod tests {
             bytes.extend_from_slice(page);
             vec![Step::Send(bytes)]
         });
+        let port = server.port();
         let error = fetch(
             port,
             &directory,
@@ -1138,7 +1159,7 @@ mod tests {
         let directory = scratch("redirect");
         let bytes = body(5_000);
         let served = bytes.clone();
-        let port = serve(2, move |path| {
+        let server = serve(move |path| {
             if path == "/folio-0.4.6-x64.zip" {
                 vec![Step::Send(head(
                     302,
@@ -1152,6 +1173,7 @@ mod tests {
                 vec![Step::Send(ok(&served, Some(served.len())))]
             }
         });
+        let port = server.port();
         let done = fetch(
             port,
             &directory,
@@ -1161,6 +1183,15 @@ mod tests {
         )
         .expect("followed");
         assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
+        let paths = server.stop();
+        assert_eq!(
+            paths,
+            [
+                Entry::Served(Some("/folio-0.4.6-x64.zip".to_owned())),
+                Entry::Served(Some("/objects/asset".to_owned()))
+            ],
+            "the asked path, then the one it was sent to"
+        );
     }
 
     /// RED (U-7; 047-EXPERIENCE) — **a trickling body and a redirect loop each
@@ -1176,12 +1207,13 @@ mod tests {
     #[test]
     fn redirect_loop_and_trickle_body_hit_deadlines() {
         let directory = scratch("trickle");
-        let port = serve(1, |_| {
+        let server = serve(|_| {
             vec![
                 Step::Send(begun(&[])),
                 Step::Trickle(Duration::from_millis(50), Duration::from_secs(8)),
             ]
         });
+        let port = server.port();
         let started = Instant::now();
         let stretch = Duration::from_millis(1_500);
         let error = fetch(
@@ -1199,7 +1231,7 @@ mod tests {
         assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
 
         let directory = scratch("loop");
-        let port = serve(40, |_| {
+        let server = serve(|_| {
             vec![Step::Send(head(
                 302,
                 "Found",
@@ -1209,6 +1241,7 @@ mod tests {
                 ],
             ))]
         });
+        let port = server.port();
         let started = Instant::now();
         let error = fetch(
             port,
@@ -1220,6 +1253,50 @@ mod tests {
         .expect_err("a loop");
         assert!(started.elapsed() < BUDGET, "{:?}", started.elapsed());
         assert!(entries(&directory).is_empty(), "{error}");
+        // The stack's own hop limit ends the loop, not a count of the server's.
+        let paths = server.stop();
+        assert_eq!(
+            paths.first(),
+            Some(&Entry::Served(Some("/folio-0.4.6-x64.zip".to_owned())))
+        );
+        assert!(
+            paths.len() > 1
+                && paths[1..]
+                    .iter()
+                    .all(|path| *path == Entry::Served(Some("/again".to_owned()))),
+            "{paths:?}"
+        );
+    }
+
+    /// RED (row 127) — **one server answers one download after another**: the
+    /// loopback server serves every connection until the test stops it, and
+    /// records each.
+    ///
+    /// MUTATION: end the server's loop after its first connection (the "up to
+    /// N" server this replaces, at N = 1) and the second download fails at
+    /// the connection (`ERROR_WINHTTP_CANNOT_CONNECT`).
+    #[test]
+    fn one_server_answers_one_download_after_another() {
+        let bytes = body(10_000);
+        let served = bytes.clone();
+        let server = serve(move |_| vec![Step::Send(ok(&served, Some(served.len())))]);
+        for name in ["first", "second"] {
+            let directory = scratch(name);
+            let done = fetch(
+                server.port(),
+                &directory,
+                1 << 20,
+                (IDLE, DOWNLOAD_FLOOR_BYTES),
+                &quiet(),
+            )
+            .unwrap_or_else(|error| panic!("the {name} download: {error}"));
+            assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
+        }
+        let paths = server.stop();
+        assert_eq!(
+            paths,
+            vec![Entry::Served(Some("/folio-0.4.6-x64.zip".to_owned())); 2]
+        );
     }
 
     /// RED (U-7) — **a cancel interrupts a wait the server is not ending: the
@@ -1239,10 +1316,11 @@ mod tests {
         // The cancel is sent once the server holds the whole request, so the
         // wait it interrupts is the wait for the response's headers.
         let (asked, heard) = std::sync::mpsc::channel();
-        let port = serve(1, move |_| {
+        let server = serve(move |_| {
             let _ = asked.send(());
             vec![Step::Pause(Duration::from_secs(40))]
         });
+        let port = server.port();
         let monitor = quiet();
         let canceller = Arc::clone(&monitor);
         std::thread::spawn(move || {
@@ -1322,31 +1400,118 @@ mod tests {
     /// thread after it — an unsent request's arrives inside the close itself,
     /// which no door needs to wait for.
     ///
+    /// The door's wait is on a counted clock (T-WINHTTP-CLOSE-DOOR-ON-A-CLOCK):
+    /// the one wait is awaited within the door suites' patience, so the bound
+    /// never ends and WinHTTP's own thread answers in its own time.
+    ///
     /// MUTATION: return from `close_within` right after the close and `closed`
     /// is not yet set when it answers; leave the handle in `self` and the drop
-    /// after the door closes it a second time and says a skipped door.
+    /// after the door closes it a second time and says a skipped door; wait
+    /// beside the clock instead of through it and the clock was asked nothing.
     #[test]
     fn the_close_door_waits_for_the_closing_callback() {
-        let (asked, heard) = std::sync::mpsc::channel();
-        let port = serve(1, move |_| {
-            let _ = asked.send(());
-            vec![Step::Pause(Duration::from_secs(40))]
-        });
-        let (session, connection, request) = a_request_to(port);
-        // SAFETY: a live, armed request; its context is the one `arm` gave it.
-        unsafe { super::WinHttpSendRequest(request.handle, None, None, 0, 0, request.context) }
-            .expect("the request goes out");
-        crate::door_skipped::received(&heard, "the server holding the request");
+        let (session, connection, request, _server) = a_request_held_in_flight();
         let shared = Arc::clone(&request.shared);
-        let closed = request.close_within(super::CLOSE_WAIT);
+        let clock = CountedClock::answering();
+        let closed = request.close_within(super::CLOSE_WAIT, &clock);
         assert!(closed, "the door saw `HANDLE_CLOSING` within its bound");
         assert!(shared.locked().closed, "and the callback had said so");
+        assert_eq!(
+            clock.asked(),
+            vec![super::CLOSE_WAIT],
+            "the door's one wait is the product's bound, on the clock it was handed"
+        );
+        assert_eq!(clock.moved(), Duration::ZERO, "and the bound never ended");
         assert_eq!(
             crate::door_skipped::skipped_on_this_thread(),
             0,
             "a request closed through its door has nothing to say at its drop"
         );
         drop((connection, session));
+    }
+
+    /// RED (T-WINHTTP-CLOSE-DOOR-ON-A-CLOCK) — **a bound that ends before the
+    /// closing callback is answered `false`, and the callback comes after it.**
+    ///
+    /// The same request in flight as above, on a counted clock that spends the
+    /// door's one wait whole at once: the bound ends before WinHTTP is heard,
+    /// whatever WinHTTP has done by then. The late answer is WinHTTP's own
+    /// `HANDLE_CLOSING`, awaited afterwards as state within the door suites'
+    /// patience. That the context outlives the door is `on_status`'s SAFETY
+    /// invariant (the count WinHTTP holds); this test exercises it but does not
+    /// judge it, since it holds a count of its own.
+    ///
+    /// MUTATION: wait beside the clock (the old `Instant` loop, or the real
+    /// wait for the whole bound) and the door hears the callback and answers
+    /// `true`, and the clock was asked nothing; look at `closed` before asking
+    /// the clock and an early callback answers `true`.
+    #[test]
+    fn the_close_door_answers_false_when_its_bound_ends_before_the_closing_callback() {
+        let (session, connection, request, _server) = a_request_held_in_flight();
+        let shared = Arc::clone(&request.shared);
+        let clock = CountedClock::new(|_, _| Turn::Spend);
+        let closed = request.close_within(super::CLOSE_WAIT, &clock);
+        assert!(
+            !closed,
+            "the bound ended before the door heard `HANDLE_CLOSING`"
+        );
+        assert_eq!(
+            clock.asked(),
+            vec![super::CLOSE_WAIT],
+            "the door's one wait is the product's bound, on the clock it was handed"
+        );
+        assert_eq!(
+            clock.moved(),
+            super::CLOSE_WAIT,
+            "spent whole, on the count"
+        );
+        assert_eq!(
+            crate::door_skipped::skipped_on_this_thread(),
+            0,
+            "the door emptied the request: its drop has nothing to close or say"
+        );
+        assert!(
+            closed_within_patience(&shared),
+            "the closing callback came after the bound, on WinHTTP's thread"
+        );
+        drop((connection, session));
+    }
+
+    /// Whether WinHTTP's closing callback has said the handle is gone, awaited
+    /// as state within the door suites' patience
+    /// ([`crate::door_skipped::PATIENCE`]): what a test waits on once the door
+    /// has answered, a callback that must come.
+    fn closed_within_patience(shared: &super::Shared) -> bool {
+        let (signals, _) = shared
+            .raised
+            .wait_timeout_while(shared.locked(), crate::door_skipped::PATIENCE, |signals| {
+                !signals.closed
+            })
+            .expect("the download's signals are not held across a panic");
+        signals.closed
+    }
+
+    /// A request on the wire to a loopback server that has read it and holds
+    /// it, so a close cancels a call outstanding and `HANDLE_CLOSING` arrives
+    /// on a WinHTTP thread after the close. The server is handed back so that
+    /// it outlives the request.
+    fn a_request_held_in_flight() -> (
+        super::Handle,
+        super::Handle,
+        super::Request,
+        crate::https_download::loopback::Served,
+    ) {
+        let (asked, heard) = std::sync::mpsc::channel();
+        let server = serve(move |_| {
+            let _ = asked.send(());
+            vec![Step::Pause(Duration::from_secs(40))]
+        });
+        let (session, connection, request) = a_request_to(server.port());
+        // SAFETY: a live, armed request; its context is the one `arm` gave it.
+        unsafe { super::WinHttpSendRequest(request.handle, None, None, 0, 0, request.context) }
+            .expect("the request goes out");
+        crate::door_skipped::received(&heard, "the server holding the request");
+        (session, connection, request, server)
     }
 
     /// RED (T-DROP-DOORS, D-82) — **a request dropped without its door waits for

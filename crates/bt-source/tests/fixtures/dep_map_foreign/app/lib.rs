@@ -1,8 +1,10 @@
 // The foreign-trait fixture's subject: its own traits implemented on the
 // other package's types, a type named like one of them, a backend seam, and
 // a topic that calls them.
+mod aliased;
 mod glass;
 mod imported;
+mod outside;
 mod ports;
 mod runtime;
 mod twin;

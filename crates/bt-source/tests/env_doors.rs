@@ -78,6 +78,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bt_source::{
     DiskScope, Index, ItemRecord, LiteralValue, Package, Span, TargetId, TargetKind, TargetRoot,
@@ -105,21 +106,8 @@ fn workspace_root() -> PathBuf {
 
 /// The whole of a first-party package; `bt-source`'s `tests/fixtures/` are source *about*
 /// compilation and are declared out.
-fn universe_for(package: &Package) -> Universe {
-    if package.name() == "bt-source" {
-        let scopes = vec![
-            DiskScope::under(package.directory().join("src")),
-            DiskScope::under(package.directory().join("tests")).excluding(&["fixtures"]),
-        ];
-        return Universe::declare(
-            "the whole of bt-source, fixtures aside",
-            package.targets().to_vec(),
-            scopes,
-            Vendor::Excluded,
-        )
-        .expect("this crate is where it says it is");
-    }
-    universes::whole_package(package, Vendor::Excluded).expect("a package of this workspace")
+pub(crate) fn universe_for(package: &Package) -> Universe {
+    universes::first_party_whole(package, Vendor::Excluded).expect("a package of this workspace")
 }
 
 /// Whether a `cfg` predicate, as written, names the `test` configuration — a whole word outside
@@ -487,18 +475,26 @@ fn relative(path: &Path, root: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// Every first-party package's scan, merged.
-fn workspace_scan() -> BTreeMap<(String, String), Reads> {
-    let root = workspace_root();
-    let workspace = Workspace::read(&root).expect("this workspace");
-    let mut found = BTreeMap::new();
-    for package in workspace
+/// Every first-party package's index: the one this process holds for each package's
+/// [`universes::first_party_whole`], shared with every other guard that asks for it.
+pub(crate) fn workspace_indices() -> Vec<Arc<Index>> {
+    let workspace = Workspace::read(&workspace_root()).expect("this workspace");
+    workspace
         .packages()
         .iter()
         .filter(|package| !is_vendored(package.directory()))
-    {
-        let index = Index::build(&universe_for(package))
-            .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+        .map(|package| {
+            Index::shared(&universe_for(package))
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
+        })
+        .collect()
+}
+
+/// Every first-party package's scan, merged.
+fn workspace_scan() -> BTreeMap<(String, String), Reads> {
+    let root = workspace_root();
+    let mut found = BTreeMap::new();
+    for index in workspace_indices() {
         found.extend(scan(&index, &root));
     }
     found

@@ -266,6 +266,7 @@ fn two_panes_save_and_revive_their_own_two_folders() {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         },
         &|seat| panic!("a tree of two terminals has no files leaf to ask about ({seat:?})"),
     );
@@ -344,8 +345,8 @@ fn two_panes_save_and_revive_their_own_two_folders() {
 /// `PowerShell · D:\…` on every head in the window, which is the bug.**
 #[test]
 fn a_pane_head_says_where_it_is_and_a_program_speaks_only_in_front_of_it() {
-    let cwd = Path::new(r"D:\Developer\folio-terminal\crates\bt-app");
-    let whole = r"D:\Developer\folio-terminal\crates\bt-app".to_owned();
+    let cwd = Path::new(r"D:\Developer\lunar-workshop\crates\bt-app");
+    let whole = r"D:\Developer\lunar-workshop\crates\bt-app".to_owned();
     let profile = profiles::title(profiles::fallback_profile());
 
     // THE BUG. `scripts/shell-integration/folio.ps1` ends by
@@ -518,7 +519,7 @@ fn a_pane_head_says_where_it_is_and_a_program_speaks_only_in_front_of_it() {
 #[test]
 fn a_pane_heads_folder_is_capped_at_max_path_and_not_at_a_names_forty() {
     let profile = profiles::title(profiles::fallback_profile());
-    let ordinary = Path::new(r"D:\Developer\folio-terminal\crates\bt-app\src");
+    let ordinary = Path::new(r"D:\Developer\lunar-workshop\crates\bt-app\src");
     let ordinary_text = ordinary.to_str().expect("a test path is UTF-8");
     assert!(
         ordinary_text.chars().count() > TITLE_MAX_CHARS,
@@ -622,8 +623,8 @@ fn osc0_report(title: &str) -> String {
 /// to their last segment.
 #[test]
 fn a_tabs_terminal_names_are_the_whole_folders_its_shells_reported() {
-    let left_path: &str = &host_spelling(r"D:\Developer\folio-terminal\crates\bt-app");
-    let right_path: &str = &host_spelling(r"D:\Developer\folio-terminal\crates\bt-term");
+    let left_path: &str = &host_spelling(r"D:\Developer\lunar-workshop\crates\bt-app");
+    let right_path: &str = &host_spelling(r"D:\Developer\lunar-workshop\crates\bt-term");
     let profile = profiles::title(profiles::fallback_profile());
     // Both shells say exactly what the shipped integration makes them say:
     // the profile's own title, then where they stand. This is the pane pair
@@ -639,7 +640,7 @@ fn a_tabs_terminal_names_are_the_whole_folders_its_shells_reported() {
         panic!("a two-pane cross tab holds two terminal seats");
     };
     assert_eq!(
-        tab.sessions[&left].session.window_title(),
+        tab.sessions[&left].session.session.window_title(),
         Some(profile),
         "the fixture only proves anything if the integration's title really \
              arrived and really outranked the folder under the old order"
@@ -765,6 +766,7 @@ fn a_turn_ending_reaches_as_far_as_the_reader_is_away_and_the_row_shuts_the_lane
         .sessions
         .get_mut(&seat)
         .expect("the fixture's seat")
+        .session
         .attention
         .bell_reported = false;
     assert_eq!(
@@ -1044,7 +1046,7 @@ fn both_panes_reach_the_glass_in_the_same_number_of_turns() {
 /// own report to the profile.
 #[test]
 fn a_tab_name_takes_the_most_specific_layer_that_actually_spoke() {
-    let cwd = Path::new(r"D:\Developer\folio-terminal");
+    let cwd = Path::new(r"D:\Developer\lunar-workshop");
     assert_eq!(
         display_title(
             Some("我的构建"),
@@ -1075,7 +1077,7 @@ fn a_tab_name_takes_the_most_specific_layer_that_actually_spoke() {
             profiles::title(profiles::fallback_profile()),
             &profiles::announcement_set(profiles::fallback_profile()),
         ),
-        "folio-terminal",
+        "lunar-workshop",
         "then where the shell says it is standing"
     );
     assert_eq!(
@@ -1166,7 +1168,7 @@ fn a_tab_follows_its_folder_when_the_shell_only_repeats_its_launchers_name() {
         "what the shell said outranks where it is standing"
     );
     // Including the one thing a `cmd` pane can say about being busy: the
-    // remainder `LeafSession::announced_title` keeps off Windows' console
+    // remainder `ShellSession::announced_title` keeps off Windows' console
     // convention is a program announcing what it is running.
     assert_eq!(
         named(None, Some("ping -n 8 127.0.0.1"), Some(demo), busy),
@@ -1240,9 +1242,11 @@ fn the_tab_and_the_head_over_its_own_pane_agree_about_what_the_shell_said() {
     let announcement = format!("\u{1b}]0;{}\u{7}", profiles::title(profile));
     let mut leaf = leaf_saying("");
     leaf.session
+        .session
         .feed(announcement.as_bytes())
         .expect("the shell's own announcement");
     leaf.session
+        .session
         .feed(osc7_st(r"D:\Demo").as_bytes())
         .expect("and the folder it is standing in");
     let tab = tab_holding(leaf);
@@ -1280,12 +1284,15 @@ fn a_tab_is_named_where_its_shell_was_put_down_until_that_shell_reports() {
     let announcement = format!("\u{1b}]0;{}\u{7}", profiles::title(profile));
     let mut leaf = leaf_saying("");
     leaf.session
+        .session
         .feed(announcement.as_bytes())
         .expect("the shell's own announcement");
     // Both halves of one fact, exactly as the spawn writes them: the field
     // the vault reads and the rung the session's own ladder stands on.
-    leaf.launch.spawn_place = Some(started_in.clone());
-    leaf.session.set_spawn_directory(Some(started_in.clone()));
+    leaf.session.launch.spawn_place = Some(started_in.clone());
+    leaf.session
+        .session
+        .set_spawn_directory(Some(started_in.clone()));
 
     let mut tab = tab_holding(leaf);
     let seat = tab.seats.identity();
@@ -1301,6 +1308,7 @@ fn a_tab_is_named_where_its_shell_was_put_down_until_that_shell_reports() {
         .get_mut(&seat)
         .expect("the fixture's one shell")
         .session
+        .session
         .feed(b"\x1b]7;file:///D:\\Demo\\notes\x1b\\")
         .expect("the shell says it moved");
     assert_eq!(tab.display_title(), "notes");
@@ -1311,7 +1319,7 @@ fn a_tab_is_named_where_its_shell_was_put_down_until_that_shell_reports() {
 /// fall-through, which a second copy of the precedence rules would lose.
 #[test]
 fn the_tip_names_the_layer_that_actually_named_the_tab() {
-    let cwd = Path::new(r"D:\Developer\folio-terminal");
+    let cwd = Path::new(r"D:\Developer\lunar-workshop");
     assert_eq!(
         resolve_title(
             Some("build"),
@@ -1376,7 +1384,7 @@ fn the_tip_names_the_layer_that_actually_named_the_tab() {
 /// the full path rather than the leaf the first line already carries.
 #[test]
 fn a_tabs_tip_is_the_name_then_its_provenance_then_its_promise() {
-    let cwd = Path::new(r"D:\Developer\folio-terminal");
+    let cwd = Path::new(r"D:\Developer\lunar-workshop");
     let (name, source) = resolve_title(
         None,
         None,
@@ -1387,14 +1395,14 @@ fn a_tabs_tip_is_the_name_then_its_provenance_then_its_promise() {
     let path = cwd.to_string_lossy().into_owned();
     assert_eq!(
         tooltip::tab_tip(&name, source, Some(&path), false),
-        format!("folio-terminal\nWorking folder · {path}")
+        format!("lunar-workshop\nWorking folder · {path}")
     );
     assert_eq!(
         tooltip::tab_tip(&name, source, Some(&path), true),
-        format!("folio-terminal\nWorking folder · {path}\nPinned. Restored next launch")
+        format!("lunar-workshop\nWorking folder · {path}\nPinned. Restored next launch")
     );
     // The full path, not the leaf the first line already carries.
-    assert!(path.ends_with(r"Developer\folio-terminal"));
+    assert!(path.ends_with(r"Developer\lunar-workshop"));
 }
 
 /// I87: the `+` names the profile it would start, so the button says what it
@@ -1463,11 +1471,12 @@ fn a_title_that_only_repeats_the_program_it_was_started_from_is_not_a_name() {
     let program = PathBuf::from(r"C:\WINDOWS\System32\cmd.exe");
     let titled = |title: &str, program: Option<&Path>| {
         let mut leaf = leaf_saying("x");
-        leaf.launch.program = program.map(Path::to_path_buf);
+        leaf.session.launch.program = program.map(Path::to_path_buf);
         leaf.session
+            .session
             .feed(format!("\x1b]0;{title}\x07").as_bytes())
             .unwrap();
-        leaf.announced_title().map(str::to_owned)
+        leaf.session.announced_title().map(str::to_owned)
     };
 
     assert_eq!(
@@ -1520,16 +1529,20 @@ fn a_title_that_only_repeats_the_program_it_was_started_from_is_not_a_name() {
     // The consequence, through the two stacks that read it: with the title
     // refused, the folder is what names both.
     let mut leaf = leaf_saying("x");
-    leaf.launch.program = Some(program.clone());
+    leaf.session.launch.program = Some(program.clone());
     leaf.session
+        .session
         .feed(b"\x1b]0;C:\\WINDOWS\\System32\\cmd.exe\x07")
         .unwrap();
-    leaf.session.feed(osc7_st(r"D:\src").as_bytes()).unwrap();
+    leaf.session
+        .session
+        .feed(osc7_st(r"D:\src").as_bytes())
+        .unwrap();
     assert_eq!(
         display_title(
             None,
-            leaf.announced_title(),
-            leaf.standing_in(),
+            leaf.session.announced_title(),
+            leaf.session.standing_in(),
             profiles::title(profiles::index_of_id("cmd")),
             &profiles::announcement_set(profiles::index_of_id("cmd")),
         ),
@@ -1538,8 +1551,8 @@ fn a_title_that_only_repeats_the_program_it_was_started_from_is_not_a_name() {
     );
     assert_eq!(
         pane_head_title(
-            leaf.announced_title(),
-            leaf.standing_in(),
+            leaf.session.announced_title(),
+            leaf.session.standing_in(),
             &[profiles::title(profiles::index_of_id("cmd"))],
         )
         .map(|(name, _)| name),
@@ -1614,7 +1627,7 @@ fn a_pane_saved_as_a_profile_this_build_lacks_says_so_rather_than_pretending() {
 #[test]
 fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
     let (pwsh, wsl) = ("pwsh", "wsl");
-    let chosen = PathBuf::from(r"D:\Developer\folio-terminal");
+    let chosen = PathBuf::from(r"D:\Developer\lunar-workshop");
     let pane = PathBuf::from(r"C:\Users\dev\elsewhere");
     let carried = profiles::SeedPlace::Carried(pane.clone());
 
@@ -1629,7 +1642,7 @@ fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
     assert_eq!(
         new_tab_cwd(wsl, Some(&chosen), pwsh, Some(&carried)),
         Some(profiles::SeedPlace::Named(PathBuf::from(
-            "/mnt/d/Developer/folio-terminal"
+            "/mnt/d/Developer/lunar-workshop"
         ))),
     );
     // Nobody said: the pane answers, exactly as it did before this row
@@ -1662,7 +1675,7 @@ fn a_tab_opened_in_a_chosen_folder_stands_there_on_a_build_without_wsl() {
         a_shipped_row_other_than_the_fallback(),
         profiles::fallback_profile_id(),
     );
-    let chosen = PathBuf::from("/Developer/folio-terminal");
+    let chosen = PathBuf::from("/Developer/lunar-workshop");
     let pane = PathBuf::from("/Users/dev/elsewhere");
     let carried = profiles::SeedPlace::Carried(pane.clone());
 
@@ -1853,9 +1866,9 @@ fn every_road_that_names_a_folder_opens_there_whatever_the_profile_says() {
 #[test]
 fn the_cwd_layer_names_the_folder_you_are_standing_in() {
     for (path, leaf) in [
-        (r"D:\Developer\folio-terminal", "folio-terminal"),
-        (r"D:\Developer\folio-terminal\", "folio-terminal"),
-        (r"D:\Developer\folio-terminal\\", "folio-terminal"),
+        (r"D:\Developer\lunar-workshop", "lunar-workshop"),
+        (r"D:\Developer\lunar-workshop\", "lunar-workshop"),
+        (r"D:\Developer\lunar-workshop\\", "lunar-workshop"),
         (r"C:\", "C:"),
         (r"\\server\share\work", "work"),
         ("/home/alice/src", "src"),
@@ -2120,7 +2133,7 @@ fn a_prompt_mark_forged_inside_a_running_command_is_typed_at_by_nothing() {
 #[test]
 fn a_restart_carries_the_seats_own_profile_and_its_last_reported_folder() {
     let profile = "gitbash";
-    let reported = PathBuf::from(r"D:\Developer\folio-terminal");
+    let reported = PathBuf::from(r"D:\Developer\lunar-workshop");
 
     let seed = restart_seed(
         profile,
@@ -2497,7 +2510,7 @@ fn a_tab_that_never_reported_a_folder_is_seeded_where_its_shell_was_put_down() {
     let started_in = PathBuf::from(r"C:\Users\dev");
     let tab = tab_holding({
         let mut leaf = leaf_saying("no report from this one");
-        leaf.launch.spawn_place = Some(started_in.clone());
+        leaf.session.launch.spawn_place = Some(started_in.clone());
         leaf
     });
     assert_eq!(
@@ -2524,16 +2537,16 @@ fn a_tab_that_never_reported_a_folder_is_seeded_where_its_shell_was_put_down() {
     let reported = tab_holding({
         let mut leaf = leaf_saying(&format!(
             "\u{1b}]7;file://localhost{}\u{7}",
-            host_uri_path(r"D:\Developer\folio-terminal")
+            host_uri_path(r"D:\Developer\lunar-workshop")
         ));
-        leaf.launch.spawn_place = Some(started_in.clone());
+        leaf.session.launch.spawn_place = Some(started_in.clone());
         leaf
     });
     assert_eq!(
         reported.seed(),
         Some(seed::Seed::Term {
             profile_id: profiles::id(profiles::fallback_profile()),
-            cwd: host_spelling(r"D:\Developer\folio-terminal"),
+            cwd: host_spelling(r"D:\Developer\lunar-workshop"),
             manual_name: None,
         }),
     );
@@ -2717,6 +2730,7 @@ fn a_torn_out_pane_carries_its_own_shell_into_its_own_tab() {
         .sessions
         .get_mut(&SeatId(2))
         .expect("the right-hand pane")
+        .session
         .launch
         .profile = gitbash.to_owned();
     assert_ne!(

@@ -1417,7 +1417,7 @@ fn an_elapsed_time_service_is_never_gated_and_the_flood_shows_its_state() {
             .find(clock)
             .unwrap_or_else(|| panic!("`{clock}` is this advancer's state clock:\n{body}"));
         let gate = body
-            .find("!self.animation_frame_is_due() {")
+            .find("self.paced_frame(")
             .unwrap_or_else(|| panic!("this advancer still asks for a frame:\n{body}"));
         assert!(
             state < gate,

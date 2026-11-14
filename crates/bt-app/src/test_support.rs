@@ -330,6 +330,7 @@ pub(crate) fn saved_tab(profile_id: &str, cwd: &str, name: Option<&str>, pinned:
             manual_name: name.map(str::to_owned),
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })),
         pinned,
         focused_leaf: "leaf-0".to_owned(),
@@ -393,6 +394,7 @@ fn shells_tab(cwd: &Path, shells: usize) -> TabV1 {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })))
     };
     let root = if shells == 2 {
@@ -509,6 +511,7 @@ pub(crate) fn saved_row_of_two(left: &str, right: &str) -> TabV1 {
             manual_name: None,
             card_skip: 0,
             last_command: String::new(),
+            agent: None,
         })))
     };
     TabV1 {
@@ -540,6 +543,7 @@ pub(crate) fn saved_files_and_terminal(files: bt_persist::FilesLeafV1) -> TabV1 
                     manual_name: None,
                     card_skip: 0,
                     last_command: String::new(),
+                    agent: None,
                 }))),
             ],
         }),
@@ -690,6 +694,25 @@ pub(crate) fn facts_with(
         // ledger, and a place in the queue outranks every one of its rules.
         // The tests that are about the queue say so ([`waiting`]).
         awaiting: false,
+        // A shell's rule: no agent's turns are heard here. The tests about an agent pane's turns
+        // say so ([`agent_turn_facts`]).
+        turn: None,
+    }
+}
+
+/// **An agent pane read by its turns** (0.4.10 plan row 75): `ended_at` is the output revision
+/// its latest turn ended at, `running` whether a turn is under way, and `output` / `seen` the
+/// bytes it drew and how much of them was painted.
+pub(crate) fn agent_turn_facts(
+    ended_at: Option<u64>,
+    running: bool,
+    output_revision: u64,
+    last_seen_revision: u64,
+    tab_is_active: bool,
+) -> SessionFacts {
+    SessionFacts {
+        turn: Some(crate::agent_turns::AgentTurn { ended_at, running }),
+        ..facts_with(quiet(), output_revision, last_seen_revision, tab_is_active)
     }
 }
 
@@ -796,10 +819,11 @@ pub(crate) fn ring(tab: &mut TabState, seat: SeatId) {
         .get_mut(&seat)
         .expect("the fixture's seat holds a shell")
         .session
+        .session
         .feed(b"\x07")
         .expect("a bell parses");
     assert!(
-        tab.sessions[&seat].session.status().bell_latched(),
+        tab.sessions[&seat].session.session.status().bell_latched(),
         "the fixture's own precondition: the bell really latched"
     );
 }
@@ -814,6 +838,7 @@ pub(crate) fn request_attention(tab: &mut TabState, seat: SeatId, value: &str) {
     tab.sessions
         .get_mut(&seat)
         .expect("the fixture's seat holds a shell")
+        .session
         .session
         .feed(bytes.as_bytes())
         .expect("the sequence parses");
@@ -1432,6 +1457,7 @@ pub(crate) fn solved_lopsided_split(
                 manual_name: None,
                 card_skip: 0,
                 last_command: String::new(),
+                agent: None,
             }),
         ))
     };
@@ -1576,7 +1602,7 @@ impl ResizeGateHarness {
             at,
         )
         .unwrap();
-        // Exactly what `release_due_leaf_resize` writes back.
+        // Exactly what `ShellSession::release_due_size` writes back.
         self.grid = pending.grid;
         self.conpty = pending.grid;
         if commit.told_the_child {
@@ -1684,7 +1710,7 @@ pub(crate) fn tab_with_a_files_column(id: u64, root: &str) -> TabState {
         }));
     let terminals = seats.terminals();
     let focused = terminals[0];
-    let sessions: BTreeMap<SeatId, LeafSession> = terminals
+    let sessions: BTreeMap<SeatId, TerminalPane> = terminals
         .iter()
         .map(|s| (*s, leaf_saying("SHELL")))
         .collect();
@@ -1795,6 +1821,7 @@ pub(crate) fn a_read_out() -> PeekCacheEntry {
         asked: computation_lane::ComputationId::from(
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ),
+        once_more: false,
     }
 }
 
@@ -2337,7 +2364,7 @@ pub(crate) fn text_buffer(name: &str, body: &str) -> preview::PreviewBuffer {
 }
 
 /// One lone-terminal tab holding exactly this shell.
-pub(crate) fn tab_holding(leaf: LeafSession) -> TabState {
+pub(crate) fn tab_holding(leaf: TerminalPane) -> TabState {
     let seats = seats::Seats::lone_terminal();
     let identity = seats.identity();
     let (layout, overflow) = cross_solve(&seats);
@@ -2504,17 +2531,18 @@ pub(crate) fn cross_solve(seats: &seats::Seats) -> (SeatLayout, Option<seats::Fi
     )
 }
 
-pub(crate) fn card_restore_fixture() -> LeafSession {
+pub(crate) fn card_restore_fixture() -> TerminalPane {
     install_host_answers();
     let mut leaf = leaf_saying("");
-    leaf.session = DualPlaneSession::new(nonzero_u32(10), nonzero_u32(40));
-    leaf.grid = GridSize {
+    leaf.session.session = DualPlaneSession::new(nonzero_u32(10), nonzero_u32(40));
+    leaf.session.grid = GridSize {
         columns: std::num::NonZeroU16::new(10).unwrap(),
         rows: std::num::NonZeroU16::new(40).unwrap(),
     };
-    leaf.conpty_grid = leaf.grid;
+    leaf.session.conpty_grid = leaf.session.grid;
     for number in 1..=100 {
         leaf.session
+            .session
             .feed(format!("H{number:03}\r\n").as_bytes())
             .unwrap();
     }
@@ -2523,12 +2551,13 @@ pub(crate) fn card_restore_fixture() -> LeafSession {
         .collect::<Vec<_>>()
         .join("\r\n");
     assert!(live.split("\r\n").all(|line| line.len() == 16));
-    leaf.session.feed(live.as_bytes()).unwrap();
+    leaf.session.session.feed(live.as_bytes()).unwrap();
     leaf.view.card_skip = 130;
-    assert_eq!(leaf.session.document().entries().len(), 100);
+    assert_eq!(leaf.session.session.document().entries().len(), 100);
     assert_eq!(
         (0..40)
             .filter(|row| leaf
+                .session
                 .session
                 .live_row(*row)
                 .is_some_and(|row| row.cells.iter().any(|cell| !cell.text.trim().is_empty())))
@@ -2536,7 +2565,7 @@ pub(crate) fn card_restore_fixture() -> LeafSession {
         40
     );
     assert_eq!(
-        focus_thumb::transcript_tail(&leaf.session, 40, 200, 0)
+        focus_thumb::transcript_tail(&leaf.session.session, 40, 200, 0)
             .0
             .len(),
         140
@@ -2549,25 +2578,26 @@ pub(crate) fn card_restore_fixture() -> LeafSession {
 /// draws it — and, since T-CARD-NO-PASSIVE-CLAMP, drawn without touching the
 /// leaf's number: the draw's own clamp lives in `transcript_tail` and writes
 /// nothing back, so looking at a card is not a way to move it.
-pub(crate) fn card_restore_first(leaf: &LeafSession) -> String {
-    focus_thumb::transcript_tail(&leaf.session, 40, 4, leaf.view.card_skip).0[0].clone()
+pub(crate) fn card_restore_first(leaf: &TerminalPane) -> String {
+    focus_thumb::transcript_tail(&leaf.session.session, 40, 4, leaf.view.card_skip).0[0].clone()
 }
 
-pub(crate) fn card_restore_widen(leaf: &mut LeafSession) {
-    leaf.propose_size(GridChange {
-        next: GridSize {
-            columns: std::num::NonZeroU16::new(40).unwrap(),
-            rows: std::num::NonZeroU16::new(40).unwrap(),
-        },
-        physical: PhysicalSize::new(400, 400),
-        observed_at: Instant::now(),
-        on_stage: LeafOnStage::Shown,
-        context: "resize card skip fixture",
-        pane: card_trace::Pane::untraced(),
-    })
-    .unwrap();
+pub(crate) fn card_restore_widen(leaf: &mut TerminalPane) {
+    leaf.session
+        .propose_size(GridChange {
+            next: GridSize {
+                columns: std::num::NonZeroU16::new(40).unwrap(),
+                rows: std::num::NonZeroU16::new(40).unwrap(),
+            },
+            physical: PhysicalSize::new(400, 400),
+            observed_at: Instant::now(),
+            on_stage: LeafOnStage::Shown,
+            context: "resize card skip fixture",
+            pane: card_trace::Pane::untraced(),
+        })
+        .unwrap();
     assert_eq!(
-        focus_thumb::transcript_tail(&leaf.session, 40, 200, 0)
+        focus_thumb::transcript_tail(&leaf.session.session, 40, 200, 0)
             .0
             .len(),
         120
@@ -2575,7 +2605,7 @@ pub(crate) fn card_restore_widen(leaf: &mut LeafSession) {
 }
 
 pub(crate) fn card_restore_resize(
-    leaf: &mut LeafSession,
+    leaf: &mut TerminalPane,
     columns: u16,
     rows: u16,
     stage: LeafOnStage,
@@ -2584,46 +2614,126 @@ pub(crate) fn card_restore_resize(
         columns: std::num::NonZeroU16::new(columns).unwrap(),
         rows: std::num::NonZeroU16::new(rows).unwrap(),
     };
-    leaf.propose_size(GridChange {
-        next,
-        physical: PhysicalSize::new(400, 400),
-        observed_at: Instant::now(),
-        on_stage: stage,
-        context: "card skip resize",
-        pane: card_trace::Pane::untraced(),
-    })
-    .unwrap();
+    leaf.session
+        .propose_size(GridChange {
+            next,
+            physical: PhysicalSize::new(400, 400),
+            observed_at: Instant::now(),
+            on_stage: stage,
+            context: "card skip resize",
+            pane: card_trace::Pane::untraced(),
+        })
+        .unwrap();
     if stage == LeafOnStage::Behind {
         let mut pending = false;
         commit_leaf_resize(
-            &mut leaf.session,
+            &mut leaf.session.session,
             None,
             ResizeReanchor {
                 pending: &mut pending,
                 integration: profiles::Integration::None,
             },
             ReleaseGrids {
-                local: leaf.grid,
-                conpty: leaf.conpty_grid,
+                local: leaf.session.grid,
+                conpty: leaf.session.conpty_grid,
                 next,
             },
             PhysicalSize::new(400, 400),
             Instant::now(),
         )
         .unwrap();
-        leaf.grid = next;
-        leaf.conpty_grid = next;
+        leaf.session.grid = next;
+        leaf.session.conpty_grid = next;
     }
 }
 
-pub(crate) fn card_restore_settle(leaf: &mut LeafSession) {
-    leaf.session.mark_pty_resize_requested_at(
-        nonzero_u32(leaf.grid.columns.get()),
-        nonzero_u32(leaf.grid.rows.get()),
+pub(crate) fn card_restore_settle(leaf: &mut TerminalPane) {
+    leaf.session.session.mark_pty_resize_requested_at(
+        nonzero_u32(leaf.session.grid.columns.get()),
+        nonzero_u32(leaf.session.grid.rows.get()),
         Instant::now(),
     );
-    let deadline = leaf.session.resize_finish_deadline().unwrap();
-    leaf.session.finish_resize_if_quiescent(deadline).unwrap();
+    let deadline = leaf.session.session.resize_finish_deadline().unwrap();
+    leaf.session
+        .session
+        .finish_resize_if_quiescent(deadline)
+        .unwrap();
+}
+
+/// **A real shell on a pseudoconsole that is born at once**, through the test-shell door: `cmd`
+/// on Windows, `sh` elsewhere — neither keeps a history the account owns, so neither owes the
+/// history refusal a PowerShell is read back for before it is handed over (plan row 167: a
+/// default-shell birth waited ~18 s for that proof). For a test whose claim needs a live
+/// pseudoconsole and not any one program. Drop the [`bt_pty::test_shell::Hygiene`] after the
+/// session, so the child is ended before its directory is removed.
+pub(crate) fn a_quiet_shell(
+    size: bt_pty::PtySize,
+) -> Result<(PtySession, bt_pty::test_shell::Hygiene), PtyError> {
+    // The platform is asked of `bt-platform` (as `host_spelling` asks it), not decided by a `cfg`
+    // here: this file is not one of those that may name a platform
+    // (`platform_gate_tests::only_the_named_files_decide_what_platform_this_is`).
+    let command = match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => bt_pty::PtyCommand::new("cmd.exe").arg("/D"),
+        // A pane's shell is told the system's locale when the environment names none
+        // (`shell_integration::locale_declaration`); this one is told it the same way, or a
+        // test process with no `LANG` (an `ssh` session, a CI runner) hands `/bin/sh` the `C`
+        // locale and its line editor reads typed CJK as meta keys.
+        bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+            bt_platform::spawn_at_priority(
+                "bt-locale-test",
+                bt_platform::ThreadPriority::Normal,
+                |worker| bt_platform::read_system_locale_declaration(worker).declaration,
+            )
+            .expect("a worker")
+            .join()
+            .expect("the reading answers")
+            .iter()
+            .flat_map(bt_platform::LocaleDeclaration::variables)
+            .fold(
+                bt_pty::PtyCommand::new("/bin/sh"),
+                |command, (name, value)| command.env(*name, value),
+            )
+        }
+    };
+    bt_pty::test_shell::TestShell::spawn(command, size)
+        .map(bt_pty::test_shell::TestShell::into_session)
+}
+
+/// **A pane whose real shell is reaped when the pane is dropped** (plan row 188), on a passing
+/// run and on an unwinding one alike. A pane's own drop kills its shell and waits for nothing
+/// (`PtySession`'s `Drop`, D-81), so a shell's [`bt_pty::test_shell::Hygiene`] dropped straight
+/// after it could still find the dying child holding its files (a Windows PowerShell's module
+/// analysis cache was measured left behind). This waits for the seated shell to end before the
+/// pane goes: within `PtySession::shutdown`'s budgets for the reap and the reader, while the
+/// pseudoconsole's close (`ClosePseudoConsole`) has none — the same wait `TestShell`'s `Drop`
+/// makes. Declare it after the channel or binding that holds the shell's `Hygiene`, so it is
+/// dropped first.
+pub(crate) struct ReapedPane(pub(crate) TerminalPane);
+
+impl std::ops::Deref for ReapedPane {
+    type Target = TerminalPane;
+
+    fn deref(&self) -> &TerminalPane {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ReapedPane {
+    fn deref_mut(&mut self) -> &mut TerminalPane {
+        &mut self.0
+    }
+}
+
+impl Drop for ReapedPane {
+    fn drop(&mut self) {
+        if let Some(pty) = self.0.session.life.pty_mut() {
+            // A drop cannot answer an error, so the reap's result is not read: the shell's
+            // folder is what the reap is for. A reader thread that panicked is still re-raised
+            // here (`shutdown` joins it), which aborts the test process if this drop runs while
+            // unwinding — the same exposure `TestShell`'s `Drop` has.
+            let _ = pty.shutdown();
+        }
+    }
 }
 
 /// One shell with a word in it that no other shell in the test has.
@@ -2631,7 +2741,7 @@ pub(crate) fn card_restore_settle(leaf: &mut LeafSession) {
 /// `pty: None` — this is the same shell-less mode `BT_PROBE_INPUT` uses, so
 /// nothing here spawns a ConPTY, and the scrollback is still a real
 /// `DualPlaneSession`'s.
-pub(crate) fn leaf_saying(text: &str) -> LeafSession {
+pub(crate) fn leaf_saying(text: &str) -> TerminalPane {
     install_host_answers();
     let columns = NonZeroU32::new(40).unwrap();
     let rows = NonZeroU32::new(4).unwrap();
@@ -2650,48 +2760,69 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         columns: std::num::NonZeroU16::new(40).unwrap(),
         rows: std::num::NonZeroU16::new(4).unwrap(),
     };
-    LeafSession {
-        // A fixture is a shell for the purposes of being told apart from the
-        // next one, so it takes a number from the same counter production
-        // takes one from.
-        incarnation: next_incarnation(),
-        life: crate::ShellLife::shellless(),
-        foreground_program_cadence: foreground_program::Cadence::default(),
-        process_folder: crate::pane_folder::ProcessFolderMemo::default(),
-        // No ConPTY, so no reader thread, so nothing to wake — see the field.
-        wake: None,
-        launch: crate::LaunchFacts {
-            // A shell-less fixture is not a shell of some other kind: these
-            // panes exist to carry scrollback, and the default profile is what
-            // the pane they stand in for would have been started as.
-            profile: profiles::fallback_profile_id().to_owned(),
-            paste_recipient: profiles::paste_recipient(
-                profiles::fallback_profile(),
-                &profiles::ShellProgram::Native,
-                &bt_pty::SystemShellEnvironment,
-            ),
-            // And the door that profile is served through, which is the one the
-            // spawn would have read for it.
-            integration: profiles::row_of(profiles::fallback_profile_id())
-                .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
-            // And no program either, which is the honest shape of the same
-            // fact: nothing was started, so nothing can have announced itself.
-            program: None,
-            program_kind: profiles::ShellProgram::Native,
-            // Nor a place: a fixture was never put down anywhere.
-            spawn_place: None,
-            born_named: false,
+    TerminalPane {
+        session: ShellSession {
+            // A fixture is a shell for the purposes of being told apart from the
+            // next one, so it takes a number from the same counter production
+            // takes one from.
+            incarnation: next_incarnation(),
+            life: crate::ShellLife::shellless(),
+            foreground_program_cadence: foreground_program::Cadence::default(),
+            process_folder: crate::pane_folder::ProcessFolderMemo::default(),
+            // No ConPTY, so no reader thread, so nothing to wake — see the field.
+            wake: None,
+            launch: crate::LaunchFacts {
+                // A shell-less fixture is not a shell of some other kind: these
+                // panes exist to carry scrollback, and the default profile is what
+                // the pane they stand in for would have been started as.
+                profile: profiles::fallback_profile_id().to_owned(),
+                paste_recipient: profiles::paste_recipient(
+                    profiles::fallback_profile(),
+                    &profiles::ShellProgram::Native,
+                    &bt_pty::SystemShellEnvironment,
+                ),
+                // And the door that profile is served through, which is the one the
+                // spawn would have read for it.
+                integration: profiles::row_of(profiles::fallback_profile_id())
+                    .map_or(profiles::Integration::None, |row| profiles::served_by(&row)),
+                // And no program either, which is the honest shape of the same
+                // fact: nothing was started, so nothing can have announced itself.
+                program: None,
+                program_kind: profiles::ShellProgram::Native,
+                // Nor a place: a fixture was never put down anywhere.
+                spawn_place: None,
+                born_named: false,
+            },
+            session,
+            attention: crate::AttentionAccount {
+                ledger: attention::AttentionLedger::default(),
+                bell_reported: false,
+                clock: attention_wire::WaitClock::default(),
+                // A fixture has no shell, so nothing was ever told a capability — and an empty
+                // string is one no arriving message can match, which is the honest shape of that.
+                capability: String::new(),
+            },
+            attention_ended: false,
+            grid,
+            conpty_grid: grid,
+            last_finished_command: None,
+            // A fixture's bytes were fed before it was a leaf; whether they marked a
+            // prompt is heard the way the drain hears it, by asking.
+            has_rail: false,
+            pending_pty_resize: None,
+            pending_psreadline_resize_reanchor: false,
+            output_revision: 0,
+            last_seen_revision: 0,
+            // Nothing has been pasted into a fixture.
+            pending_paste: None,
+            paste_hold: None,
+            // A fixture is not a restore, so nothing is owed to its prompt.
+            pending_typing: None,
+            agent: crate::agent_resume::AgentAccount::default(),
+            // Nor are its turns any agent's: a fixture is read by the shell's rule until a test
+            // delivers it a hook.
+            turn_account: crate::agent_turns::TurnAccount::default(),
         },
-        session,
-        attention: crate::AttentionAccount {
-            ledger: attention::AttentionLedger::default(),
-            bell_reported: false,
-            clock: attention_wire::WaitClock::default(),
-            // A fixture has no shell, so nothing was ever told a capability — and an empty
-            // string is one no arriving message can match, which is the honest shape of that.
-            capability: String::new(),
-        },
-        attention_ended: false,
         view: TermView {
             projection,
             // A fixture is a new view, so it is at 100 % (ticket 37), at the default face measured
@@ -2707,21 +2838,6 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
             presented_metrics: fixture_cell_metrics(1.0, 16.0),
             frame_image_references: FrameImageReferences::default(),
         },
-        grid,
-        conpty_grid: grid,
-        last_finished_command: None,
-        // A fixture's bytes were fed before it was a leaf; whether they marked a
-        // prompt is heard the way the drain hears it, by asking.
-        has_rail: false,
-        pending_pty_resize: None,
-        pending_psreadline_resize_reanchor: false,
-        output_revision: 0,
-        last_seen_revision: 0,
-        // Nothing has been pasted into a fixture.
-        pending_paste: None,
-        paste_hold: None,
-        // A fixture is not a restore, so nothing is owed to its prompt.
-        pending_typing: None,
         // Nor a shell being restarted.
         successor: None,
     }
@@ -2732,6 +2848,7 @@ pub(crate) fn leaf_says(tab: &TabState, seat: SeatId) -> String {
     tab.sessions
         .get(&seat)
         .unwrap_or_else(|| panic!("no session filed under {seat:?}"))
+        .session
         .session
         .terminal()
         .visible_text()
@@ -2765,7 +2882,7 @@ pub(crate) fn cross_seats(panes: usize) -> seats::Seats {
 pub(crate) fn cross_tab(id: u64, texts: &[&str]) -> TabState {
     let seats = cross_seats(texts.len());
     let terminals = seats.terminals();
-    let sessions: BTreeMap<SeatId, LeafSession> = terminals
+    let sessions: BTreeMap<SeatId, TerminalPane> = terminals
         .iter()
         .zip(texts)
         .map(|(seat, text)| (*seat, leaf_saying(text)))
@@ -3303,8 +3420,8 @@ pub(crate) fn rail_test_body(logical: u32, scale: f64) -> SeatViewport {
 //
 // `Runtime::redraw` cannot be built without a window, so the gate it asks is a method of the tab
 // (`TabState::admit_resize_present`), and these tests run it on a real tab holding a real leaf:
-// the real `hear_first_mark` the drain asks, the real `LeafSession::grid_for` every solve asks and
-// the real `LeafSession::propose_size` every solve goes through, and frames the leaf's own
+// the real `hear_first_mark` the drain asks, the real `ShellSession::grid_for` every solve asks and
+// the real `ShellSession::propose_size` every solve goes through, and frames the leaf's own
 // session composes.
 
 /// Re-solve the tab's focused pane into `body`, as every road that re-solves the panes does.
@@ -3313,26 +3430,30 @@ pub(crate) fn resolve_focused_pane(
     metrics: &bt_render::CellMetrics,
     body: SeatViewport,
 ) {
-    let leaf = tab.focused_mut().expect("the tab holds a shell");
+    let leaf = tab.focused_pane_mut().expect("the tab holds a shell");
     // The pane at these metrics (ticket 37: a pane's grid is solved at its own metrics).
     apply_leaf_metrics(leaf, *metrics);
-    let next = leaf.grid_for(body);
-    leaf.propose_size(GridChange {
-        next,
-        physical: PhysicalSize::new(body.width, body.height),
-        observed_at: Instant::now(),
-        on_stage: LeafOnStage::Shown,
-        context: "ticket 47",
-        pane: card_trace::Pane::untraced(),
-    })
-    .expect("carry the solved grid to the pane");
+    let next = leaf.session.grid_for(&leaf.view.metrics, body);
+    leaf.session
+        .propose_size(GridChange {
+            next,
+            physical: PhysicalSize::new(body.width, body.height),
+            observed_at: Instant::now(),
+            on_stage: LeafOnStage::Shown,
+            context: "ticket 47",
+            pane: card_trace::Pane::untraced(),
+        })
+        .expect("carry the solved grid to the pane");
 }
 
 /// The frame the tab's focused pane composes now.
 pub(crate) fn focused_frame(tab: &mut TabState) -> ViewportFrame {
-    let leaf = tab.focused_mut().expect("the tab holds a shell");
-    leaf.session.refresh_projection(&mut leaf.view.projection);
+    let leaf = tab.focused_pane_mut().expect("the tab holds a shell");
     leaf.session
+        .session
+        .refresh_projection(&mut leaf.view.projection);
+    leaf.session
+        .session
         .viewport_frame(&mut leaf.view.projection)
         .expect("compose the pane's frame")
 }
@@ -3347,23 +3468,24 @@ pub(crate) fn focused_frame(tab: &mut TabState) -> ViewportFrame {
 // reach, which door the answer leaves by — it is pinned on the method bodies through `bt_source`.
 
 /// A shell-less leaf whose paste grammar is `grammar`, after the program printed `printed`.
-pub(crate) fn paste_leaf(grammar: shell_literal::ShellGrammar, printed: &[u8]) -> LeafSession {
+pub(crate) fn paste_leaf(grammar: shell_literal::ShellGrammar, printed: &[u8]) -> TerminalPane {
     let mut leaf = leaf_saying("");
-    leaf.launch.paste_recipient.encoder.grammar = grammar;
+    leaf.session.launch.paste_recipient.encoder.grammar = grammar;
     leaf.session
+        .session
         .feed(printed)
         .expect("feed the program's own bytes");
     leaf
 }
 
 /// One tab holding `leaf`, and the address a paste into it is aimed at.
-pub(crate) fn paste_tab(leaf: LeafSession) -> (TabState, PasteTarget) {
+pub(crate) fn paste_tab(leaf: TerminalPane) -> (TabState, PasteTarget) {
     let tab = tab_holding(leaf);
     let (seat, leaf) = tab.sessions.iter().next().expect("a lone terminal");
     let target = PasteTarget {
         tab: tab.id,
         seat: *seat,
-        incarnation: leaf.incarnation,
+        incarnation: leaf.session.incarnation,
     };
     (tab, target)
 }
@@ -3387,7 +3509,11 @@ pub(crate) fn paste_text_into_on(
     ask: bool,
     host: bt_platform::HostPlatform,
 ) -> StagedPaste {
-    let recipient = tab.sessions[&target.seat].launch.paste_recipient.clone();
+    let recipient = tab.sessions[&target.seat]
+        .session
+        .launch
+        .paste_recipient
+        .clone();
     let prepared = prepare_clipboard_paste(
         bt_platform::ClipboardPayload::Text(text.to_owned()),
         &recipient,
@@ -3431,7 +3557,7 @@ pub(crate) fn staged_bytes_sent(
     let leaf = tab.sessions.get_mut(&seat).expect("the seat has a shell");
     let mut sent = Vec::new();
     paste_body(
-        &mut leaf.session,
+        &mut leaf.session.session,
         &mut leaf.view.projection,
         body,
         |bytes| {
@@ -3491,6 +3617,24 @@ pub(crate) fn alone_in_a_process(selector: &str, stdin: &[u8]) -> bool {
 /// passed, what the child wrote to its standard error — for a claim about what a process says
 /// there.
 pub(crate) fn alone_in_a_process_with_its_stderr(selector: &str, stdin: &[u8]) -> Option<String> {
+    let output = a_process_of_its_own(selector, stdin)?;
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && said.contains("test result: ok. 1 passed"),
+        "`{selector}` did not pass as the one test of its own process ({}):\n{said}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stderr).into_owned())
+}
+
+/// **[`alone_in_a_process`]'s run, however the child ended**: `None` in the child, and in the
+/// parent the child's status and everything it wrote — for a claim about how a process of this
+/// binary leaves (T-PANIC-ANNOUNCED-ONCE-FLAG-REVIEW: one that a panic ends, which no summary
+/// line of the harness's says). The parent stops its own child after a minute. The child's
+/// output is read while it runs, so a child that writes more than a pipe holds is not stopped
+/// for it.
+pub(crate) fn a_process_of_its_own(selector: &str, stdin: &[u8]) -> Option<std::process::Output> {
     const CHILD: &str = "BT_STANDALONE_ENTRY_TEST_CHILD";
     if std::env::var_os(CHILD).is_some_and(|named| named == selector) {
         return None;
@@ -3510,24 +3654,277 @@ pub(crate) fn alone_in_a_process_with_its_stderr(selector: &str, stdin: &[u8]) -
             .write_all(stdin)
             .expect("the child's standard input takes its bytes");
     }
+    fn read_all(
+        mut stream: impl std::io::Read + Send + 'static,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stream
+                .read_to_end(&mut bytes)
+                .expect("the child's stream reads to its end");
+            bytes
+        })
+    }
+    let stdout = read_all(child.stdout.take().expect("the child's standard output"));
+    let stderr = read_all(child.stderr.take().expect("the child's standard error"));
     let started = std::time::Instant::now();
-    while child.try_wait().unwrap().is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if started.elapsed() > std::time::Duration::from_secs(60) {
             child.kill().unwrap();
             let _ = child.wait();
             panic!("`{selector}` ran for a minute in its own process and was stopped");
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    Some(std::process::Output {
+        status,
+        stdout: stdout.join().expect("the child's standard output was read"),
+        stderr: stderr.join().expect("the child's standard error was read"),
+    })
+}
+
+// ── the applier tests' fixture programs, started a few at a time (0.4.10 plan row 78)
+
+/// **How many applier tests with a fixture installation run at once** - the bound that keeps
+/// `update_apply_windows::tests::p_waits_for_o_and_releases_the_claim` inside the lane patience.
+///
+/// Each fixture is a program written moments before it starts, a signed `folio.exe` or a copy of
+/// this test binary, and a scanner may hold each one's first start for about a second (0.86 to
+/// 1.37 s each in a Defender recording on the build box, 2026-11-11, in a folder the scanner
+/// excludes). The scans of one module run, 76 starts, take about a second each one after the
+/// other, so a start made while the module's tests all run at once waits for the queue in front
+/// of it: 9 to 24 s at the median, past the patience a road's commit is awaited with (`p_waits`
+/// red 30 of 30 runs of its module, 2026-11-11). Bounding only the starts in flight
+/// ([`FIXTURE_STARTS_AT_ONCE`]) moves that wait in front of `spawn` and leaves it inside the
+/// test: `p_waits`' trial start waited 12 to 27 s for its place (red 30 of 30, 2026-11-12).
+///
+/// So the turn is the test's: [`a_fixture_turn`], taken by `Install::new` in both applier test
+/// modules before anything is written and held until the installation is dropped, so a test
+/// waits for its turn before its clock starts. With four turns the module was green 10 of 10 and
+/// a single start still reached 11.8 s; three leave that start more headroom.
+///
+/// This is a bound on a resource, not a retry: no start is tried twice and no patience is
+/// raised.
+const FIXTURE_TESTS_AT_ONCE: usize = 3;
+
+/// **The turns a fixture installation holds while it lives**, one unit lock each. They hold no
+/// value, so no test reads anything another wrote: what is shared is the turn.
+static FIXTURE_TEST_PLACES: [std::sync::Mutex<()>; FIXTURE_TESTS_AT_ONCE] =
+    [const { std::sync::Mutex::new(()) }; FIXTURE_TESTS_AT_ONCE];
+
+/// **Held while a test looks for a free turn or begins to wait for one**, and while a test that
+/// let its turn go tells a waiting one; it holds no value, as [`FIXTURE_START_GATE`] does for
+/// the starts.
+static FIXTURE_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Told each time a fixture installation lets its turn go, so a test waiting for one looks again.
+static FIXTURE_TURN_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+std::thread_local! {
+    /// **How many [`FixtureTurn`]s this thread holds.** A test that builds a second installation
+    /// while it holds the first takes no second place, so three tests that each want two cannot
+    /// wait on each other for ever.
+    static FIXTURE_TURNS_HELD_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// **One fixture test's turn**: held by an `Install` of `update_apply_windows::tests` or
+/// `update_apply_macos::tests` from its first statement until it is dropped. The place is
+/// `None` for a thread's second installation, which rides on the first's. An `Install` built on
+/// a thread the test spawned takes a place of its own, so a test must not join such a thread
+/// while it holds a turn: three that did would wait on each other for ever.
+pub(crate) struct FixtureTurn {
+    place: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+/// **A turn among [`FIXTURE_TESTS_AT_ONCE`]** for the installation this thread is about to
+/// build: a free place if there is one, otherwise a wait until one is let go; no place at all
+/// when this thread already holds a turn. A place a red test let go while panicking is a free
+/// place, so a red does not take a turn from the rest of the module.
+///
+/// [`the_applier_fixture_tests_take_a_turn_before_they_write_a_fixture`] holds both
+/// modules' `Install::new` to take it first.
+pub(crate) fn a_fixture_turn() -> FixtureTurn {
+    let held_here = FIXTURE_TURNS_HELD_HERE.with(|held| held.replace(held.get() + 1));
+    if held_here > 0 {
+        return FixtureTurn { place: None };
     }
-    let output = child.wait_with_output().unwrap();
-    let said = String::from_utf8_lossy(&output.stdout);
+    let mut gate = FIXTURE_TEST_GATE.lock().unwrap();
+    loop {
+        if let Some(place) = FIXTURE_TEST_PLACES
+            .iter()
+            .find_map(|place| match place.try_lock() {
+                Ok(place) => Some(place),
+                Err(std::sync::TryLockError::Poisoned(place)) => Some(place.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => None,
+            })
+        {
+            return FixtureTurn { place: Some(place) };
+        }
+        gate = FIXTURE_TURN_FREED.wait(gate).unwrap();
+    }
+}
+
+impl Drop for FixtureTurn {
+    fn drop(&mut self) {
+        FIXTURE_TURNS_HELD_HERE.with(|held| held.set(held.get() - 1));
+        if let Some(place) = self.place.take() {
+            drop(place);
+            drop(FIXTURE_TEST_GATE.lock().unwrap());
+            FIXTURE_TURN_FREED.notify_one();
+        }
+    }
+}
+
+/// **How many fixture programs the applier tests start at once**, under the test turn
+/// ([`FIXTURE_TESTS_AT_ONCE`]): a test that starts many fixtures still cannot put more than
+/// these in front of the scanner at once. A start past the bound waits for one in flight to
+/// return, not for any process to end.
+const FIXTURE_STARTS_AT_ONCE: usize = 4;
+
+/// **The places a fixture start holds while `spawn` runs**, one unit lock each: holding one is
+/// being one of the starts in flight. They hold no value, so no test reads anything another
+/// wrote: what is shared is the turn, as with every unit lock of the tests.
+static FIXTURE_START_PLACES: [std::sync::Mutex<()>; FIXTURE_STARTS_AT_ONCE] =
+    [const { std::sync::Mutex::new(()) }; FIXTURE_STARTS_AT_ONCE];
+
+/// **Held while a start looks for a free place or begins to wait for one**, and while a start
+/// that let its place go tells a waiting one; it holds no value. Holding it across the look and
+/// the wait is what keeps a place let go in between from going unnoticed.
+static FIXTURE_START_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Told each time a fixture start lets its place go, so a start waiting for one looks again.
+static FIXTURE_PLACE_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// **`command` started while this thread holds one of the [`FIXTURE_START_PLACES`]**, so no
+/// more than [`FIXTURE_STARTS_AT_ONCE`] fixture starts are in flight. The one door through which
+/// the applier tests (`update_apply_windows::tests` and `update_apply_macos::tests`) start a
+/// process, whatever the program: a fixture they wrote, a copy of this binary, or a system
+/// program they end a fixture with. A free place is taken if there is one; when all are held,
+/// the start waits until one is let go, and never while one is free. The place is let go when
+/// `spawn` returns, whether it started the program or not, so a long-lived child holds none.
+///
+/// [`the_applier_tests_start_every_process_through_the_fixture_door`] holds the two modules to
+/// it.
+pub(crate) fn start_a_fixture(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let place = {
+        let mut gate = FIXTURE_START_GATE.lock().unwrap();
+        loop {
+            if let Some(place) = FIXTURE_START_PLACES
+                .iter()
+                .find_map(|place| place.try_lock().ok())
+            {
+                break place;
+            }
+            gate = FIXTURE_PLACE_FREED.wait(gate).unwrap();
+        }
+    };
+    let started = command.spawn();
+    drop(place);
+    drop(FIXTURE_START_GATE.lock().unwrap());
+    FIXTURE_PLACE_FREED.notify_one();
+    started
+}
+
+/// RED (0.4.10 plan row 78) — **the applier tests start every process through
+/// [`start_a_fixture`]**, so no fixture start goes past [`FIXTURE_STARTS_AT_ONCE`].
+///
+/// Read in the code of the two test modules, comments out and literals kept: a `Command` is
+/// started by `spawn`, `status` or `output`, each called with no argument, and none of the
+/// three is written there. Each module calls the door at least once, so the pin does not hold
+/// over a module that moved. A start through a helper written in another module is not seen
+/// here, and nothing else in those modules starts one today.
+///
+/// MUTATION: in `update_apply_windows::tests`' `Children::start`, start the program with
+/// `.spawn()` instead of through the door, and this names that module's `.spawn()`.
+#[test]
+fn the_applier_tests_start_every_process_through_the_fixture_door() {
+    let found = |module: &str, spelling: &str| {
+        found_in(
+            Needle::new(Pattern::text(spelling)),
+            View::CodeKeepingLiterals,
+            Scope::Module(module.to_owned()),
+        )
+        .len()
+    };
+    for module in [
+        "crate::update_apply_windows::tests",
+        "crate::update_apply_macos::tests",
+    ] {
+        for start in [".spawn()", ".status()", ".output()"] {
+            assert_eq!(
+                found(module, start),
+                0,
+                "{module} starts a process with `{start}`, past the fixture door: start it with \
+                 `crate::test_support::start_a_fixture`, which holds the starts in flight to \
+                 {FIXTURE_STARTS_AT_ONCE}"
+            );
+        }
+        assert!(
+            found(module, "start_a_fixture(") > 0,
+            "{module} starts no process through the fixture door: the pin reads nothing there"
+        );
+    }
+}
+
+/// RED (0.4.10 plan row 78) — **every applier test with a fixture installation takes a
+/// [`a_fixture_turn`] first**, so no more than [`FIXTURE_TESTS_AT_ONCE`] of them queue their
+/// fixtures' starts at once.
+///
+/// A fixture test is one that builds an `Install`, whose `new` writes the programs that test
+/// starts; read in each module's `Install::new` and in the macOS `shape_install`, comments
+/// and whitespace out, its first statement takes the turn and the installation keeps it in
+/// `_turn`, the struct's last field, so it is let go only when the installation is dropped and
+/// after its programs have ended and its folder is gone. A test of those modules that starts a program without an
+/// `Install` is not held to the turn here; it is still held to the start bound by
+/// [`the_applier_tests_start_every_process_through_the_fixture_door`].
+///
+/// MUTATION: in `update_apply_windows::tests`, take the `let turn` statement out of
+/// `Install::new` and the `_turn` field out of `Install`, and this names that module's
+/// `Install::new`.
+#[test]
+fn the_applier_fixture_tests_take_a_turn_before_they_write_a_fixture() {
+    for module in [
+        "crate::update_apply_windows::tests",
+        "crate::update_apply_macos::tests",
+    ] {
+        let new = squeezed(item_body(
+            &ItemQuery::method("Install", "new").in_module(module),
+        ));
+        holds_a_turn_first(&format!("{module}'s Install::new"), &new);
+        let install = squeezed(item_body(
+            &ItemQuery::type_item("Install").in_module(module),
+        ));
+        assert!(
+            install.ends_with("_turn:crate::test_support::FixtureTurn,}"),
+            "{module}'s Install does not keep its fixture turn as its last field, so the turn \
+             is let go before the installation's programs have ended and its folder is gone"
+        );
+    }
+    let shape = squeezed(item_body(
+        &ItemQuery::function("shape_install").in_module("crate::update_apply_macos::tests"),
+    ));
+    holds_a_turn_first("crate::update_apply_macos::tests's shape_install", &shape);
+}
+
+/// The two halves of [`the_applier_fixture_tests_take_a_turn_before_they_write_a_fixture`]
+/// for one constructor's squeezed body, `what`: its first statement takes the turn, and the
+/// installation it builds keeps it.
+fn holds_a_turn_first(what: &str, body: &str) {
     assert!(
-        output.status.success() && said.contains("test result: ok. 1 passed"),
-        "`{selector}` did not pass as the one test of its own process ({}):\n{said}\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
+        body.starts_with("{letturn=crate::test_support::a_fixture_turn();"),
+        "{what} does not take a fixture turn as its first statement, so its test starts its \
+         fixtures past the {FIXTURE_TESTS_AT_ONCE} at once: {body:.120}"
     );
-    Some(String::from_utf8_lossy(&output.stderr).into_owned())
+    assert!(
+        body.contains("_turn:turn,"),
+        "{what} does not keep its fixture turn in the installation, so the turn is let go \
+         before the test's fixtures start"
+    );
 }
 
 // ── the storage pass's window, over the four real stores (T-STORE-NOTICE)
@@ -3804,7 +4201,7 @@ pub(crate) fn shown_and_opened(
     seat: u64,
     key: &str,
     serial: u64,
-    frames: Result<animation::Animation, animation::AnimationRefusal>,
+    frames: Result<animation::Animation, animation::NotOpened>,
 ) {
     let path = PathBuf::from(key);
     assert_eq!(
@@ -3834,7 +4231,7 @@ pub(crate) fn answer_awaited(
     cache: &mut AnimationCache,
     key: &str,
     serial: u64,
-    frames: Result<animation::Animation, animation::AnimationRefusal>,
+    frames: Result<animation::Animation, animation::NotOpened>,
 ) -> bool {
     let asked = cache
         .awaited(key)
@@ -3854,4 +4251,29 @@ pub(crate) fn fail_awaited(cache: &mut AnimationCache, path: &Path) {
             path: path.to_path_buf(),
         },
     ));
+}
+
+/// Makes the folder `link` lead to the folder `target`: a directory junction on Windows (no
+/// privilege needed), a symbolic link elsewhere. Shared by the tests that judge a program through a
+/// link (the agent hooks' scan, the classic verb's historical shapes).
+pub(crate) fn link_folder_to(link: &Path, target: &Path) {
+    let hygiene = bt_pty::test_shell::Hygiene::new();
+    let mut command = if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows names it"))
+            .join("System32")
+            .join("cmd.exe");
+        let mut command = hygiene.command(cmd, bt_platform::quiet_command);
+        command.args(["/C", "mklink", "/J"]).arg(link).arg(target);
+        command
+    } else {
+        let mut command = hygiene.command("/bin/ln", bt_platform::quiet_command);
+        command.arg("-s").arg(target).arg(link);
+        command
+    };
+    let made = command.output().expect("the link command runs");
+    assert!(
+        made.status.success(),
+        "the link was not made: {}",
+        String::from_utf8_lossy(&made.stderr)
+    );
 }

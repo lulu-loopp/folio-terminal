@@ -119,6 +119,7 @@ pub(crate) enum SettingChange {
     LaunchOpens(LaunchOpensV1),
     OptionSendsAlt(bool),
     MultilinePaste(bool),
+    ResumeAgents(bool),
     /// Which colour scheme a web pane asks its page for (0.4.4 ticket 09).
     WebPages(WebColorSchemeV1),
 }
@@ -169,6 +170,7 @@ impl SettingChange {
             Self::LaunchOpens(_) => SettingsRow::LaunchOpens,
             Self::OptionSendsAlt(_) => SettingsRow::OptionSendsAlt,
             Self::MultilinePaste(_) => SettingsRow::MultilinePaste,
+            Self::ResumeAgents(_) => SettingsRow::ResumeAgents,
             Self::WebPages(_) => SettingsRow::WebPages,
             // The one with no row: which pages' Advanced groups are open. It is read where it is
             // used.
@@ -233,6 +235,7 @@ impl SettingChange {
             Self::LaunchOpens(value) => settings.launch_opens = value,
             Self::OptionSendsAlt(value) => settings.option_sends_alt = value,
             Self::MultilinePaste(value) => settings.multiline_paste_ask = value,
+            Self::ResumeAgents(value) => settings.resume_agents = value,
             Self::WebPages(value) => settings.web_color_scheme = value,
         }
     }
@@ -313,6 +316,7 @@ pub(crate) fn plan_settings(
         launch_opens,
         option_sends_alt,
         multiline_paste_ask,
+        resume_agents,
         web_color_scheme,
     } = imported.clone();
     let mut changes = Vec::new();
@@ -488,6 +492,10 @@ pub(crate) fn plan_settings(
     offer(
         current.multiline_paste_ask != multiline_paste_ask,
         SettingChange::MultilinePaste(multiline_paste_ask),
+    );
+    offer(
+        current.resume_agents != resume_agents,
+        SettingChange::ResumeAgents(resume_agents),
     );
     offer(
         current.web_color_scheme != web_color_scheme,
@@ -776,6 +784,7 @@ mod tests {
             launch_opens: LaunchOpensV1::TabInLastWindow,
             option_sends_alt: !base.option_sends_alt,
             multiline_paste_ask: !base.multiline_paste_ask,
+            resume_agents: !base.resume_agents,
             web_color_scheme: WebColorSchemeV1::Dark,
             web_pages_used: bt_persist::WebPagesUsedV1::Used,
             ..base

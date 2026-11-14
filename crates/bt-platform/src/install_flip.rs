@@ -176,21 +176,37 @@ pub fn image_name(process: Running) -> Option<OsString> {
         .flatten()
 }
 
+/// **This process, by its pid and start instant** — `None` where there is no
+/// arm.
+#[must_use]
+pub fn this_running_process() -> Option<Running> {
+    let pid = std::process::id();
+    imp::started_of(pid).map(|started| Running { pid, started })
+}
+
 /// **This process's parent, by its pid and start instant, when it started
-/// before this process did** (0.4.7 ticket U-37): the process that started
-/// this one, still running — `None` when it has gone, or when its pid now
-/// names a process that started after this one (a reused pid: a parent always
-/// starts first), or where there is no arm. macOS: `getppid`, which names
-/// `launchd` once the parent has gone (it reparents the orphan). Windows: the
-/// process snapshot's parent pid (`CreateToolhelp32Snapshot`), which Windows
-/// never updates when the parent exits. Read only.
+/// before this process did** (0.4.7 ticket U-37): [`parent_of`] this process.
 #[must_use]
 pub fn parent_of_this_process() -> Option<Running> {
-    let me = std::process::id();
-    let mine = imp::started_of(me)?;
-    let parent = imp::parent_pid(me)?;
+    parent_of(this_running_process()?)
+}
+
+/// **The parent of the running `child`, by its pid and start instant, when it
+/// started before `child` did** (U-37; row 74's review N1 asks it of a process
+/// other than this one): the process that started `child`, still running —
+/// `None` when `child` does not run as recorded, when the parent has gone, or
+/// when its pid now names a process that started after `child` (a reused pid:
+/// a parent always starts first), or where there is no arm. macOS: the
+/// `pbi_ppid` of `proc_pidinfo(PROC_PIDTBSDINFO)`, `getppid`'s answer for any
+/// pid, which names `launchd` once the parent has gone (it reparents the
+/// orphan). Windows: the process snapshot's parent pid
+/// (`CreateToolhelp32Snapshot`), which Windows never updates when the parent
+/// exits. Read only.
+#[must_use]
+pub fn parent_of(child: Running) -> Option<Running> {
+    let parent = imp::parent_pid(child.pid)?;
     let started = imp::started_of(parent)?;
-    (started < mine).then_some(Running {
+    (still_running(child) && started < child.started).then_some(Running {
         pid: parent,
         started,
     })
@@ -353,7 +369,9 @@ mod imp {
         Some(buffer)
     }
 
-    pub(super) fn started_of(pid: u32) -> Option<u64> {
+    /// The BSD record of the live process `pid`, or `None` for one that is
+    /// gone or not ours to ask about.
+    fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
         let pid = libc::c_int::try_from(pid).ok()?;
         // SAFETY: an all-zero `proc_bsdinfo` is a valid value of a plain C
         // struct.
@@ -363,7 +381,11 @@ mod imp {
         let written = unsafe {
             libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
         };
-        (written == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+        (written == size).then_some(info)
+    }
+
+    pub(super) fn started_of(pid: u32) -> Option<u64> {
+        bsd_info(pid).map(|info| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
     }
 
     pub(super) fn arguments_of(pid: u32) -> io::Result<Vec<std::ffi::OsString>> {
@@ -426,10 +448,8 @@ mod imp {
             .map(OsStr::to_os_string)
     }
 
-    pub(super) fn parent_pid(me: u32) -> Option<u32> {
-        debug_assert_eq!(me, std::process::id());
-        // SAFETY: `getppid` takes nothing and cannot fail.
-        u32::try_from(unsafe { libc::getppid() }).ok()
+    pub(super) fn parent_pid(pid: u32) -> Option<u32> {
+        bsd_info(pid).map(|info| info.pbi_ppid)
     }
 
     pub(super) fn signal(process: Running, ask: Ask) -> io::Result<bool> {
@@ -581,8 +601,8 @@ mod imp {
             .map(OsStr::to_os_string)
     }
 
-    /// The parent pid the process snapshot records for `me`.
-    pub(super) fn parent_pid(me: u32) -> Option<u32> {
+    /// The parent pid the process snapshot records for `pid`.
+    pub(super) fn parent_pid(pid: u32) -> Option<u32> {
         use windows::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
             TH32CS_SNAPPROCESS,
@@ -602,7 +622,7 @@ mod imp {
         // `dwSize` says how large it is.
         let mut found = unsafe { Process32FirstW(snapshot, &raw mut entry) }.is_ok();
         while found {
-            if entry.th32ProcessID == me {
+            if entry.th32ProcessID == pid {
                 return Some(entry.th32ParentProcessID);
             }
             // SAFETY: as above.
@@ -615,14 +635,21 @@ mod imp {
     /// `None` once it has ended (its record outlives it while any handle is
     /// open). `process` was opened with `PROCESS_SYNCHRONIZE`.
     ///
-    /// **Ended is the process object signalled**, which the kernel does after
-    /// it has closed every handle the process held and unmapped its image —
-    /// not the exit code being readable, which comes first: a process leaving
-    /// by `ExitProcess` or by `TerminateProcess` on itself (Folio's way out)
-    /// has said its code while its handles — a data directory's claim among
-    /// them — and its image are still its own, for as long as its threads take
-    /// to leave the kernel. Whoever waits for a process to end waits for what
-    /// it held, so that stretch is still running.
+    /// **Ended is the process object signalled**, which the kernel does once
+    /// the process has closed the handles it held — not the exit code being
+    /// readable, which comes first: a process leaving by `ExitProcess` or by
+    /// `TerminateProcess` on itself (Folio's way out) has said its code while
+    /// its handles — a data directory's claim among them — are still its own,
+    /// for as long as its threads take to leave the kernel. Whoever waits for
+    /// a process to end waits for what it held, so that stretch is still
+    /// running. **That its image file is let go by then is not promised**:
+    /// CI run 41156010943 met a removal of the rescue build refused with
+    /// `ERROR_ACCESS_DENIED` (the answer for an executable still mapped as an
+    /// image — the ended process's own or a scanner's, which is not known)
+    /// just after this said it had ended, so a caller that removes the
+    /// executable next asks again while the removal is refused as held
+    /// (`install_txn::Failure::removal_refused_while_held`;
+    /// T-UPDATE-STARTUP-ON-DISK-TEMP-DIR-RACE).
     fn creation_of(process: HANDLE) -> Option<u64> {
         // SAFETY: `process` is live for the call; a zero timeout only asks.
         if unsafe { WaitForSingleObject(process, 0) } != WAIT_TIMEOUT {
@@ -803,7 +830,7 @@ mod imp {
         ))
     }
 
-    pub(super) fn parent_pid(_me: u32) -> Option<u32> {
+    pub(super) fn parent_pid(_pid: u32) -> Option<u32> {
         None
     }
 
@@ -1248,11 +1275,9 @@ mod tests {
     ///
     /// MUTATION: in the Windows arm, `creation_of` answers the creation time
     /// without asking whether the process is still active.
+    #[cfg(windows)]
     #[test]
     fn a_started_program_is_listed_while_it_runs_and_not_after() {
-        if crate::host_platform() != crate::HostPlatform::Windows {
-            return;
-        }
         let scratch = Scratch::new("list");
         let program = scratch.0.join("folio.exe");
         crate::trust_harness::program(

@@ -890,7 +890,7 @@ corrections in detail.
 
 **Citation fix the review asked for.** "The split-prep review's S-1 to S-3" is
 Codex's answer of 2026-09-21. It lives outside the repository, at
-`D:\Developer\trace\split-prep-review-codex-answer.md`, and revision 2 of the
+`trace\split-prep-review-codex-answer.md`, and revision 2 of the
 design it reviewed is `…\split-prep-design-rev2-2026-09-21.md` in the same folder.
 The repository holds the adopted form in `docs/plans/bt-app-split-prep.md`:
 §2.1 (four views, none of them a default: S-1), §3.1–§3.2 (a universe is

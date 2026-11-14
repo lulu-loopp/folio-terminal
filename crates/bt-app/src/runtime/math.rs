@@ -2,6 +2,7 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::TermViewPorts;
+use crate::TerminalPane;
 use crate::input::Keystroke;
 use crate::runtime::frame::dispatch_tab_decoration_tasks;
 use crate::runtime::panes::rail_overlay_layer;
@@ -113,7 +114,7 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn search_hit_line_text(&self, hit: usize) -> Option<String> {
         let seat = self.window.search.seat()?;
         let line = self.window.search.hits().get(hit)?.line;
-        let leaf = self.sessions.get(&seat)?;
+        let TerminalPane { session: leaf, .. } = self.sessions.get(&seat)?;
         match line {
             bt_viewport::SearchLine::History(id) => {
                 let frozen = leaf.session.transcript().frozen();
@@ -306,6 +307,11 @@ impl<B: Backend> Runtime<'_, B> {
             // arrangement, and its chassis. No scrim.
             (self.uninstall_card_build(&layout), ModalBand::Fixed)
         } else if let Some(layout) = self.settings_layout() {
+            // **The focused field's scroll, settled once for the frame** (0.4.9 plan row 180,
+            // ruling 2): the painter draws the field pushed left by it and the run a press
+            // reads is recorded with it. Settled before the readings below borrow the
+            // window.
+            let field_scroll = self.settle_settings_field_scroll(&layout);
             // The hover and the readings first, then the renderer: a combo whose
             // value outgrows its 118px button is ellipsised, and only the font
             // knows where the cut falls. Same division, and same hoist, as the
@@ -336,22 +342,51 @@ impl<B: Backend> Runtime<'_, B> {
             // whichever one has the focus. Hoisted with the recorder's caps and
             // for its reason: they are `String`s owned by the panel, and the
             // renderer is borrowed mutably below them.
+            //
+            // **What each field shows, a composition included**
+            // (T-SETTINGS-FIELDS-IME-POSITION): the text with its pre-edit spliced in at
+            // the caret, and the caret past the pre-edit — the palette's and the capsule's
+            // picture of a composition, and the string `settings_field_caret_line`
+            // measures the input method's rectangle off.
+            let field_caret = |(target, from, to): (settings::SettingsTarget, usize, usize)| {
+                (
+                    target,
+                    settings::FieldCaret {
+                        from,
+                        to,
+                        scroll_px: field_scroll,
+                    },
+                )
+            };
             let editor = self.window.settings.editor();
             let editor_env: Vec<(String, String)> = editor.map_or_else(Vec::new, |editor| {
                 editor
                     .env
                     .iter()
-                    .map(|(name, value)| (name.text().to_owned(), value.text().to_owned()))
+                    .map(|(name, value)| {
+                        (name.composed().into_owned(), value.composed().into_owned())
+                    })
                     .collect()
             });
-            let editor_caret = editor.and_then(|editor| editor.caret_of(focus_for_caret));
-            let editor = editor.map(|editor| settings::EditorInk {
-                name: editor.name.text(),
-                program: editor.program.text(),
-                args: editor.args.text(),
-                env: &editor_env,
-                caret: editor_caret,
+            let editor_caret = editor
+                .and_then(|editor| editor.caret_of(focus_for_caret))
+                .map(field_caret);
+            let editor_shown = editor.map(|editor| {
+                (
+                    editor.name.composed(),
+                    editor.program.composed(),
+                    editor.args.composed(),
+                )
             });
+            let editor = editor_shown
+                .as_ref()
+                .map(|(name, program, args)| settings::EditorInk {
+                    name: name.as_ref(),
+                    program: program.as_ref(),
+                    args: args.as_ref(),
+                    env: &editor_env,
+                    caret: editor_caret,
+                });
             // **The summoned terminal's two strings, joined where both halves are
             // in hand** (§7.54e ⑤ — §7.54b's own arrangement for the sentence
             // about a chord another program is holding, said again about the caps
@@ -369,7 +404,14 @@ impl<B: Backend> Runtime<'_, B> {
                     .map(|line| line.caps.clone())
                     .unwrap_or_default(),
             };
-            let summon_command = self.window.settings.quake_command().to_owned();
+            let summon_command = self
+                .window
+                .settings
+                .text_field(settings::SettingsTarget::Field(
+                    settings::SettingsRow::QuakeCommand,
+                ))
+                .map(|field| field.composed().into_owned())
+                .unwrap_or_default();
             let summon_command_caret = self
                 .window
                 .settings
@@ -377,7 +419,7 @@ impl<B: Backend> Runtime<'_, B> {
                 .filter(|(held, _, _)| {
                     *held == settings::SettingsTarget::Field(settings::SettingsRow::QuakeCommand)
                 })
-                .map(|(_, from, to)| (from, to));
+                .map(|caret| field_caret(caret).1);
             let summon = settings::SummonInk {
                 caps: &summon_caps,
                 listening: summon_listening,
@@ -386,22 +428,22 @@ impl<B: Backend> Runtime<'_, B> {
             };
             let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
             let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(gpu, text, size);
-            (
-                settings::build(
-                    &layout,
-                    hover,
-                    focus,
-                    values,
-                    &shortcuts,
-                    &profile_lines,
-                    &background_image,
-                    recording,
-                    editor,
-                    summon,
-                    &mut measure,
-                ),
-                ModalBand::Settings,
-            )
+            let built = settings::build(
+                &layout,
+                hover,
+                focus,
+                values,
+                &shortcuts,
+                &profile_lines,
+                &background_image,
+                recording,
+                editor,
+                summon,
+                &mut measure,
+            );
+            // Every field the page drew, as it drew it, for a press to read (row 180).
+            self.record_settings_field_runs(&layout, field_scroll);
+            (built, ModalBand::Settings)
         } else if let Some(layout) = self.restore_layout() {
             // Above the strip but under no scrim: the window behind it is not
             // dimmed (mock-up 2219-2221), though since 0.4.5 ticket 57 nothing
@@ -912,7 +954,9 @@ impl<B: Backend> Runtime<'_, B> {
             let Some(index) = self.window.tabs.iter().position(|tab| tab.id == leaf.tab) else {
                 continue;
             };
-            let Some(session) = self.window.tabs[index].sessions.get_mut(&leaf.seat) else {
+            let Some(TerminalPane { session, .. }) =
+                self.window.tabs[index].sessions.get_mut(&leaf.seat)
+            else {
                 continue;
             };
             let Some((answer_changed, follow_up)) =
@@ -1360,7 +1404,9 @@ impl<B: Backend> Runtime<'_, B> {
         let Some(index) = self.live_paste_target(target) else {
             return;
         };
-        if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&target.seat) {
+        if let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[index].sessions.get_mut(&target.seat)
+        {
             leaf.session
                 .port_math_toggle_presentation(Some(presentation));
         }
@@ -1743,9 +1789,12 @@ impl<B: Backend> Runtime<'_, B> {
         // Geometry is deliberately absent here: the present this turn requests
         // will derive it from the picture that present actually draws. See
         // [`Self::animation_frame_is_due`].
-        if !self.animation_frame_is_due() {
-            return Ok(());
-        }
+        //
+        // **The copy tick running out and the hover ink moving are news, and
+        // news is never paced** (T-ADVANCERS-ASK-ONLY-WITH-WORK; closure review
+        // O4). Behind the gate, a refused turn would either ask on every turn
+        // a band has marks, or spend the observation on a turn that cannot draw
+        // it and leave the admitted turn after it with nothing to say.
         let spent = hang_watch::during(hang_watch::Station::ClockMathCopy, || {
             retire_spent_math_copy(&mut self.window.math_copied, now)
         });
@@ -1760,11 +1809,16 @@ impl<B: Backend> Runtime<'_, B> {
         } else {
             false
         };
+        let news = hover_moved || spent;
         let owes_frame = self.math_tools_owe_frames(now);
+        // And only a journey's own frames ask the gate, and only while one moves.
+        if !self.paced_frame(news, |_| owes_frame) {
+            return Ok(());
+        }
         // While a formula journey is moving, the present door rebuilds this
         // lane from its handed frame. At rest, a hover-ink change or a spent copy
         // acknowledgement needs no geometry look and can rebuild immediately.
-        if owes_frame || ((hover_moved || spent) && self.refresh_overlay()) {
+        if owes_frame || (news && self.refresh_overlay()) {
             self.present_chrome_change()?;
         }
         Ok(())
@@ -2162,6 +2216,7 @@ impl<B: Backend> Runtime<'_, B> {
         let index = self.live_paste_target(target)?;
         let leaf = self.window.tabs[index].sessions.get(&target.seat)?;
         leaf.session
+            .session
             .math_toggle_faces(&leaf.view.projection, anchor)
     }
 
@@ -2182,6 +2237,7 @@ impl<B: Backend> Runtime<'_, B> {
         let index = self.live_paste_target(target)?;
         let leaf = self.window.tabs[index].sessions.get(&target.seat)?;
         leaf.session
+            .session
             .math_toggle_heights(&leaf.view.projection, anchor)
     }
 
@@ -2269,7 +2325,9 @@ impl<B: Backend> Runtime<'_, B> {
             // presented at any height is the artifact one, so this direction switches at the near
             // end and is then presented at the rows' own height on this very frame — which is the
             // same identity the other direction gets at the far end, read from the other side.
-            let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) else {
+            let Some(TerminalPane { session: leaf, .. }) =
+                self.window.tabs[index].sessions.get_mut(&seat)
+            else {
                 return Ok(());
             };
             if !leaf.session.port_toggle_math_source(anchor) {
@@ -2302,7 +2360,9 @@ impl<B: Backend> Runtime<'_, B> {
         let seat = target.seat;
         // `math_hit()` answered, so a shell drew the block that was clicked, and it drew it in this
         // seat's pane rather than in whichever pane holds the keyboard (§7.1.6h).
-        let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[index].sessions.get_mut(&seat)
+        else {
             return Ok(());
         };
         if leaf.session.port_toggle_math_source(anchor) {
@@ -2336,7 +2396,9 @@ impl<B: Backend> Runtime<'_, B> {
                     face_milli: flight.face_milli(now, motion),
                     source_width_cells: flight.source_width_cells(),
                 });
-        let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) else {
+        let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[index].sessions.get_mut(&seat)
+        else {
             return Ok(());
         };
         // **A turn that would draw the frame already on the glass asks for nothing.** `turn` runs
@@ -2380,13 +2442,17 @@ impl<B: Backend> Runtime<'_, B> {
         if self.math_toggle_heights(target, flight.anchor()).is_none() {
             // The owner still exists but its block vanished or changed. Release only that
             // owner's presentation; equal anchors in other panes do not belong to this flight.
-            if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) {
+            if let Some(TerminalPane { session: leaf, .. }) =
+                self.window.tabs[index].sessions.get_mut(&seat)
+            {
                 leaf.session.port_math_toggle_presentation(None);
             }
             return Ok(());
         }
         let switched = flight.switch_owed();
-        if let Some(leaf) = self.window.tabs[index].sessions.get_mut(&seat) {
+        if let Some(TerminalPane { session: leaf, .. }) =
+            self.window.tabs[index].sessions.get_mut(&seat)
+        {
             leaf.session.port_math_toggle_presentation(None);
             if switched {
                 leaf.session.port_toggle_math_source(flight.anchor());
@@ -2619,9 +2685,9 @@ impl<B: Backend> Runtime<'_, B> {
         let font_rev = self.window.renderer.font_revision();
         let line_wrapping = self.app.settings_store.loaded().line_wrapping;
         for tab in self.window.tabs.iter_mut() {
-            for (_, leaf) in tab.leaves_mut() {
-                leaf.propose_layout(window_layout_key(
-                    nonzero_u32(leaf.grid.columns.get()),
+            for (_, leaf) in tab.panes_mut() {
+                leaf.session.propose_layout(window_layout_key(
+                    nonzero_u32(leaf.session.grid.columns.get()),
                     dpi_milli,
                     // **The size is each pane's own too** (ticket 37): the face this leaf was
                     // last applied at, so a pane at 150 % keys its bands at its own em.
@@ -2954,7 +3020,7 @@ fn leaf_session_mut(
     tabs[index]
         .sessions
         .get_mut(&seat)
-        .map(|leaf| &mut leaf.session)
+        .map(|leaf| &mut leaf.session.session)
 }
 
 /// **Take one window's answers out of the batch, and leave every other window's

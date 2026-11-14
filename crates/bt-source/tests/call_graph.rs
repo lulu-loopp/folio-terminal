@@ -388,6 +388,55 @@ fn a_qualified_call_is_the_impl_of_the_trait() {
     );
 }
 
+/// RED (R5, plan row 155) — **a method on a generic struct's field and on an `impl Tr` argument is
+/// the dispatch to every admitted impl, and a concrete wrapper around the generic struct reaches
+/// that impl's effect** — `bt_platform::install_txn`'s `DurableWrite(Rewrite<arm::Os>)` and
+/// `self.surface.remove_entry` in `impl<S: Surface> Rewrite<S>`, whose durable-write internals a
+/// clause once said the walk followed to no implementation. A `#[cfg(test)]` impl is not admitted.
+///
+/// MUTATIONS: in `Tables::dispatch_param`, answer `Unresolved::Path` whatever the bounds — the
+/// field site (`give_up`, its receiver `Param(S)`) is a `path S::remove` edge and the walk meets
+/// no `std::fs::remove_file`; in `Tables::method_at`'s `Ty::Traits` arm, answer
+/// `Unresolved::Path` — the argument site (`handed`, its `impl Surface` typed `Ty::Traits`, never
+/// a parameter) leaves `Dispatch`.
+#[test]
+fn a_generic_field_and_an_impl_argument_dispatch_to_the_admitted_impls() {
+    let index = fixture("generic_field");
+    let resolver = resolver("generic_field", &index);
+    let os = "cg-generic_field crate::<Os as Surface>::remove";
+    for caller in ["give_up", "handed"] {
+        let found = at_via(&resolver, caller, "remove");
+        assert!(
+            matches!(found.as_slice(), [(target, Via::Dispatch(_))] if target == os),
+            "`{caller}`'s `remove` is `Os`'s, by dispatch: {found:?}"
+        );
+    }
+    let graph = CallGraph::new(&resolver);
+    let root = item(&resolver, "cg-generic_field", "abandon");
+    let reach = graph.walk(&[root], &BTreeSet::new());
+    let effects: Vec<(String, Vec<String>)> = reach
+        .foreign
+        .iter()
+        .map(|(edge, path)| {
+            (
+                spelled(&resolver, edge),
+                path.iter().map(|node| resolver.node_key(*node)).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        effects,
+        [(
+            "foreign std::fs::remove_file".to_owned(),
+            vec![
+                "cg-generic_field crate::DurableWrite::abandon".to_owned(),
+                "cg-generic_field crate::Rewrite::give_up".to_owned(),
+                os.to_owned(),
+            ]
+        )]
+    );
+}
+
 /// RED (R7) — **a type written through an alias of an alias is the type it names**, and an alias
 /// is an index record: one per `type` item written in a module, with its arm, and none for an
 /// associated type or one written inside a body.
@@ -1089,7 +1138,7 @@ fn a_static_or_const_initializer_is_walked_from_its_use() {
 /// is to be written where the tree can read it, or the list widened in a change that says why),
 /// and a row whose block is gone is refused as stale. Their methods are reachable only as
 /// `Ambiguous` candidates, never through a typed call.
-const UNPLACED_IMPLS: [&str; 33] = [
+const UNPLACED_IMPLS: [&str; 34] = [
     "alacritty_terminal crate::term TermMode",
     "alacritty_terminal crate::term TermMode",
     "bt-app crate::i18n Text",
@@ -1123,6 +1172,9 @@ const UNPLACED_IMPLS: [&str; 33] = [
     "bt-platform crate::video::engine Notify_Impl",
     "bt-platform crate::video::macos_player EndWatch",
     "bt-platform crate::webview::macos Gate",
+    // 2026-11-09, plan row 81: the in-process data object the promise's OLE tests hand the reader
+    // (`#[implement(IDataObject)]`), so no test opens the machine's clipboard.
+    "bt-platform crate::windows_clipboard::promise_tests Board_Impl",
     "bt-pty crate ConPtySource",
     "mitex-parser crate::syntax SyntaxKind",
     "mitex-parser crate::syntax SyntaxKind",
@@ -1153,7 +1205,7 @@ fn real_tree() -> Vec<(String, Arc<Index>)> {
 }
 
 /// RED (round 3) — **the `impl` blocks of types the module tree does not hold are exactly the
-/// named list** ([`UNPLACED_IMPLS`]): a 34th is refused, and so is a row whose block is gone.
+/// named list** ([`UNPLACED_IMPLS`]): a 35th is refused, and so is a row whose block is gone.
 ///
 /// MUTATION: remove one row of the list — the block it named is refused as unlisted.
 #[test]
@@ -1186,8 +1238,9 @@ type SiteKey = (String, String, String, String);
 /// bt-app, every `Dynamic` edge and every `Ambiguous` edge with other than one candidate — the
 /// calls the door reach does not follow (`window_waits_tests::followed`, whose `.into()` to the
 /// product's `From` impls is followed and left out here too) — keyed by its file, the item (or
-/// value) it is written in, its kind and the call's name.
-fn unfollowed_sites(resolver: &Resolver<'_>) -> BTreeMap<SiteKey, usize> {
+/// value) it is written in, its kind and the call's name; and how many `Ambiguous` calls have one
+/// candidate ([`Unresolved::sole_candidate`]), which the list does not carry by site.
+fn unfollowed_sites(resolver: &Resolver<'_>) -> (BTreeMap<SiteKey, usize>, usize) {
     let roots: Vec<ItemId> = resolver
         .callables("bt-app")
         .into_iter()
@@ -1199,7 +1252,15 @@ fn unfollowed_sites(resolver: &Resolver<'_>) -> BTreeMap<SiteKey, usize> {
         .canonicalize()
         .expect("the workspace root resolves");
     let mut sites: BTreeMap<SiteKey, usize> = BTreeMap::new();
+    let mut sole = 0;
     for (edge, _) in &reach.unresolved {
+        if let Target::Unresolved(unresolved) = &edge.to
+            && unresolved.sole_candidate().is_some()
+            && edge.site.name != "into"
+        {
+            sole += 1;
+            continue;
+        }
         let kind = match &edge.to {
             Target::Unresolved(Unresolved::Dynamic { .. }) => "Dynamic",
             Target::Unresolved(Unresolved::Ambiguous { candidates, .. })
@@ -1232,7 +1293,17 @@ fn unfollowed_sites(resolver: &Resolver<'_>) -> BTreeMap<SiteKey, usize> {
             ))
             .or_default() += 1;
     }
-    sites
+    (sites, sole)
+}
+
+/// The header line of the list that carries [`unfollowed_sites`]' one-candidate count.
+fn sole_candidate_line(sole: usize) -> String {
+    format!(
+        "# Ambiguous calls with exactly one candidate, not listed by site above or below \
+         (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts \
+         each as a call of its one candidate): {sole}. A call whose name is renamed to one only one \
+         item declares leaves the list and is counted here."
+    )
 }
 
 /// The committed list's path, from the workspace root.
@@ -1249,10 +1320,12 @@ fn unfollowed_list() -> PathBuf {
 /// commits `scripts/ci/check-unfollowed-edges.ps1` holds the list to the merge base's (no key added
 /// or grown without a dated reason). Every run leaves the rendering, the committed reasons kept,
 /// in `target/unfollowed-edges/UNFOLLOWED-EDGES.tsv`; `scripts/generate-unfollowed-edges.ps1`
-/// copies it.
+/// copies it. The header carries the count of `Ambiguous` calls with one candidate
+/// ([`sole_candidate_line`]; T-CENSUS-FOLLOWS-ASSOCIATED-TYPE-CALLS, the O-4b review's F5), held
+/// equal to the tree too: a rename that takes an edge off the list moves that count.
 ///
 /// MUTATION: delete one row of the committed list — the test names its key as in the tree and not
-/// on the list.
+/// on the list; change the header's one-candidate count — the test names the line.
 #[test]
 fn the_unfollowed_edges_are_the_committed_list() {
     let held = real_tree();
@@ -1262,7 +1335,8 @@ fn the_unfollowed_edges_are_the_committed_list() {
         .collect();
     let resolver =
         Resolver::new(&packages, Arms::product()).unwrap_or_else(|refusals| panic!("{refusals:?}"));
-    let sites = unfollowed_sites(&resolver);
+    let (sites, sole) = unfollowed_sites(&resolver);
+    let sole_line = sole_candidate_line(sole);
     let committed_text = std::fs::read_to_string(unfollowed_list()).unwrap_or_default();
     let mut committed: BTreeMap<SiteKey, (usize, String)> = BTreeMap::new();
     for line in committed_text.lines() {
@@ -1296,9 +1370,10 @@ fn the_unfollowed_edges_are_the_committed_list() {
          # candidate met walking from every product callable of bt-app, by site (file, item, kind, the call's\n\
          # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;\n\
          # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown\n\
-         # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.\n\
-         file\titem\tkind\tname\tsites\treason\n",
+         # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.\n",
     );
+    rendering.push_str(&sole_line);
+    rendering.push_str("\nfile\titem\tkind\tname\tsites\treason\n");
     for (key, count) in &sites {
         let reason = committed.get(key).map_or("", |(_, reason)| reason.as_str());
         rendering.push_str(&format!(
@@ -1310,6 +1385,9 @@ fn the_unfollowed_edges_are_the_committed_list() {
     std::fs::create_dir_all(&out).expect("target/unfollowed-edges");
     std::fs::write(out.join("UNFOLLOWED-EDGES.tsv"), &rendering).expect("the rendering is written");
     let mut differences = Vec::new();
+    if !committed_text.lines().any(|line| line == sole_line) {
+        differences.push(format!("the header does not say: {sole_line}"));
+    }
     for (key, count) in &sites {
         match committed.get(key) {
             None => differences.push(format!("in the tree, not on the list: {key:?} ({count})")),
@@ -1327,7 +1405,7 @@ fn the_unfollowed_edges_are_the_committed_list() {
         }
     }
     eprintln!(
-        "UNFOLLOWED_SITES\tkeys {}\tcalls {}",
+        "UNFOLLOWED_SITES\tkeys {}\tcalls {}\tsole {sole}",
         sites.len(),
         sites.values().sum::<usize>()
     );
@@ -1406,6 +1484,172 @@ fn every_file_system_shaped_unfollowed_edge_carries_a_dated_reason() {
         undated.len(),
         undated.join("\n  ")
     );
+}
+
+/// RED (T-CENSUS-FOLLOWS-ASSOCIATED-TYPE-CALLS, 2026-10-28; the O-4b review's F5) — **an untyped
+/// receiver's call with exactly one candidate has that candidate by the call graph's own rule**,
+/// and every other edge has none: `Unresolved::sole_candidate`, which the census test's callers
+/// and the list's header count use instead of a rule of their own.
+///
+/// RED before: the rule lived in `tests/census.rs` (`edge.candidates == [callee]`, any kind).
+/// MUTATION: answer the first candidate of any `Ambiguous` edge — `shared_name` has one.
+#[test]
+fn an_untyped_receivers_call_with_one_candidate_has_it_as_its_sole_candidate() {
+    let index = fixture("ambiguous");
+    let resolver = resolver("ambiguous", &index);
+    let root = item(&resolver, "cg-ambiguous", "root");
+    let mut sole: Vec<(String, Option<String>)> = resolver
+        .resolve_callees(root)
+        .iter()
+        .filter_map(|edge| match &edge.to {
+            Target::Unresolved(unresolved) => Some((
+                edge.site.name.clone(),
+                unresolved.sole_candidate().map(|id| resolver.key(id)),
+            )),
+            _ => None,
+        })
+        .collect();
+    sole.sort();
+    assert_eq!(
+        sole,
+        [
+            ("make".to_owned(), None),
+            ("no_such_method".to_owned(), None),
+            (
+                "only_a".to_owned(),
+                Some("cg-ambiguous crate::A::only_a".to_owned())
+            ),
+            ("shared_name".to_owned(), None),
+        ]
+    );
+}
+
+// ── `?` values and variant patterns (plan row 101) ───────────────────────
+
+/// `cg-question_mark`'s `Pane::shared`, `n` times.
+fn pane_shared(n: usize) -> Vec<String> {
+    vec!["cg-question_mark crate::Pane::shared".to_owned(); n]
+}
+
+/// The untyped receiver's call of `shared`: both first-party candidates.
+fn shared_untyped() -> Vec<String> {
+    vec![
+        "ambiguous shared: cg-question_mark crate::Other::shared, cg-question_mark \
+         crate::Pane::shared"
+            .to_owned(),
+    ]
+}
+
+/// RED (T-CALL-GRAPH-TYPES-QUESTION-MARK-BINDINGS, plan row 101) — **a `?`'s value and an
+/// `Ok`/`Err` binding are typed through the foreign `Result` aliases on the fixed table**
+/// (`anyhow::Result`, `windows::core::Result`, `std::io::Result`, `std::fmt::Result`,
+/// `std::thread::Result`): `let p = pane()?; p.shared()`, `pane()?.shared()`, `match land()? {
+/// Landing::Landed(p) => p.shared() }` are `Pane::shared`, and the `Err` of a one-argument
+/// standard alias is its error type (`std::io::Error::kind`, a foreign boundary), and the `Err`
+/// of a two-argument `anyhow::Result<T, E>` is its `E` (`KindA::kind`).
+///
+/// RED before: every one was an untyped receiver's `Ambiguous` call (the O-4b review's F5 class:
+/// `std_of` admitted no foreign path outside `std`/`core`/`alloc`, and `Err` read a second type
+/// argument the alias does not write).
+/// MUTATIONS: drop `anyhow::Result` from `census::types::RESULT_ALIASES` — `bound`, `chained` and
+/// `matched` are `Ambiguous` again; drop the `std::io::Result` row — `io_error`'s `kind` is;
+/// give the two-argument `anyhow::Result` the one-argument row's error — `two_argument`'s `kind`
+/// is `anyhow::Error`'s.
+#[test]
+fn a_question_marks_value_is_typed_through_the_alias_table() {
+    let index = fixture("question_mark");
+    let resolver = resolver("question_mark", &index);
+    for caller in ["bound", "chained", "matched", "windowed", "thread_joined"] {
+        assert_eq!(at(&resolver, caller, "shared"), pane_shared(1), "{caller}");
+    }
+    assert_eq!(
+        at(&resolver, "io_error", "kind"),
+        ["foreign std::io::Error::kind"]
+    );
+    assert_eq!(
+        at(&resolver, "fmt_error", "to_string"),
+        ["foreign std::fmt::Error::to_string"]
+    );
+    assert_eq!(
+        at(&resolver, "two_argument", "kind"),
+        ["cg-question_mark crate::KindA::kind"]
+    );
+}
+
+/// RED (plan row 101) — **a variant pattern binds through nesting, and a `..` in a tuple, a
+/// tuple-variant or a slice pattern counts the elements after it from the end**:
+/// `Ok(Landing::Landed(p))`, `while let Some(p)`, `Landing::Pair(.., last)` (the last field, a
+/// `Pane`), `Landing::Both(first, ..)`, `[rest @ .., last]` (`rest` a slice: `len` is the
+/// slice's), `(a, ..)` and `(.., c)`.
+///
+/// RED before: `Pair(.., last)` bound `last` to the field at its written position (`u8`: a
+/// wrong type, not a refusal), `rest @ ..` to the element type (`rest.len()` a path edge on
+/// `Pane`), and a tuple pattern with `..` typed nothing.
+/// MUTATIONS: in `Walker::bind`, count the positions after `..` from the start — `last` is a
+/// `u8` and `c` is untyped; bind `name @ ..` in a slice to the element — `rest.len()` is a path.
+#[test]
+fn a_variant_pattern_binds_nested_and_rest_positions() {
+    let index = fixture("question_mark");
+    let resolver = resolver("question_mark", &index);
+    assert_eq!(at(&resolver, "nested", "shared"), pane_shared(1));
+    assert_eq!(at(&resolver, "looped", "shared"), pane_shared(1));
+    assert_eq!(at(&resolver, "rest_variant", "shared"), pane_shared(2));
+    assert_eq!(
+        at(&resolver, "rest_slice", "len"),
+        ["foreign core::slice::len"]
+    );
+    assert_eq!(at(&resolver, "rest_slice", "shared"), pane_shared(1));
+    assert_eq!(at(&resolver, "rest_tuple", "shared"), pane_shared(2));
+}
+
+/// RED (plan row 101, ruling R1) — **the adapters that keep a value's type keep it**:
+/// `Option::ok_or`/`ok_or_else` and `Result::map_err`/`or_else`/`inspect`/`inspect_err` answer a
+/// `Result` of the same value, and anyhow's `Context::context`/`with_context` on a `Result` or an
+/// `Option` an `anyhow::Result` of it — so a `?` after one is typed (`Pane::shared`, nine times);
+/// and `inspect`/`inspect_err` keep the error too (`Other::shared`, twice).
+///
+/// RED before: each answered "what `<adapter>` returns", and the `?` after it was untyped.
+/// MUTATIONS: answer `ok_or_else` with an unknown return again — `p.shared()` is `Ambiguous`;
+/// give `inspect`/`inspect_err` the value's type as the error (`arg(args, 0)`) — `adapted_errors`
+/// calls `Pane::shared`.
+#[test]
+fn a_type_keeping_adapters_value_is_typed() {
+    let index = fixture("question_mark");
+    let resolver = resolver("question_mark", &index);
+    assert_eq!(at(&resolver, "adapted", "shared"), pane_shared(9));
+    assert_eq!(
+        at(&resolver, "adapted_errors", "shared"),
+        vec!["cg-question_mark crate::Other::shared".to_owned(); 2]
+    );
+}
+
+/// RED by mutation (plan row 101, ruling R2) — **what the grammar refuses stays refused**: a
+/// `?` on a foreign `Result` alias off the table (`syn::Result`) and on an untyped operand type
+/// nothing, so their receivers' calls are untyped — `shared` with both candidates, `only_pane`
+/// with its one (counted, never followed) — and are never matched by the bare name `Result`; and
+/// a name a macro's pattern may bind is untyped in its arm, so an outer binding of that name
+/// does not show through (`macro_pattern`: the outer `p` is a `Pane`, the arm's is untyped).
+///
+/// GREEN before for `refused` and `untyped_operand`; RED before for `macro_pattern` (the
+/// pattern bound nothing, so the arm's `p` was the outer `Pane`).
+/// MUTATIONS: in `census::types::result_alias`, accept any foreign path whose last segment is
+/// `Result` — `refused`'s `shared` is `Pane::shared`; drop `Walker::bind`'s `Pat::Macro` arm —
+/// `macro_pattern`'s `shared` is `Pane::shared`.
+#[test]
+fn a_question_mark_the_grammar_refuses_is_still_refused() {
+    let index = fixture("question_mark");
+    let resolver = resolver("question_mark", &index);
+    assert_eq!(at(&resolver, "refused", "shared"), shared_untyped());
+    assert_eq!(
+        at(&resolver, "refused", "only_pane"),
+        ["ambiguous only_pane: cg-question_mark crate::Pane::only_pane"]
+    );
+    assert_eq!(at(&resolver, "untyped_operand", "shared"), shared_untyped());
+    assert_eq!(
+        at(&resolver, "macro_pattern", "only_pane"),
+        ["cg-question_mark crate::Pane::only_pane"]
+    );
+    assert_eq!(at(&resolver, "macro_pattern", "shared"), shared_untyped());
 }
 
 // ── round 4 ───────────────────────────────────────────────────────────────
