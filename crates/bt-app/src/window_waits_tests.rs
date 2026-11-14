@@ -7252,17 +7252,17 @@ fn every_door_is_where_the_registry_says() {
 // and the parameters of a closure handed to a method of the value. A pattern gives each name it
 // binds the type of the part it binds, by a closed grammar (`Scope::bind_by_pattern`, row 19): a
 // name (`mut`, `ref`, `box`), `name @ sub`, a tuple, a slice, a reference, parentheses and each
-// case of an or-pattern over the value's types; `Some`, `Ok` and `Err` (also through `Option::`
-// and `Result::`) over the value's types; a first-party struct, tuple struct or enum variant over
-// the declared type of each member it binds; a path alone, a literal, a range and `_` binding
-// nothing; and a pattern it cannot place (a foreign struct or variant, a member nothing declares,
-// a macro's pattern, a qualified-self path) with no type for each name it may bind, never the
-// outer value's, and never letting an outer binding of the name show through. A binding is read
-// only where it is in scope (`Scope::bound_at`): two match arms that bind one name to two types
-// are two bindings, a `let` holds from its statement's end to its block's, and a conditional
-// `let` from the end of its scrutinee over its condition and block. Where no type is written anywhere on that
-// road the receiver is untyped and the call is not a site: this is a reading of what the source
-// says, not the compiler's resolution.
+// case of an or-pattern over the value's types; `Some`, `Ok` and `Err` (also through `Option::` and
+// `Result::`) over the value's types; a first-party struct, tuple struct or enum variant over the
+// declared type of each member it binds; a path alone, a literal, a range and `_` binding nothing;
+// and a pattern it cannot place (a foreign struct or variant, a member nothing declares, a macro's
+// pattern, a qualified-self path, an unclosed turbofish) with no type for each name it may bind,
+// never the outer value's, and never letting an outer binding of the name show through. A binding
+// is read only where it is in scope (`Scope::bound_at`): two match arms that bind one name to two
+// types are two bindings, a `let` holds from its statement's end to its block's, and a conditional
+// `let` from the end of its scrutinee over its condition and block. Where no type is written
+// anywhere on that road the receiver is untyped and the call is not a site: this is a reading of
+// what the source says, not the compiler's resolution.
 // What it cannot read is listed, not passed over: a method call whose name and argument count are a
 // vocabulary entry's (`METHOD_ARITIES`) on an untyped receiver, or on one that is not one chain, is a
 // row of `docs/plans/WINDOW-WAITS-UNREAD-RECEIVERS.tsv` (`Reader::read`, `UnreadCall`), which grows
@@ -8517,30 +8517,6 @@ impl<'r> Scope<'r> {
         }
     }
 
-    /// **The names the pattern `toks` binds, each typed by the part of `value` it binds**
-    /// (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19). Every place a pattern
-    /// binds goes through here: a parameter, `let` and `let … else`, `if let`, `while let` and
-    /// let-chains, `for`, a `match` arm, a closure's parameter. The shapes it reads, and nothing
-    /// else:
-    ///
-    /// * **a name** (`h`, `mut h`, `ref h`, `box h`; `name @ sub`, then `sub`): `value`'s types;
-    /// * **a tuple, a slice, a reference, parentheses, each case of an or-pattern, and
-    ///   `Some`/`Ok`/`Err` (also as `Option::Some`, `Result::Ok`, `Result::Err`)**: each part over
-    ///   `value`'s types — a [`Ty`] holds every type written inside the value's type, so the
-    ///   part's is among them;
-    /// * **a first-party struct, tuple struct or enum variant** (`S { h, .. }`, `S { f: h }`,
-    ///   `S(h)`, `E::V(h)`, `Self::V { h }`, `V(h)` through a `use`): each part over the declared
-    ///   type of the member it binds ([`Reader::payload_types`]) — by name in braces, the shorthand
-    ///   `{ h }` binding the member `h`, by position in parentheses; `..` binds nothing;
-    /// * a path alone, a literal, a range, `_`: nothing.
-    ///
-    /// **A pattern it cannot place** — a foreign struct or variant other than those three, a
-    /// member no declaration has, a macro's pattern, a qualified-self path
-    /// ([`Scope::bind_unplaced_names`]) — binds its names with **no type**, never with the outer
-    /// value's: a vocabulary call on such a name is then an unread receiver, which the
-    /// inventory lists ([`Reader::read`]) instead of passing over it. Until row 19 every name of a
-    /// pattern took the outer value's types, so `Self::HooksMayOutlive(child) => child.wait()`
-    /// read `child` as the enum and the wait was no site.
     /// **A pattern whose shape [`Scope::bind_by_pattern`] cannot read** — a macro's (`m!(h)`), a
     /// qualified-self path's (`<T as Tr>::V(h)`), an unclosed turbofish: any lowercase name in it
     /// may be one it binds, so each is bound over `within` with **no type**, and an outer binding
@@ -8563,6 +8539,30 @@ impl<'r> Scope<'r> {
         }
     }
 
+    /// **The names the pattern `toks` binds, each typed by the part of `value` it binds**
+    /// (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19). Every place a pattern
+    /// binds goes through here: a parameter, `let` and `let … else`, `if let`, `while let` and
+    /// let-chains, `for`, a `match` arm, a closure's parameter. The shapes it reads, and nothing
+    /// else:
+    ///
+    /// * **a name** (`h`, `mut h`, `ref h`, `box h`; `name @ sub`, then `sub`): `value`'s types;
+    /// * **a tuple, a slice, a reference, parentheses, each case of an or-pattern, and
+    ///   `Some`/`Ok`/`Err` (also as `Option::Some`, `Result::Ok`, `Result::Err`)**: each part over
+    ///   `value`'s types — a [`Ty`] holds every type written inside the value's type, so the
+    ///   part's is among them;
+    /// * **a first-party struct, tuple struct or enum variant** (`S { h, .. }`, `S { f: h }`,
+    ///   `S(h)`, `E::V(h)`, `Self::V { h }`, `V(h)` through a `use`): each part over the declared
+    ///   type of the member it binds ([`Reader::payload_types`]) — by name in braces, the shorthand
+    ///   `{ h }` binding the member `h`, by position in parentheses; `..` binds nothing;
+    /// * a path alone, a literal, a range, `_`: nothing.
+    ///
+    /// **A pattern it cannot place** — a foreign struct or variant other than those three, a
+    /// member no declaration has, a macro's pattern, a qualified-self path, an unclosed turbofish
+    /// ([`Scope::bind_unplaced_names`]) — binds its names with **no type**, never with the outer
+    /// value's: a vocabulary call on such a name is then an unread receiver, which the
+    /// inventory lists ([`Reader::read`]) instead of passing over it. Until row 19 every name of a
+    /// pattern took the outer value's types, so `Self::HooksMayOutlive(child) => child.wait()`
+    /// read `child` as the enum and the wait was no site.
     fn bind_by_pattern(&mut self, toks: &[Tok], value: &Ty, within: (usize, usize)) {
         let s = self.s();
         let cases = split_at_depth_zero(s, toks, "|");
@@ -10827,6 +10827,7 @@ pub fn a_let_shadows_from_its_end(h: Label, kid: std::process::Child) { h.wait()
 pub fn a_let_shadows_a_handle(mut h: std::process::Child) { let _ = h.wait(); let h = Label; h.wait(); }
 pub fn a_conditional_scrutinee_reads_the_outer_name(mut child: std::process::Child) { if let Ok(child) = child.wait() { let _ = child; } }
 pub fn a_conditional_let_ends_with_its_block(mut child: std::process::Child, named: Named) { if let Named::Label(child) = named { child.wait(); } let _ = child.wait(); }
+pub fn a_let_initializer_reads_the_outer_name(mut h: std::process::Child) { let h: Label = { let _ = h.wait(); Label }; h.wait(); }
 ";
 
 /// RED (T-WINDOW-WAITS-READER-SEES-MATCH-BOUND-HANDLES, 0.4.10 plan row 19, ruling R1) — **a wait
@@ -10851,17 +10852,20 @@ pub fn a_conditional_let_ends_with_its_block(mut child: std::process::Child, nam
 /// The other scoping rules (review N2, N6), each one site of `Child::wait` beside a `Label`'s
 /// `wait` under the same name: a `let` in an inner block does not leak past its block
 /// (`a_block_let_does_not_leak`); a `let` shadows from its statement's end on, not before
-/// (`a_let_shadows_from_its_end`, `a_let_shadows_a_handle`); a conditional `let`'s scrutinee reads
+/// (`a_let_shadows_from_its_end`, `a_let_shadows_a_handle`), so its own initializer reads the
+/// outer name (`a_let_initializer_reads_the_outer_name`); a conditional `let`'s scrutinee reads
 /// the outer name (`if let Ok(child) = child.wait()`, `a_conditional_scrutinee_reads_the_outer_name`)
 /// and its names end with its block (`a_conditional_let_ends_with_its_block`).
 ///
 /// MUTATION: make [`Scope::bind_by_pattern`] bind every name over `value` (the old
 /// `pattern_names` reading) and every function but `generic_payload` (whose value's written type
 /// holds the `JoinHandle` itself) loses its site. Run every `let` to the end of the body and
-/// `a_block_let_does_not_leak` loses its site; start a `let` at its body's start and the shadows
-/// misread (`a_let_shadows_from_its_end` loses its site, `a_let_shadows_a_handle` and
-/// `a_block_let_does_not_leak` count two); start a conditional `let` at its keyword and
-/// `a_conditional_scrutinee_reads_the_outer_name` loses its site.
+/// `a_block_let_does_not_leak` loses its site; start a `let` before its body (plant P6: offset 0)
+/// and the parameter, bound from the body's start, shadows every `let` of its name
+/// (`a_let_shadows_from_its_end` loses its site, `a_let_shadows_a_handle` and
+/// `a_block_let_does_not_leak` count two); start it at its keyword (plant P8) and
+/// `a_let_initializer_reads_the_outer_name` loses its site; start a conditional `let` at its
+/// keyword and `a_conditional_scrutinee_reads_the_outer_name` loses its site.
 #[test]
 fn a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form() {
     let world = planted_world("ww-payload-bindings", PLANTED_PAYLOAD_BINDINGS);
@@ -10898,6 +10902,7 @@ fn a_wait_on_a_handle_bound_by_a_payload_pattern_is_a_site_in_every_binding_form
         ("crate::a_let_shadows_a_handle", wait),
         ("crate::a_conditional_scrutinee_reads_the_outer_name", wait),
         ("crate::a_conditional_let_ends_with_its_block", wait),
+        ("crate::a_let_initializer_reads_the_outer_name", wait),
     ]
     .into_iter()
     .map(|(item, entry)| {
