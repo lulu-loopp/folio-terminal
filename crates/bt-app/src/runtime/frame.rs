@@ -1578,8 +1578,9 @@ impl<B: Backend> Runtime<'_, B> {
                         mark_leaf_painted(&mut leaf.session);
                     }
                     self.window.last_presented_frame = Some(frame);
-                    // What UI Automation is told is these frames: the next clock run publishes
-                    // them (`Runtime::flush_uia`).
+                    // What UI Automation is told is these frames: the clock run that follows
+                    // this present publishes them, the same turn's when the turn paid it
+                    // (`Runtime::flush_uia`).
                     self.window.uia.presented = true;
                     // The pane under the pointer just drew new cells, so the list its pointer verbs
                     // read is re-derived from them. Only that pane: a reference scan answers a
@@ -2181,11 +2182,6 @@ impl<B: Backend> Runtime<'_, B> {
         // active or what it is called; `want_title` only said so. A title held for
         // its frame books its wake-up in the fold below.
         self.flush_title(now);
-        // **And what UI Automation is told** (T-UIA-SKELETON), on the title's terms: after every
-        // road that can change the panes, their names or the keyboard, once, and nothing at all
-        // until a client has asked. A frame-only change held for its interval books its wake-up
-        // in the fold below.
-        self.flush_uia(now)?;
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = self.flush_pending_pty_resize(now)?;
@@ -2196,6 +2192,14 @@ impl<B: Backend> Runtime<'_, B> {
         // frame) from `last_present_at`, which this present moves: paid after it, they would be
         // booked from the picture it replaces, up to a frame early.
         self.pay_the_turns_present()?;
+        // **And what UI Automation is told** (T-UIA-SKELETON), on the title's terms: after every
+        // road that can change the panes, their names or the keyboard, once, and nothing at all
+        // until a client has asked. **After the turn's present**, because the publication is the
+        // presented frames: a frame this turn paid for is published by this turn, not left for
+        // a turn that may never come. A frame-only change held for its interval books its
+        // wake-up in the fold below; a client's focus request this answers asks the platform
+        // for its paint (the turn's own present is paid).
+        self.flush_uia(now)?;
         // **And the input method's caret area, on the same terms** (ticket 63). Every
         // road above — the drain's frames, the IME events' frames, a preview repainted,
         // the caret offer at the head of the clock run, and the frame a resize the PTY

@@ -146,6 +146,90 @@ fn an_unchanged_frame_builds_nothing_and_new_text_is_paced() {
     assert_eq!(recorder(&folio).published().len(), 3, "and nothing after");
 }
 
+/// RED (landing prep, on main's turn-paid presents) — **a frame the turn presents is published
+/// by that turn**: the drain's frame is presented by the turn that published it
+/// (`pay_the_turns_present`), so the clock run must publish after that present. Before it, the
+/// frame's `presented` mark would wait for a later turn, and an idle window has none.
+///
+/// MUTATION: call `Runtime::flush_uia` before `pay_the_turns_present` in `Runtime::turn` — the
+/// turn presents the output and publishes nothing.
+#[test]
+fn a_frame_the_turn_presents_is_published_by_that_turn() {
+    let mut folio = HeadlessFolio::with_tabs(
+        "uia-turn-present",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    );
+    folio.draw();
+    let step = Duration::from_millis(250);
+    let mut now = Instant::now();
+    // The tab's first layout opens a resize its shell is told of over the next turns; their
+    // frames would stand over the one this test drives, so the window turns until it settles.
+    let resizing = |folio: &mut HeadlessFolio| {
+        folio
+            .runtime()
+            .sessions
+            .values()
+            .any(|leaf| leaf.session.session.resize_transaction_open())
+    };
+    for _ in 0..8 {
+        if !resizing(&mut folio) {
+            break;
+        }
+        now += step;
+        let mut runtime = folio.runtime();
+        runtime.turn(now, false).expect("the turn is answered");
+        runtime.end_the_turns_presents();
+    }
+    assert!(!resizing(&mut folio), "the fixture: the shell has settled");
+    recorder(&folio).ask();
+    now += step;
+    {
+        let mut runtime = folio.runtime();
+        runtime.turn(now, false).expect("the turn is answered");
+        runtime.end_the_turns_presents();
+    }
+    let looked = recorder(&folio).published().len();
+    assert!(looked >= 1, "the first look");
+    folio.ledger.take();
+
+    // Output held by the drain's own deferral until this turn, which publishes and presents it.
+    now += Duration::from_secs(1);
+    folio.window.tabs[0]
+        .sessions
+        .values_mut()
+        .next()
+        .expect("the tab's one shell")
+        .session
+        .session
+        .feed(b"Compiling bt-app\r\n")
+        .expect("the fixture's bytes parse");
+    folio.window.pty_coalesce.first_unpublished = Some(now);
+    folio.window.pty_coalesce.until = Some(now);
+    {
+        let mut runtime = folio.runtime();
+        runtime.turn(now, false).expect("the turn is answered");
+        runtime.end_the_turns_presents();
+    }
+    let effects = folio.ledger.take();
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, crate::headless::WindowEffect::Presented { .. })),
+        "the fixture: the turn presented the output itself: {effects:?}"
+    );
+    assert_eq!(
+        recorder(&folio).published().len(),
+        looked + 1,
+        "the turn that presented the output publishes it"
+    );
+    assert!(
+        last_text(&folio).contains("Compiling bt-app"),
+        "{:?}",
+        last_text(&folio)
+    );
+}
+
 /// RED (88a) — **the publication is the pane as it was presented**: after a frame reaches the
 /// glass, the window owes a publication, and it names the pane by its title, says it holds the
 /// keyboard while the window has the focus, carries the frame's text — a wide glyph one unit over

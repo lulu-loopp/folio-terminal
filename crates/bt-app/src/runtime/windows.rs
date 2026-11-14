@@ -741,8 +741,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// tab. The focus event a publication owes goes to the events lane (R6), never raised on this
     /// thread.
     ///
-    /// After `flush_title` on the clock run, for its reason: every road above can change which
-    /// tab is active, what a pane is called, or who holds the keyboard.
+    /// On the clock run after `flush_title`, for its reason (every road above can change which
+    /// tab is active, what a pane is called, or who holds the keyboard), and after the turn's own
+    /// present (`pay_the_turns_present`), so a frame the turn presented is published by it.
     pub(crate) fn flush_uia(&mut self, now: Instant) -> Result<()> {
         let Some(hook) = self.window.uia.hook.as_ref() else {
             return Ok(());
