@@ -776,14 +776,34 @@ jobs:
       # `docs/plans/window-thread-bare-sites.tsv` stands in for the lint on raw
       # effects until A2e, and only shrinks. A bare site added together with its
       # row passes the equality test, so the historical half is what refuses it:
-      # plant the row and require red.
+      # plant the row and require red. That half sums a (crate, entry) key's rows
+      # against the merge base, so the planted row's count is the merge base's
+      # total of its key minus the working tree's, plus one (at least one): a
+      # branch that removed sites of the key would otherwise only plant it back to
+      # the merge base, which the gate rightly passes.
       - name: the bare-site inventory gate can actually fail
         shell: pwsh
         run: |
           $file = "docs/plans/window-thread-bare-sites.tsv"
           $original = [IO.File]::ReadAllText($file)
+          # A (crate, entry) key's sites in a text of the inventory, summed as the gate sums them.
+          $sites = {
+            param([string]$text, [string]$crate, [string]$entry)
+            $sum = 0
+            foreach ($line in ($text -split "`r?`n")) {
+              if (-not $line -or $line.StartsWith("#")) { continue }
+              $cells = $line -split "`t"
+              if ($cells[0] -ceq $crate -and $cells[3] -ceq $entry) { $sum += [int]$cells[4] }
+            }
+            $sum
+          }
+          $base = (git merge-base HEAD origin/main)
+          if (-not $base) { throw "no merge base with origin/main to size the plant against" }
+          $then = (git show "${base}:$file") -join "`n"
+          $entry = "std::thread::sleep"
+          $count = [Math]::Max(1, (& $sites $then "bt-app" $entry) - (& $sites $original "bt-app" $entry) + 1)
           try {
-            [IO.File]::AppendAllText($file, "bt-app`t-`tcrate::planted`tstd::thread::sleep`t1`n")
+            [IO.File]::AppendAllText($file, "bt-app`t-`tcrate::planted`t$entry`t$count`n")
             $failed = $false
             try {
               & ./scripts/ci/check-window-waits.ps1
@@ -837,19 +857,43 @@ jobs:
       # an existing row of the same family, unchanged or grown by one (review
       # N1: the block admits only the rows it lists, row by row), the gate
       # refuses it; listed under a ruled reader block it passes (the control).
+      # The gate sums the key's rows against the merge base, so the planted row's
+      # count is the merge base's total of its key minus the working tree's, plus
+      # one (at least one), and the grown row grows one past both its count here
+      # and its count at the merge base: a branch that removed sites of the key
+      # would otherwise plant no growth at all.
       - name: the bare-site reader block can actually fail
         shell: pwsh
         run: |
           $file = "docs/plans/window-thread-bare-sites.tsv"
           $original = [IO.File]::ReadAllText($file)
-          $row = "bt-app`t-`tcrate::planted`tstd::thread::JoinHandle::join`t1`n"
+          # A (crate, entry) key's sites in a text of the inventory, summed as the gate sums them.
+          $sites = {
+            param([string]$text, [string]$crate, [string]$entry)
+            $sum = 0
+            foreach ($line in ($text -split "`r?`n")) {
+              if (-not $line -or $line.StartsWith("#")) { continue }
+              $cells = $line -split "`t"
+              if ($cells[0] -ceq $crate -and $cells[3] -ceq $entry) { $sum += [int]$cells[4] }
+            }
+            $sum
+          }
+          $base = (git merge-base HEAD origin/main)
+          if (-not $base) { throw "no merge base with origin/main to size the plant against" }
+          $then = (git show "${base}:$file") -join "`n"
+          $entry = "std::thread::JoinHandle::join"
+          $count = [Math]::Max(1, (& $sites $then "bt-app" $entry) - (& $sites $original "bt-app" $entry) + 1)
+          $row = "bt-app`t-`tcrate::planted`t$entry`t$count`n"
           $line = "##   bt-app | - | crate::planted | std::thread::JoinHandle::join`n"
           $ruled = "## Revealed 2026-11-13 by T-GATES-CAN-FAIL (reader; ruling T-GATES-CAN-FAIL 2026-11-13): a planted reading`n"
           # An existing row of the planted row's family, whatever main lists today.
           $existing = [regex]::Match($original, "(?m)^bt-app\t-\t(?<item>[^\t]+)\tstd::thread::JoinHandle::join\t(?<count>[0-9]+)\r?$")
           if (-not $existing.Success) { throw "the inventory has no bt-app std::thread::JoinHandle::join row to plant beside" }
           $listed = "##   bt-app | - | $($existing.Groups['item'].Value) | std::thread::JoinHandle::join`n"
-          $grownByOne = $original.Remove($existing.Groups['count'].Index, $existing.Groups['count'].Length).Insert($existing.Groups['count'].Index, [string]([int]$existing.Groups['count'].Value + 1))
+          $existingThen = [regex]::Match($then, "(?m)^bt-app\t-\t$([regex]::Escape($existing.Groups['item'].Value))\tstd::thread::JoinHandle::join\t(?<count>[0-9]+)\r?$")
+          $heldThen = if ($existingThen.Success) { [int]$existingThen.Groups['count'].Value } else { 0 }
+          $grown = [Math]::Max([int]$existing.Groups['count'].Value, $heldThen) + 1
+          $grownByOne = $original.Remove($existing.Groups['count'].Index, $existing.Groups['count'].Length).Insert($existing.Groups['count'].Index, [string]$grown)
           $plants = @(
             @{ text = $original + $row; want = "only shrinks"; what = "an unlisted row of an existing verb" },
             @{ text = $original + $row + "## Revealed 2026-11-13 by T-GATES-CAN-FAIL (reader): a planted reading`n" + $line; want = "names no ruling"; what = "a reader block with no ruling" },
