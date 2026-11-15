@@ -3624,11 +3624,7 @@ impl Text {
             Self::RowRepairRowBreaks => pick(lang, "Repair row breaks", "修复公式换行"),
             Self::RowGitPanel => pick(lang, "Git panel", "Git 面板"),
             Self::RowContextMenu => pick(lang, "Explorer context menu", "资源管理器菜单"),
-            Self::RowStartAtSignIn => pick(
-                lang,
-                "Start at sign-in",
-                "Start at sign-in", // zh: pending T-START-AT-LOGON-SWITCH
-            ),
+            Self::RowStartAtSignIn => pick(lang, "Start at sign-in", "登录时启动"),
             Self::RowTabLayout => pick(lang, "Tab layout", "标签页布局"),
             Self::RowSidebar => pick(lang, "Sidebar", "侧栏"),
             Self::RowSplitDirection => pick(lang, "Split direction", "拆分方向"),
@@ -3732,24 +3728,22 @@ impl Text {
             Self::DescStartAtSignIn => pick(
                 lang,
                 "Starts Folio when you sign in to Windows.",
-                "Starts Folio when you sign in to Windows.", // zh: pending T-START-AT-LOGON-SWITCH
+                "登录 Windows 时启动 Folio。",
             ),
             Self::DescStartAtSignInElsewhere => pick(
                 lang,
                 "Starts the copy of Folio in another folder when you sign in.",
-                // zh: pending T-START-AT-LOGON-SWITCH
-                "Starts the copy of Folio in another folder when you sign in.",
+                "登录时启动的是另一个文件夹中的 Folio。",
             ),
             Self::DescStartAtSignInTurnedOff => pick(
                 lang,
                 "Turned off in Startup apps.",
-                "Turned off in Startup apps.", // zh: pending T-START-AT-LOGON-SWITCH
+                "已在「启动应用」中关闭。",
             ),
             Self::DescStartAtSignInNotOurs => pick(
                 lang,
                 "Another program's startup entry is named Folio, and it is left as it is.",
-                // zh: pending T-START-AT-LOGON-SWITCH
-                "Another program's startup entry is named Folio, and it is left as it is.",
+                "名为 Folio 的启动项属于另一个程序，Folio 不改动它。",
             ),
             // **Advice, and the only line here that is.** Explorer was told the
             // moment the package was registered; what it does with that is not
@@ -3950,43 +3944,36 @@ impl Text {
                 "Folio could not work out where folio.exe is",
                 "Windows 没有说出 folio.exe 的位置",
             ),
-            Self::SignInOnToast => pick(
-                lang,
-                "Folio starts at sign-in.",
-                "Folio starts at sign-in.", // zh: pending T-START-AT-LOGON-SWITCH
-            ),
+            Self::SignInOnToast => pick(lang, "Folio starts at sign-in.", "登录时将启动 Folio。"),
             Self::SignInOffToast => pick(
                 lang,
                 "Folio no longer starts at sign-in.",
-                "Folio no longer starts at sign-in.", // zh: pending T-START-AT-LOGON-SWITCH
+                "登录时不再启动 Folio。",
             ),
             Self::SignInTookOverToast => pick(
                 lang,
                 "Folio now starts this copy at sign-in instead of the copy in another folder.",
-                // zh: pending T-START-AT-LOGON-SWITCH
-                "Folio now starts this copy at sign-in instead of the copy in another folder.",
+                "登录时改为启动这份 Folio，不再启动另一个文件夹中的那份。",
             ),
             Self::SignInPathTooLong => pick(
                 lang,
                 "the path to folio.exe is longer than a startup entry holds",
-                // zh: pending T-START-AT-LOGON-SWITCH
-                "the path to folio.exe is longer than a startup entry holds",
+                "folio.exe 的路径超出了启动项能容纳的长度",
             ),
             Self::SignInEntryNotOurs => pick(
                 lang,
                 "another program's startup entry is named Folio",
-                "another program's startup entry is named Folio", // zh: pending T-START-AT-LOGON-SWITCH
+                "名为 Folio 的启动项属于另一个程序",
             ),
             Self::SignInProgramNotStartable => pick(
                 lang,
                 "this copy of Folio is not in a place that can be started at sign-in",
-                // zh: pending T-START-AT-LOGON-SWITCH
-                "this copy of Folio is not in a place that can be started at sign-in",
+                "这份 Folio 所在的位置不支持登录时启动",
             ),
             Self::SignInReadBackDiffers => pick(
                 lang,
                 "the entry read back is not the one written",
-                "the entry read back is not the one written", // zh: pending T-START-AT-LOGON-SWITCH
+                "读回的内容与写入的不一致",
             ),
 
             // ── the first page of Windows 11's menu (§7.4a) ────────────────
@@ -5744,8 +5731,7 @@ impl Text {
             Self::CleanupSignInUnchecked => pick(
                 lang,
                 "left (its program could not be checked)",
-                // zh: pending T-START-AT-LOGON-SWITCH
-                "left (its program could not be checked)",
+                "已保留（无法检查它指向的程序）",
             ),
             Self::CleanupRefused => pick(lang, "refused", "未能移除"),
             Self::CleanupRoot => pick(
@@ -6975,37 +6961,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        // zh: pending T-START-AT-LOGON-SWITCH — the sign-in switch's title, its four lines, its
-        // cards and its refusals, and the uninstall's unchecked line (0.4.10 plan row 22a, R13 and
-        // the review's N2, N3; the title's draft is 登录时启动); a later Chinese pass takes them.
-        (Self::RowStartAtSignIn, HostPlatform::Windows),
-        (Self::RowStartAtSignIn, HostPlatform::MacOs),
-        (Self::DescStartAtSignIn, HostPlatform::Windows),
-        (Self::DescStartAtSignIn, HostPlatform::MacOs),
-        (Self::DescStartAtSignInElsewhere, HostPlatform::Windows),
-        (Self::DescStartAtSignInElsewhere, HostPlatform::MacOs),
-        (Self::DescStartAtSignInTurnedOff, HostPlatform::Windows),
-        (Self::DescStartAtSignInTurnedOff, HostPlatform::MacOs),
-        (Self::DescStartAtSignInNotOurs, HostPlatform::Windows),
-        (Self::DescStartAtSignInNotOurs, HostPlatform::MacOs),
-        (Self::SignInOnToast, HostPlatform::Windows),
-        (Self::SignInOnToast, HostPlatform::MacOs),
-        (Self::SignInOffToast, HostPlatform::Windows),
-        (Self::SignInOffToast, HostPlatform::MacOs),
-        (Self::SignInTookOverToast, HostPlatform::Windows),
-        (Self::SignInTookOverToast, HostPlatform::MacOs),
-        (Self::SignInPathTooLong, HostPlatform::Windows),
-        (Self::SignInPathTooLong, HostPlatform::MacOs),
-        (Self::SignInEntryNotOurs, HostPlatform::Windows),
-        (Self::SignInEntryNotOurs, HostPlatform::MacOs),
-        (Self::SignInProgramNotStartable, HostPlatform::Windows),
-        (Self::SignInProgramNotStartable, HostPlatform::MacOs),
-        (Self::SignInReadBackDiffers, HostPlatform::Windows),
-        (Self::SignInReadBackDiffers, HostPlatform::MacOs),
-        (Self::CleanupSignInUnchecked, HostPlatform::Windows),
-        (Self::CleanupSignInUnchecked, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -7440,8 +7396,7 @@ pub fn context_menu_failed(message: &str) -> String {
 pub fn sign_in_not_changed(reason: &str) -> String {
     match current() {
         Lang::English => format!("Not changed: {reason}"),
-        // zh: pending T-START-AT-LOGON-SWITCH
-        Lang::Chinese => format!("Not changed: {reason}"),
+        Lang::Chinese => format!("未更改：{reason}"),
     }
 }
 
@@ -7451,15 +7406,18 @@ pub fn sign_in_not_changed(reason: &str) -> String {
 #[must_use]
 pub fn sign_in_entry_failed(stage: bt_platform::sign_in_entry::EntryStage, words: &str) -> String {
     use bt_platform::sign_in_entry::EntryStage;
-    let english = match stage {
-        EntryStage::Read => "Could not read the startup entry",
-        EntryStage::Write | EntryStage::ReadBack => "Could not write the startup entry",
-        EntryStage::Remove | EntryStage::SwitchRemove => "Could not remove the startup entry",
+    let (english, chinese) = match stage {
+        EntryStage::Read => ("Could not read the startup entry", "读取启动项失败"),
+        EntryStage::Write | EntryStage::ReadBack => {
+            ("Could not write the startup entry", "写入启动项失败")
+        }
+        EntryStage::Remove | EntryStage::SwitchRemove => {
+            ("Could not remove the startup entry", "移除启动项失败")
+        }
     };
     match current() {
         Lang::English => format!("{english}: {words}"),
-        // zh: pending T-START-AT-LOGON-SWITCH
-        Lang::Chinese => format!("{english}: {words}"),
+        Lang::Chinese => format!("{chinese}：{words}"),
     }
 }
 
@@ -7472,10 +7430,7 @@ pub fn sign_in_still_turned_off(words: &str) -> String {
         Lang::English => format!(
             "Folio's startup entry is written, but Startup apps still shows it turned off: {words}"
         ),
-        // zh: pending T-START-AT-LOGON-SWITCH
-        Lang::Chinese => format!(
-            "Folio's startup entry is written, but Startup apps still shows it turned off: {words}"
-        ),
+        Lang::Chinese => format!("已写入 Folio 的启动项，但「启动应用」中仍显示为关闭：{words}"),
     }
 }
 
