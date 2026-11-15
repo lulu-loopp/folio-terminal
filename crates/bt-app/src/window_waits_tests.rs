@@ -16896,8 +16896,8 @@ fn the_window_thread_reads_no_document() {
         .collect();
     assert_eq!(
         documents.len(),
-        2,
-        "the write and the re-read are each a row"
+        3,
+        "the write, the re-read and a newer copy's Bring back (row 68d) are each a row"
     );
     for row in documents {
         assert_eq!(row.threads, vec!["session-writer"], "`{}`", row.class);
