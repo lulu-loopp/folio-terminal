@@ -1100,10 +1100,6 @@ windows = { version = "0.62.2", features = [
     # never executed (`src/pe_resource.rs`, 0.4.6 ticket U-14, experiment E-14).
     # A feature, not a package.
     "Win32_System_LibraryLoader",
-    # `SafeArrayCreateVector` and `SafeArrayPutElement`: UI Automation's runtime ids, rectangles
-    # and range lists are `SAFEARRAY`s (`src/uia_windows.rs`, T-UIA-SKELETON). A feature, not a
-    # package.
-    "Win32_System_Ole",
     # `ReadDirectoryChangesW`'s three companions: the overlapped completion
     # (`Win32_System_IO`), and the events the watcher thread waits on and the
     # caller stops it with (`Win32_System_Threading`). See `DirWatch`.
@@ -1117,7 +1113,9 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Memory",
     # Plan row 81: `OleInitialize`, `OleGetClipboard`, `ReleaseStgMedium` and `OleUninitialize`
     # — the OLE clipboard a promised file's contents are asked of, on a worker of its own
-    # (`windows_clipboard::render_clipboard_promise`). A feature, not a package.
+    # (`windows_clipboard::render_clipboard_promise`). Also `SafeArrayCreateVector` and
+    # `SafeArrayPutElement`: UI Automation's runtime ids, rectangles and range lists are
+    # `SAFEARRAY`s (`src/uia_windows.rs`, T-UIA-SKELETON). A feature, not a package.
     "Win32_System_Ole",
     # `CreateNamedPipeW` / `ConnectNamedPipe` / `DisconnectNamedPipe` /
     # `WaitNamedPipeW`: the attention endpoint and the `folio attention` verb's
@@ -1188,8 +1186,11 @@ windows = { version = "0.62.2", features = [
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
     # `HIGHCONTRASTW` and `HCF_HIGHCONTRASTON`: whether a Windows contrast theme
-    # is on (`system_high_contrast`, T-HIGH-CONTRAST, DESIGN §7.1.6). A feature,
-    # not a package, for `Win32_UI_Input_Ime`'s reason below.
+    # is on (`system_high_contrast`, T-HIGH-CONTRAST, DESIGN §7.1.6). Also the UI
+    # Automation provider interfaces and `UiaReturnRawElementProvider`: what a
+    # window tells the touch keyboard, Narrator and a phone remote about its
+    # terminals (`src/uia_windows.rs`, T-UIA-SKELETON). A feature, not a package,
+    # for `Win32_UI_Input_Ime`'s reason below.
     "Win32_UI_Accessibility",
     # `WM_MOUSELEAVE`, which the `windows` crate files with the common controls:
     # the custom frame says it to the application when the pointer comes off the
@@ -1217,10 +1218,6 @@ windows = { version = "0.62.2", features = [
     # (`mouse_button_down`, 0.4.9 plan row 107). A feature and not a package,
     # for `Win32_UI_Input_Ime`'s reason above.
     "Win32_UI_Input_Pointer",
-    # The UI Automation provider interfaces and `UiaReturnRawElementProvider`: what a window tells
-    # the touch keyboard, Narrator and a phone remote about its terminals (`src/uia_windows.rs`,
-    # T-UIA-SKELETON). A feature of `windows`, already in the lock file: no new package.
-    "Win32_UI_Accessibility",
     "Win32_UI_Shell",
     # `COMDLG_FILTERSPEC` and therefore `IFileDialog::SetFileTypes`, which is
     # what filters the picture chooser to the formats the decoder honours.
