@@ -308,6 +308,22 @@ impl PinsStore {
         self.document.ask_read();
     }
 
+    /// **Bring back a newer build's copy of this document** (0.4.10 plan row 68d, R7) —
+    /// [`crate::document_request::DocumentState::bring_back`].
+    pub(crate) fn bring_back(&mut self, bytes: std::sync::Arc<[u8]>) {
+        self.document.bring_back(bytes);
+    }
+
+    /// What the last Bring back came to, once.
+    pub(crate) fn take_copy_back(&mut self) -> Option<crate::copy_back::CopyBackDone> {
+        self.document.take_copy_back()
+    }
+
+    /// **Keep current** (row 68d, R8): the document written once at this build's version.
+    pub(crate) fn write_at_this_version(&mut self) {
+        self.document.write_at_this_version();
+    }
+
     /// Whether a re-read of `pins.json` is still to be answered.
     pub(crate) fn reading(&self) -> bool {
         self.document.reading()

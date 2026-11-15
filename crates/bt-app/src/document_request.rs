@@ -244,6 +244,65 @@ pub(crate) fn serve_recovered(worker: &WorkerCtx, job: &RecoveredJob) {
     let _ = job.answer.send(kept);
 }
 
+/// **Serve one Bring back on the storage worker** (0.4.10 plan row 68d, R7) and answer it: the
+/// file must still hold `expected` — the older build's write, as the store holds it — which is
+/// kept beside it as a `.rejected-` copy before the copy's bytes are written in its place,
+/// conditional on the file holding it still, through the same write a store's press takes
+/// ([`conditional_write`], `Restore`: a hand edit that crosses the exchange is put back and
+/// wins). The job is lent, as [`serve_recovered`]'s.
+pub(crate) fn serve_copy_back(worker: &WorkerCtx, job: &crate::copy_back::CopyBackJob) {
+    let _ = job.answer.send(copy_back(worker, job));
+}
+
+/// [`serve_copy_back`]'s answer.
+fn copy_back(
+    worker: &WorkerCtx,
+    job: &crate::copy_back::CopyBackJob,
+) -> crate::copy_back::CopyBackDone {
+    use crate::copy_back::CopyBackDone;
+    match precondition(
+        bt_persist::read_stable(worker, &job.which),
+        job.expected.as_deref(),
+    ) {
+        Precondition::Holds => {}
+        Precondition::Moved(_) | Precondition::Raced => return CopyBackDone::ChangedSince,
+        Precondition::Unread(error) => return CopyBackDone::NotBrought(error),
+    }
+    let kept = match &job.expected {
+        Some(older) => match bt_persist::keep_beside_as_rejected(&job.which, older) {
+            Some(kept) => Some(kept),
+            None => {
+                return CopyBackDone::NotBrought(
+                    crate::i18n::Text::CopyBackNotKept.text().to_owned(),
+                );
+            }
+        },
+        None => None,
+    };
+    let (answer, _) = mpsc::channel();
+    let write = DocumentJob {
+        which: job.which.clone(),
+        generation: 0,
+        version: 0,
+        expected: job.expected.clone(),
+        bytes: Arc::clone(&job.bytes),
+        mode: Mode::Restore,
+        link_policy: LinkPolicy::Refuse,
+        no_exchange: NoExchange::Refuse,
+        asker: 0,
+        kept: Vec::new(),
+        answer,
+    };
+    match conditional_write(worker, &TheVolume, &write, &mut |_| {}).outcome {
+        Outcome::Landed { .. } => CopyBackDone::BroughtBack { kept },
+        Outcome::Moved { .. }
+        | Outcome::MovedDuringRead
+        | Outcome::Displaced { .. }
+        | Outcome::Conflict { .. } => CopyBackDone::ChangedSince,
+        Outcome::Refused { cause } => CopyBackDone::NotBrought(cause.described()),
+    }
+}
+
 /// **One stable read of a document**: the bytes go to `answer` with the
 /// request's generation, on the worker, which parses them there. The answer is
 /// called through the job, which the worker lets go only after the request's
@@ -1450,6 +1509,13 @@ pub(crate) struct DocumentState<T> {
     landed: bool,
     /// Whether a re-read was answered among them.
     heard: bool,
+    /// **A Bring back on the storage worker** (0.4.10 plan row 68d), until it is answered.
+    copy_back: Option<OnTheWorker<crate::copy_back::CopyBackDone>>,
+    /// What the last Bring back came to, until the reader takes it ([`Self::take_copy_back`]).
+    copy_back_done: Option<crate::copy_back::CopyBackDone>,
+    /// **Keep current** (row 68d, R8): the document is written once at this build's version
+    /// although nothing in it changed — the write that ends the offer's case.
+    rewrite: bool,
 }
 
 /// **One answer a store took below a drain's mark** ([`DocumentState::answered`]), heard in the
@@ -1461,6 +1527,8 @@ pub(crate) enum StoreAnswer<T> {
     Read(Ended<(u64, ReadAnswer<T>)>),
     /// A quit copy's receipt.
     Copy(Ended<Result<PathBuf, String>>),
+    /// A Bring back's answer (0.4.10 plan row 68d).
+    CopyBack(Ended<crate::copy_back::CopyBackDone>),
 }
 
 /// A quit's copy of a document, on the storage worker or answered.
@@ -1505,7 +1573,50 @@ impl<T: StoredDocument> DocumentState<T> {
             news: ReadNews::default(),
             landed: false,
             heard: false,
+            copy_back: None,
+            copy_back_done: None,
+            rewrite: false,
         }
+    }
+
+    /// **Bring back a newer build's copy** (0.4.10 plan row 68d, R7): its `bytes` handed to the
+    /// storage worker ([`serve_copy_back`]) with what this store holds as its revision, which the
+    /// file must still hold. A request no worker takes is answered here, as refused. What it came
+    /// to is the reader's ([`Self::take_copy_back`]); a copy brought back is read again, through
+    /// the road an outside edit takes.
+    pub(crate) fn bring_back(&mut self, bytes: Arc<[u8]>) {
+        let (answer, answered) = mpsc::channel();
+        let refusal = answer.clone();
+        let job = crate::copy_back::CopyBackJob {
+            which: self.path.clone(),
+            expected: self.revision.bytes.clone(),
+            bytes,
+            answer,
+        };
+        self.copy_back = Some(match self.lane.send_copy_back(job) {
+            Ok(request) => OnTheWorker::admitted(answered, request),
+            Err(refused) => {
+                let _ = refusal.send(crate::copy_back::CopyBackDone::NotBrought(
+                    refused.said(crate::persist::NO_STORAGE_WORKER),
+                ));
+                self.lane.wake();
+                OnTheWorker::answered_at_the_door(answered, &self.lane)
+            }
+        });
+    }
+
+    /// **What the last Bring back came to**, once.
+    pub(crate) fn take_copy_back(&mut self) -> Option<crate::copy_back::CopyBackDone> {
+        self.copy_back_done.take()
+    }
+
+    /// **Keep current** (0.4.10 plan row 68d, R8): write the document as it stands at this
+    /// build's version, although it is what the file holds — the file holds it at an older one.
+    /// Through the request door, under its rules: one write in flight, and none while a trial
+    /// holds this writer.
+    pub(crate) fn write_at_this_version(&mut self) {
+        self.rewrite = true;
+        self.send_owed();
     }
 
     /// The document readers read.
@@ -1624,9 +1735,10 @@ impl<T: StoredDocument> DocumentState<T> {
             return;
         }
         self.send_again = false;
-        if self.desired == self.revision.document {
+        if self.desired == self.revision.document && !self.rewrite {
             return;
         }
+        self.rewrite = false;
         let bytes: Arc<[u8]> = match self.desired.to_bytes() {
             Ok(bytes) => bytes.into(),
             Err(error) => {
@@ -1752,6 +1864,12 @@ impl<T: StoredDocument> DocumentState<T> {
         {
             taken.push((order, StoreAnswer::Copy(ended)));
         }
+        if let Some(answer) = &mut self.copy_back
+            && let Some((order, ended)) = answer.hear_below(mark)
+        {
+            self.copy_back = None;
+            taken.push((order, StoreAnswer::CopyBack(ended)));
+        }
         taken
     }
 
@@ -1798,6 +1916,21 @@ impl<T: StoredDocument> DocumentState<T> {
                     Ended::Gone => Err(crate::persist::STORAGE_WORKER_GONE.to_owned()),
                 };
                 self.recovery = Some(RecoveryCopy::Answered(answered));
+            }
+            StoreAnswer::CopyBack(ended) => {
+                let done = match ended {
+                    Ended::Answered(done) => done,
+                    Ended::Failed(words) => crate::copy_back::CopyBackDone::NotBrought(words),
+                    Ended::Gone => crate::copy_back::CopyBackDone::NotBrought(
+                        crate::persist::STORAGE_WORKER_GONE.to_owned(),
+                    ),
+                };
+                // The copy is the file now: read it as an outside edit is read, once the drain
+                // has heard every answer it took.
+                if matches!(done, crate::copy_back::CopyBackDone::BroughtBack { .. }) {
+                    self.read_again = true;
+                }
+                self.copy_back_done = Some(done);
             }
         }
     }
@@ -1863,6 +1996,14 @@ impl<T: StoredDocument> DocumentState<T> {
                 }
                 None => break,
             }
+        }
+        if let Some(mut answer) = self.copy_back.take() {
+            let ended = match answer.within_patience(file) {
+                Reply::Answered(done) => Ended::Answered(done),
+                Reply::Failed(words) => Ended::Failed(words),
+                Reply::Waiting | Reply::Gone => Ended::Gone,
+            };
+            self.hear(StoreAnswer::CopyBack(ended));
         }
         self.after_answers(landed, heard);
         news

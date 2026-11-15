@@ -17,11 +17,12 @@ use std::time::{Duration, Instant};
 use bt_platform::admission::{WaitToken, WorkerCtx, admitted, doors};
 
 use bt_persist::{
-    BindingOverrideV1, Debouncer, DocumentBytes, ExitState, KEYBINDINGS_SCHEMA_VERSION,
-    KeybindingsPlatformV1, KeybindingsV1, ProfilesV1, ReadReport, SessionV1, SettingsV1,
-    WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel, read_keybindings,
-    read_keybindings_keeping_bytes, read_profiles, read_profiles_keeping_bytes, read_session,
-    read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
+    BindingOverrideV1, Debouncer, DocumentBytes, ExitState, FallbackReason,
+    KEYBINDINGS_SCHEMA_VERSION, KeybindingsPlatformV1, KeybindingsV1, ProfilesV1, ReadReport,
+    SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel,
+    read_keybindings, read_keybindings_keeping_bytes, read_profiles, read_profiles_keeping_bytes,
+    read_session, read_settings, read_settings_keeping, read_settings_keeping_bytes,
+    remove_sentinel,
 };
 
 use crate::document_request::{DocumentState, QuitDocument, ReadNews, StoreAnswer};
@@ -247,6 +248,13 @@ impl<T: PartialEq> Revision<T> {
 /// what stands in for the damaged document — and it is a closure rather than a
 /// parameter because a sentence that called all six "the defaults" would be the
 /// vaguest of the six everywhere.
+///
+/// **Except a file newer than this build, kept as a copy** (0.4.10 plan row 68d, R4): the
+/// refusal is noted for the carry pass's refused copies
+/// ([`crate::rejected_copies::note_refused_newer`]), which says it once — the copies are the
+/// memory — and the start raises nothing for it. The log line stays. A newer file with no copy
+/// kept (a trial owes it, or the keeping failed) keeps the sentence: with no copy there is
+/// nothing to remember it by.
 pub(crate) fn read_fault(
     report: &ReadReport,
     file: &str,
@@ -258,15 +266,21 @@ pub(crate) fn read_fault(
     crate::diagnostics::stderr_line(format!(
         "BT_PERSIST {file} fell back to defaults: {reason:?} kept={kept:?}"
     ));
+    let kept_name = kept.as_ref().map(|kept| {
+        kept.file_name()
+            .unwrap_or(kept.as_os_str())
+            .to_string_lossy()
+            .into_owned()
+    });
+    if let (FallbackReason::FutureSchemaVersion { .. }, Some(copy)) = (reason, &kept_name)
+        && let Some(document) = crate::rejected_copies::KeptDocument::live_named(file)
+    {
+        crate::rejected_copies::note_refused_newer(document, copy.clone());
+        return None;
+    }
     let sentence = in_force(file);
-    Some(match kept {
-        Some(kept) => crate::i18n::persisted_file_kept_copy(
-            &sentence,
-            &kept
-                .file_name()
-                .unwrap_or(kept.as_os_str())
-                .to_string_lossy(),
-        ),
+    Some(match kept_name {
+        Some(kept) => crate::i18n::persisted_file_kept_copy(&sentence, &kept),
         None => sentence,
     })
 }
@@ -1010,6 +1024,9 @@ enum StorageJob {
     /// A hand-editable document, written only if the file still holds what
     /// the request expects, and answered on its own channel.
     Document(crate::document_request::DocumentJob),
+    /// A newer build's copy brought back over the older build's write (0.4.10 plan row 68d),
+    /// answered on its own channel.
+    CopyBack(crate::copy_back::CopyBackJob),
     /// A hand-editable document, read while it stands still.
     Read(crate::document_request::ReadJob),
     /// A quit's copy of a hand-editable document into the `recovered` folder,
@@ -1083,6 +1100,7 @@ fn serve_storage_job(
         StorageJob::Document(job) => crate::document_request::serve_document(worker, job),
         StorageJob::Read(job) => crate::document_request::serve_read(worker, job),
         StorageJob::Recovered(job) => crate::document_request::serve_recovered(worker, job),
+        StorageJob::CopyBack(job) => crate::document_request::serve_copy_back(worker, job),
     }
     Served::Done
 }
@@ -1530,6 +1548,14 @@ impl StorageLane {
         job: crate::document_request::RecoveredJob,
     ) -> Result<StorageRequest, NotAdmitted> {
         self.admit_document_job(StorageJob::Recovered(job))
+    }
+
+    /// Hand a newer build's copy, to be brought back, over (0.4.10 plan row 68d).
+    pub(crate) fn send_copy_back(
+        &self,
+        job: crate::copy_back::CopyBackJob,
+    ) -> Result<StorageRequest, NotAdmitted> {
+        self.admit_document_job(StorageJob::CopyBack(job))
     }
 
     /// Whether a worker serves the queue now ([`LaneShared::up`]). Never waits.
@@ -2476,6 +2502,13 @@ impl SessionStore {
         }
     }
 
+    /// **Keep current** (0.4.10 plan row 68d, R8): the layout written at this build's version
+    /// at the end of a quiet window, although nothing in it changed — the file holds it at an
+    /// older one.
+    pub(crate) fn write_at_this_version(&mut self, now: Instant) {
+        self.debouncer.mark_dirty(now);
+    }
+
     /// When the event loop should wake to write, if it should.
     pub fn deadline(&self) -> Option<Instant> {
         self.debouncer.deadline(SESSION_DEBOUNCE)
@@ -3206,6 +3239,8 @@ pub(crate) struct ScriptedJobs {
 pub(crate) enum ScriptedJob {
     Document(crate::document_request::DocumentJob),
     Recovered(crate::document_request::RecoveredJob),
+    /// A Bring back; the scripted lane drops it, which answers it as refused.
+    CopyBack,
     /// A document's stable read, which the test answers.
     Read(crate::document_request::ReadJob),
     /// A session document.
@@ -3227,6 +3262,7 @@ impl ScriptedJobs {
         Some(match job {
             StorageJob::Document(job) => ScriptedJob::Document(job),
             StorageJob::Recovered(job) => ScriptedJob::Recovered(job),
+            StorageJob::CopyBack(_) => ScriptedJob::CopyBack,
             StorageJob::Read(job) => ScriptedJob::Read(job),
             StorageJob::Session(_) => ScriptedJob::Session,
             StorageJob::Receipt { .. } => ScriptedJob::Receipt,
@@ -3492,6 +3528,22 @@ impl SettingsStore {
     /// force stays.
     pub(crate) fn ask_reread(&mut self) {
         self.document.ask_read();
+    }
+
+    /// **Bring back a newer build's copy of this document** (0.4.10 plan row 68d, R7) —
+    /// [`crate::document_request::DocumentState::bring_back`].
+    pub(crate) fn bring_back(&mut self, bytes: std::sync::Arc<[u8]>) {
+        self.document.bring_back(bytes);
+    }
+
+    /// What the last Bring back came to, once.
+    pub(crate) fn take_copy_back(&mut self) -> Option<crate::copy_back::CopyBackDone> {
+        self.document.take_copy_back()
+    }
+
+    /// **Keep current** (row 68d, R8): the document written once at this build's version.
+    pub(crate) fn write_at_this_version(&mut self) {
+        self.document.write_at_this_version();
     }
 
     /// Whether a re-read of `settings.json` is still to be answered.
@@ -3911,6 +3963,22 @@ impl KeybindingsStore {
         self.document.ask_read();
     }
 
+    /// **Bring back a newer build's copy of this document** (0.4.10 plan row 68d, R7) —
+    /// [`crate::document_request::DocumentState::bring_back`].
+    pub(crate) fn bring_back(&mut self, bytes: std::sync::Arc<[u8]>) {
+        self.document.bring_back(bytes);
+    }
+
+    /// What the last Bring back came to, once.
+    pub(crate) fn take_copy_back(&mut self) -> Option<crate::copy_back::CopyBackDone> {
+        self.document.take_copy_back()
+    }
+
+    /// **Keep current** (row 68d, R8): the document written once at this build's version.
+    pub(crate) fn write_at_this_version(&mut self) {
+        self.document.write_at_this_version();
+    }
+
     /// Whether a re-read of `keybindings.json` is still to be answered.
     pub(crate) fn reading(&self) -> bool {
         self.document.reading()
@@ -4248,6 +4316,22 @@ impl ProfilesStore {
     ///   is nothing yet in force to keep.
     pub(crate) fn ask_reread(&mut self) {
         self.document.ask_read();
+    }
+
+    /// **Bring back a newer build's copy of this document** (0.4.10 plan row 68d, R7) —
+    /// [`crate::document_request::DocumentState::bring_back`].
+    pub(crate) fn bring_back(&mut self, bytes: std::sync::Arc<[u8]>) {
+        self.document.bring_back(bytes);
+    }
+
+    /// What the last Bring back came to, once.
+    pub(crate) fn take_copy_back(&mut self) -> Option<crate::copy_back::CopyBackDone> {
+        self.document.take_copy_back()
+    }
+
+    /// **Keep current** (row 68d, R8): the document written once at this build's version.
+    pub(crate) fn write_at_this_version(&mut self) {
+        self.document.write_at_this_version();
     }
 
     /// Whether a re-read of `profiles.json` is still to be answered.
