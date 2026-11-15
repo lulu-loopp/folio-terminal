@@ -4405,25 +4405,13 @@ impl<B: Backend> Runtime<'_, B> {
             }
             return Ok(());
         }
-        // The uninstaller's confirmation card (T-UNINSTALL-UX), in the order it is drawn. Every
-        // press is swallowed, beside the card as well as on it; the `×` is Cancel.
-        if let (Some(layout), Some(position)) =
-            (self.uninstall_card_layout(), self.window.pointer_position)
+        // The uninstaller's confirmation card (T-UNINSTALL-UX), then the copy-back card (0.4.10
+        // plan row 68d), in the order they are drawn: the first one up takes the press. Every
+        // press is swallowed, beside the card as well as on it; the `×` is Cancel, or Not now.
+        if let (Some(card), Some(position)) = (self.confirm_card_up(), self.window.pointer_position)
         {
             if state == ElementState::Pressed && button == MouseButton::Left {
-                let target = restore::update_card_hit(&layout, position.x, position.y);
-                self.press_uninstall_card(target)?;
-            }
-            return Ok(());
-        }
-        // The copy-back card (0.4.10 plan row 68d), in the order it is drawn. Every press is
-        // swallowed, beside the card as well as on it; the `×` is Not now.
-        if let (Some(layout), Some(position)) =
-            (self.copy_back_card_layout(), self.window.pointer_position)
-        {
-            if state == ElementState::Pressed && button == MouseButton::Left {
-                let target = restore::update_card_hit(&layout, position.x, position.y);
-                self.press_copy_back_card(target)?;
+                self.press_confirm_card(card, position.x, position.y)?;
             }
             return Ok(());
         }

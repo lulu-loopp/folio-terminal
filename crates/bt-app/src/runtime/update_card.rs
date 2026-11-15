@@ -432,6 +432,32 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(true)
     }
 
+    /// **The first confirmation card up in this window, as it is drawn**: the uninstaller's,
+    /// then the copy-back card — the card a press beside or on goes to.
+    pub(in crate::runtime) fn confirm_card_up(&mut self) -> Option<ConfirmCardUp> {
+        if let Some(layout) = self.uninstall_card_layout() {
+            return Some(ConfirmCardUp::Uninstall(layout));
+        }
+        self.copy_back_card_layout().map(ConfirmCardUp::CopyBack)
+    }
+
+    /// **A left press at `x`, `y` on the confirmation card up**, answered by what it landed on.
+    pub(in crate::runtime) fn press_confirm_card(
+        &mut self,
+        card: ConfirmCardUp,
+        x: f64,
+        y: f64,
+    ) -> Result<()> {
+        match card {
+            ConfirmCardUp::Uninstall(layout) => {
+                self.press_uninstall_card(restore::update_card_hit(&layout, x, y))
+            }
+            ConfirmCardUp::CopyBack(layout) => {
+                self.press_copy_back_card(restore::update_card_hit(&layout, x, y))
+            }
+        }
+    }
+
     /// A press on the copy-back card, answered by what it landed on. The face and the window
     /// beside the card answer nothing; the `×` is Not now.
     pub(in crate::runtime) fn press_copy_back_card(
@@ -1110,6 +1136,15 @@ mod tests {
         assert_eq!(job.card_window(), Some(3));
         assert_eq!(driver.count.get(), 0);
     }
+}
+
+/// **A confirmation card up, with its layout** ([`Runtime::confirm_card_up`]): the one a press
+/// in the window goes to.
+pub(in crate::runtime) enum ConfirmCardUp {
+    /// The uninstaller's confirmation card.
+    Uninstall(restore::UpdateCardLayout<update_card::UninstallVerb>),
+    /// The copy-back card (0.4.10 plan row 68d).
+    CopyBack(restore::UpdateCardLayout<update_card::CopyBackVerb>),
 }
 
 #[cfg(test)]
