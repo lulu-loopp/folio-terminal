@@ -421,6 +421,21 @@ impl SeedVault {
         }
     }
 
+    /// **A saved list merged into this one** (0.4.10 plan row 68d, R7: the layout a newer build
+    /// saved, brought back): every entry of both, newest first, one per key — the newer moment
+    /// wins, and a tie keeps this list's — up to the list's length. Read through
+    /// [`Self::from_persisted`], so an entry it would not load is not merged either.
+    pub fn merge_persisted(&mut self, saved: &[RecentEntryV1]) {
+        let saved = Self::from_persisted(saved);
+        let mut merged = std::mem::take(&mut self.entries);
+        merged.extend(saved.entries);
+        merged.sort_by(|newer, older| older.at.cmp(&newer.at));
+        let mut keys = std::collections::HashSet::new();
+        merged.retain(|entry| keys.insert(entry.seed.recent_key()));
+        merged.truncate(RECENT_CAPACITY);
+        self.entries = merged;
+    }
+
     #[must_use]
     pub fn to_persisted(&self) -> Vec<RecentEntryV1> {
         self.entries
