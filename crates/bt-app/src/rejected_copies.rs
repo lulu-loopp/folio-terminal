@@ -87,9 +87,24 @@ impl KeptDocument {
         }
     }
 
+    /// **The `schema_version` this build writes the document at**, the highest its chain reads;
+    /// `None` for `update-check.json`, whose copy no build offers back (its loss is a skipped
+    /// release tag).
+    const fn current_version(self) -> Option<u32> {
+        match self {
+            Self::Session => Some(bt_persist::SESSION_SCHEMA_VERSION),
+            Self::Settings => Some(bt_persist::SETTINGS_SCHEMA_VERSION),
+            Self::Keybindings => Some(bt_persist::KEYBINDINGS_SCHEMA_VERSION),
+            Self::Profiles => Some(bt_persist::PROFILES_SCHEMA_VERSION),
+            Self::Pins => Some(bt_persist::PINS_SCHEMA_VERSION),
+            Self::UpdateCheck => None,
+        }
+    }
+
     /// **Whether this build's chain reads `bytes` as this document** — a copy a newer build
     /// could bring back. Never `update-check.json`'s: no build offers its copy back (its loss is a
-    /// skipped release tag), and no store opens it at start.
+    /// skipped release tag). `update::OfferState::load_for` reads that file at start, but it is
+    /// not a store and its read is not noted here.
     fn this_build_reads(self, bytes: &[u8]) -> bool {
         match self {
             Self::Session => bt_persist::parse_session(bytes).is_ok(),
@@ -223,14 +238,20 @@ impl<D: FnOnce(Writer) -> bool> CopiesGate<D> {
 /// the start read no bytes, or bytes that claim no version.
 ///
 /// Only a downgrade makes one: a copy above the file's version exists when an older build refused
-/// a newer file and then wrote its own. A normal upgrade never does.
+/// a newer file and then wrote its own. A normal upgrade never does, and a start at this build's
+/// own version or above (`current_version`) answers `None` before any copy is read: no copy this
+/// build reads stands above it, so the ordinary start reads nothing.
 fn copy_a_newer_build_can_bring_back(
     document: KeptDocument,
     start: Option<&[u8]>,
     copies: &[FoundCopy],
     bytes: &mut [Option<Option<Vec<u8>>>],
 ) -> Option<usize> {
+    let current = document.current_version()?;
     let start = bt_persist::schema_version_of(start?)?;
+    if start >= current {
+        return None;
+    }
     (0..copies.len()).find(|&index| {
         copy_bytes(copies, bytes, index).is_some_and(|copy| {
             bt_persist::schema_version_of(copy).is_some_and(|version| version > start)
