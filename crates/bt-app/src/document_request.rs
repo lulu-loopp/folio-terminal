@@ -251,13 +251,17 @@ pub(crate) fn serve_recovered(worker: &WorkerCtx, job: &RecoveredJob) {
 /// ([`conditional_write`], `Restore`: a hand edit that crosses the exchange is put back and
 /// wins). The job is lent, as [`serve_recovered`]'s.
 pub(crate) fn serve_copy_back(worker: &WorkerCtx, job: &crate::copy_back::CopyBackJob) {
-    let _ = job.answer.send(copy_back(worker, job));
+    let _ = job
+        .answer
+        .send(copy_back(worker, job, &bt_persist::keep_beside_as_rejected));
 }
 
-/// [`serve_copy_back`]'s answer.
+/// [`serve_copy_back`]'s answer, with what keeps the older build's write handed in (`keep`,
+/// `bt_persist::keep_beside_as_rejected` in the product), so a test sees a keep that fails.
 fn copy_back(
     worker: &WorkerCtx,
     job: &crate::copy_back::CopyBackJob,
+    keep: &dyn Fn(&Path, &[u8]) -> Option<PathBuf>,
 ) -> crate::copy_back::CopyBackDone {
     use crate::copy_back::CopyBackDone;
     match precondition(
@@ -269,7 +273,7 @@ fn copy_back(
         Precondition::Unread(error) => return CopyBackDone::NotBrought(error),
     }
     let kept = match &job.expected {
-        Some(older) => match bt_persist::keep_beside_as_rejected(&job.which, older) {
+        Some(older) => match keep(&job.which, older) {
             Some(kept) => Some(kept),
             None => {
                 return CopyBackDone::NotBrought(
@@ -2692,3 +2696,7 @@ mod tests {
         let _ = std::fs::remove_file(&which);
     }
 }
+
+#[cfg(test)]
+#[path = "bring_back_worker_tests.rs"]
+mod bring_back_worker_tests;
