@@ -440,6 +440,78 @@ impl<'i> Resolver<'i> {
         }
     }
 
+    /// **The data types `root` reaches in its own package** (0.4.10 plan row 68d, the pinned key
+    /// sets of `docs/plans/DOCUMENT-KEYS.tsv`): `root` itself, then every `struct`, `enum` or
+    /// `union` of the same package that a field's type or a variant's payload names, each alias
+    /// followed to what it names and every argument read (R7, as
+    /// [`Self::argument_type_paths`] reads one), walked to a fixed point: what a value of `root`
+    /// can hold. A foreign type, and a type of another package handed in, is a leaf. A type on
+    /// two arms is each of its declarations. In [`Index::items`] order.
+    ///
+    /// # Errors
+    ///
+    /// `root`, or a type it reaches, is not a data type the resolver read; or a member type path
+    /// names nothing placed: each, why.
+    pub fn data_types_reached(&self, root: ItemId) -> Result<Vec<ItemId>, Vec<String>> {
+        let at = root.package();
+        let package = self.tables.package(at);
+        let index = self.tables.index(at);
+        let mut reached = BTreeSet::from([root]);
+        let mut queue = vec![root];
+        let mut unread = Vec::new();
+        while let Some(id) = queue.pop() {
+            let record = self.record(id);
+            if !record.kind().is_type() {
+                unread.push(format!("`{}` is not a data type", record.name()));
+                continue;
+            }
+            let mut paths = BTreeSet::new();
+            for module in record.module_paths() {
+                let key = (at, module.to_owned(), record.name().to_owned());
+                let Some(info) = self.tables.types.get(&key) else {
+                    unread.push(format!(
+                        "the type `{module}::{}` was not read",
+                        record.name()
+                    ));
+                    continue;
+                };
+                for (_, ty) in info.fields.iter().chain(info.variants.values().flatten()) {
+                    self.tables.type_paths(ty, 0, &mut paths, &mut unread);
+                }
+            }
+            for path in paths {
+                // A first-party type is spelled `package module::Name` (`type_paths`); a foreign
+                // one has no space in it.
+                let Some((owner, written)) = path.split_once(' ') else {
+                    continue;
+                };
+                if owner != package {
+                    continue;
+                }
+                let Some((module, name)) = written.rsplit_once("::") else {
+                    unread.push(format!("the type path `{path}` names no module"));
+                    continue;
+                };
+                for (item, candidate) in index.items().iter().enumerate() {
+                    if candidate.kind().is_type()
+                        && candidate.name() == name
+                        && candidate.module_paths().contains(&module)
+                    {
+                        let next = ItemId::new(at, item);
+                        if reached.insert(next) {
+                            queue.push(next);
+                        }
+                    }
+                }
+            }
+        }
+        if unread.is_empty() {
+            Ok(reached.into_iter().collect())
+        } else {
+            Err(unread)
+        }
+    }
+
     /// Whether the arms admit the item.
     #[must_use]
     pub fn admitted(&self, id: ItemId) -> bool {

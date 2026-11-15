@@ -437,6 +437,47 @@ fn a_generic_field_and_an_impl_argument_dispatch_to_the_admitted_impls() {
     );
 }
 
+/// RED (0.4.10 plan row 68d) — **a data type reaches the types its fields and its variants'
+/// payloads name, to a fixed point**: a type argument, a tuple and a struct variant's payload, a
+/// type another module declares and a `use` brings in, an alias's target and a cycle back to the
+/// root are reached; a foreign type and a type that only names the root are not.
+///
+/// MUTATIONS: in `Resolver::data_types_reached`, read only `info.fields` — `Payload`, `Wrapper`
+/// and the cycle through `Again` are not reached; push nothing on the queue — only the root's own
+/// members are.
+#[test]
+fn a_data_type_reaches_its_members_types_to_a_fixed_point() {
+    let index = fixture("data_types");
+    let resolver = resolver("data_types", &index);
+    let package = "cg-data_types";
+    let root = index
+        .items()
+        .iter()
+        .find(|record| record.kind().is_type() && record.name() == "Root")
+        .and_then(|record| resolver.id_of(package, record))
+        .expect("the fixture declares `Root`");
+    let reached = resolver
+        .data_types_reached(root)
+        .unwrap_or_else(|unread| panic!("{unread:?}"));
+    assert_eq!(
+        keys(&resolver, &reached),
+        [
+            "cg-data_types crate::document::Node",
+            "cg-data_types crate::document::Payload",
+            "cg-data_types crate::document::Root",
+            "cg-data_types crate::document::Target",
+            "cg-data_types crate::document::Wrapper",
+            "cg-data_types crate::elsewhere::Imported",
+        ]
+    );
+    let function = item(&resolver, package, "nothing");
+    assert_eq!(
+        resolver.data_types_reached(function),
+        Err(vec!["`nothing` is not a data type".to_owned()]),
+        "a callable is no data type"
+    );
+}
+
 /// RED (R7) — **a type written through an alias of an alias is the type it names**, and an alias
 /// is an index record: one per `type` item written in a module, with its arm, and none for an
 /// associated type or one written inside a body.
