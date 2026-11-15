@@ -1883,6 +1883,58 @@ its doc changes from an outer doc to a `//!`, the moving commit fixes that
 link, as a renaming one does. When the list is empty, `[workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"` replaces both halves (a later row).
 
+## Persisted document key sets
+
+The rule: a document Folio keeps in its data folder changes its keys only at a
+new version (0.4.10 plan row 68d, ruling R9 of
+T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK, 2026-11-14). A build reads a
+document at its own version and refuses one written at a higher version, so a
+key added under an existing version is dropped by every older build of that
+version, and refused by a record that refuses unknown keys; its value is lost
+the next time that build writes. The two unbumped `settings.json` changes of
+0.4.7 and 0.4.8 passed review that way (the audit's G2).
+
+`docs/plans/DOCUMENT-KEYS.tsv` pins, per document and version, the shape of
+every type the document's root reaches: `document`, `version`, `type`,
+`shape` (the type's declaration and body as `bt_source` reads them, every `//`
+comment and all whitespace out, the attributes, names and types kept) and a
+dated `reason`. The nine documents: session, settings, keybindings, profiles,
+pins and update-check in bt-persist (pins and update-check, which keep unknown
+keys, are pinned like the rest, R10); integration-marks,
+integration-profile-files and update-homes in bt-app.
+
+Two halves. The tests hold each document's rows at its current version to the
+source both ways: bt-persist's `document_keys_tests::every_document_keeps_its_keys_at_its_version`
+and bt-app's `profile_marks::tests::the_integration_records_keep_their_keys`
+walk the root's field types and variant payloads among the crate's own types to
+a fixed point (`bt_source::call_graph::Resolver::data_types_reached`, aliases
+followed), so a key added, an optional key added, a type newly reached and a row
+whose type is no longer reached are each red, and so is a register whose
+highest version for the document is not the one the build writes.
+`every_versioned_document_has_its_register_rows` holds the version constants
+`bt-persist/src/lib.rs` passes to `read_with_fallback`,
+`read_with_fallback_bytes` and `parse_document` to the six documents the test
+pins, so a seventh document cannot land without rows.
+`scripts/ci/check-document-keys.ps1` (CI `logic`; its cases in
+`check-document-keys-tests.ps1`; a row edited and a row removed, planted from
+the merge base's own rows, in `gates-can-fail`) holds the register to the
+merge base's: a base row edited in place or removed is refused, and a new row
+must hold at a version above its document's highest at the merge base (a
+document the base does not name is new). Without that half a key added together
+with an in-place edit of its row passes the test.
+
+When red: never edit a row. Admit the key as `docs/CONVENTIONS.md` says — bump
+the document's version, add its migration step (`migrate_value` needs one per
+version; an identity step when the key has a serde default; a record reads the
+old version itself) and add the new version's rows, every type of the document
+again, all in one commit, the rows' reason naming the plan row. A test's
+failure prints the rows the source has, ready to be appended with their reason.
+A type renamed without a key change is a new version too: the register keys a
+row by the type's name; so is a changed attribute, a derive among them, so that
+the shape never has to decide which attributes serde reads. Not pinned: `recovered-announced.json`,
+`session.prev.json`, `schemes\*.json` and the WebView2 profile, none of which
+is versioned by Folio.
+
 ## Machine-independent paths
 
 The rule: committed code, tests, and documentation do not carry one developer's

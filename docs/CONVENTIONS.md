@@ -396,6 +396,10 @@ through `/var`, a link.
 - `unreachable!()` 只在类型系统证明不可达时用，写明为什么。
 - 相关 lint 见 §8 的晋升阶梯——**现在还没开**，因为产品代码里还有约 6 处 `unwrap`。
 
+### A persisted document's keys change only with its version (0.4.10 plan row 68d)
+
+A build refuses a document written at a higher version and reads one at its own, so a key added under a version an older build already reads is lost by that build (dropped on its next write, or the whole record refused when it denies unknown keys); 0.4.7 and 0.4.8 each shipped such a `settings.json` change. Every type a document's root reaches is pinned per version in `docs/plans/DOCUMENT-KEYS.tsv`, held to the source by bt-persist's `document_keys_tests` and bt-app's `the_integration_records_keep_their_keys`, and to the merge base by `scripts/ci/check-document-keys.ps1` (`docs/ARCHITECTURE-GUARDS.md`, "Persisted document key sets"). **A new key is admitted in one commit**: bump the document's version (its `*_SCHEMA_VERSION`, or the record's), add its migration step (`migrate_value` needs one per version; an identity step when the new key has a serde default), and append the new version's rows, every type of the document again, with a dated reason naming the plan row. A row already in the register is never edited or removed.
+
 ## 五、注释
 
 ### 【事故】注释必须说真话，或者不写
