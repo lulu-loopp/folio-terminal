@@ -153,6 +153,9 @@ jobs:
     # T-DOC-LINK-DEBT (2026-11-02) adds the doc-link debt plant, no cargo: a
     # local clone of the checkout and one pwsh run; taken as 0.3 min until runs
     # measure it. 12.85 + 0.3 = 13.15 x 1.36 = 17.88, so still 18.
+    # 0.4.10 plan row 68d (2026-11-14) adds the document-key plants, no cargo: two
+    # in-process runs of one pwsh script, 1 s for both on the 9950X; 13.15 + 0.02 =
+    # 13.17 x 1.36 = 17.91, so still 18.
     timeout-minutes: 18
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
