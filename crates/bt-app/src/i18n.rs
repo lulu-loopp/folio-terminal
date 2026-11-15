@@ -5739,91 +5739,48 @@ impl Text {
             Self::NewerDocumentKept => pick(
                 lang,
                 "This Folio is older than the one that last saved your {what}. They are kept in {copy}.",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "This Folio is older than the one that last saved your {what}. They are kept in {copy}.",
+                "你的{what}上次由较新版本的 Folio 保存，已保留在 {copy} 中。",
             ),
-            Self::SavedWindowsAndTabs => pick(
-                lang,
-                "windows and tabs",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "windows and tabs",
-            ),
-            Self::SavedSettings => pick(
-                lang, "settings",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "settings",
-            ),
-            Self::SavedShortcuts => pick(
-                lang,
-                "shortcuts",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "shortcuts",
-            ),
-            Self::SavedProfiles => pick(
-                lang, "profiles",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "profiles",
-            ),
-            Self::SavedPins => pick(
-                lang, "pins",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "pins",
-            ),
-            Self::CopyBackHeading => pick(
-                lang,
-                "Bring back your newer {what}?",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "Bring back your newer {what}?",
-            ),
+            Self::SavedWindowsAndTabs => pick(lang, "windows and tabs", "窗口和标签页"),
+            Self::SavedSettings => pick(lang, "settings", "设置"),
+            Self::SavedShortcuts => pick(lang, "shortcuts", "快捷键"),
+            Self::SavedProfiles => pick(lang, "profiles", "配置文件"),
+            Self::SavedPins => pick(lang, "pins", "钉住条目"),
+            Self::CopyBackHeading => {
+                pick(lang, "Bring back your newer {what}?", "找回较新的{what}？")
+            }
             Self::CopyBackSub => pick(
                 lang,
                 "An older Folio replaced them. What you have now is kept as a copy.",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "An older Folio replaced them. What you have now is kept as a copy.",
+                "已被较旧版本的 Folio 替换。现有内容将保留为副本。",
             ),
             Self::CopyBackSubLayout => pick(
                 lang,
                 "An older Folio replaced them. Your open windows stay; the newer ones open beside them.",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "An older Folio replaced them. Your open windows stay; the newer ones open beside them.",
+                "已被较旧版本的 Folio 替换。现有窗口保留，较新的窗口一并打开。",
             ),
             Self::CopyBackSubBoth => pick(
                 lang,
                 "An older Folio replaced them. What you have now is kept as a copy. Your open \
                  windows stay; the newer ones open beside them.",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "An older Folio replaced them. What you have now is kept as a copy. Your open \
-                 windows stay; the newer ones open beside them.",
+                "已被较旧版本的 Folio 替换。现有内容将保留为副本。现有窗口保留，较新的窗口一并打开。",
             ),
-            Self::CopyBackBringBack => pick(
-                lang,
-                "Bring back",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "Bring back",
-            ),
-            Self::CopyBackKeepCurrent => pick(
-                lang,
-                "Keep current",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "Keep current",
-            ),
+            Self::CopyBackBringBack => pick(lang, "Bring back", "找回"),
+            Self::CopyBackKeepCurrent => pick(lang, "Keep current", "保留现有"),
             Self::CopyBackChangedSince => pick(
                 lang,
                 "Your {what} changed after this Folio started, so the newer ones were not brought back. They are still kept in {copy}.",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "Your {what} changed after this Folio started, so the newer ones were not brought back. They are still kept in {copy}.",
+                "本次启动后，你的{what}有了改动，因此未找回。较新的{what}仍保留在 {copy} 中。",
             ),
             Self::CopyBackNotBrought => pick(
                 lang,
                 "Your newer {what} could not be brought back: {reason}. They are still kept in {copy}.",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "Your newer {what} could not be brought back: {reason}. They are still kept in {copy}.",
+                "未能找回较新的{what}：{reason}。较新的{what}仍保留在 {copy} 中。",
             ),
             Self::CopyBackNotKept => pick(
                 lang,
                 "the file it would replace could not be kept as a copy",
-                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
-                "the file it would replace could not be kept as a copy",
+                "现有文件无法保留为副本",
             ),
             Self::CleanupRemoved => pick(lang, "removed", "已移除"),
             Self::CleanupAbsent => pick(lang, "not present", "不存在"),
@@ -7085,38 +7042,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        (Self::NewerDocumentKept, HostPlatform::Windows),
-        (Self::NewerDocumentKept, HostPlatform::MacOs),
-        (Self::SavedWindowsAndTabs, HostPlatform::Windows),
-        (Self::SavedWindowsAndTabs, HostPlatform::MacOs),
-        (Self::SavedSettings, HostPlatform::Windows),
-        (Self::SavedSettings, HostPlatform::MacOs),
-        (Self::SavedShortcuts, HostPlatform::Windows),
-        (Self::SavedShortcuts, HostPlatform::MacOs),
-        (Self::SavedProfiles, HostPlatform::Windows),
-        (Self::SavedProfiles, HostPlatform::MacOs),
-        (Self::SavedPins, HostPlatform::Windows),
-        (Self::SavedPins, HostPlatform::MacOs),
-        (Self::CopyBackHeading, HostPlatform::Windows),
-        (Self::CopyBackHeading, HostPlatform::MacOs),
-        (Self::CopyBackSub, HostPlatform::Windows),
-        (Self::CopyBackSub, HostPlatform::MacOs),
-        (Self::CopyBackSubLayout, HostPlatform::Windows),
-        (Self::CopyBackSubLayout, HostPlatform::MacOs),
-        (Self::CopyBackSubBoth, HostPlatform::Windows),
-        (Self::CopyBackSubBoth, HostPlatform::MacOs),
-        (Self::CopyBackBringBack, HostPlatform::Windows),
-        (Self::CopyBackBringBack, HostPlatform::MacOs),
-        (Self::CopyBackKeepCurrent, HostPlatform::Windows),
-        (Self::CopyBackKeepCurrent, HostPlatform::MacOs),
-        (Self::CopyBackChangedSince, HostPlatform::Windows),
-        (Self::CopyBackChangedSince, HostPlatform::MacOs),
-        (Self::CopyBackNotBrought, HostPlatform::Windows),
-        (Self::CopyBackNotBrought, HostPlatform::MacOs),
-        (Self::CopyBackNotKept, HostPlatform::Windows),
-        (Self::CopyBackNotKept, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
