@@ -2149,6 +2149,7 @@ impl<B: Backend> Runtime<'_, B> {
             || self.window.first_run.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
+            || self.copy_back_card_is_up()
             || self.window.settings.is_open()
             || self.restore_card_is_up()
     }

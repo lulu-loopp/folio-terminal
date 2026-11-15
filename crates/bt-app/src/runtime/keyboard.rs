@@ -677,6 +677,8 @@ impl<B: Backend> Runtime<'_, B> {
                 || self.paste_card_seat().is_some()
                 // The update card (0.4.6 U-19): it holds the keyboard while it is up.
                 || self.update_card_is_up()
+                // The copy-back card (0.4.10 plan row 68d), on the update card's rule.
+                || self.copy_back_card_is_up()
                 || self.window.settings.is_open()
                 // The restore card (0.4.5 ticket 57): it holds the keyboard while it is up, so a
                 // drop is refused under it, a composition goes nowhere and no caret blinks.
@@ -1290,6 +1292,16 @@ impl<B: Backend> Runtime<'_, B> {
         if self.uninstall_card_is_up() {
             if !event.repeat {
                 self.press_uninstall_card_key(&event.logical_key)?;
+            }
+            return Ok(());
+        }
+        // **The copy-back card owns the keyboard** (0.4.10 plan row 68d), in the order it is
+        // drawn, with the update card's keys: `Escape` is Not now, `Tab` lights and moves the
+        // ring, `Enter` and `Space` press only the verb the ring stands on — the card rises by
+        // itself at the start, while the reader may be typing. Every other key is swallowed.
+        if self.copy_back_card_is_up() {
+            if !event.repeat {
+                self.press_copy_back_card_key(&event.logical_key)?;
             }
             return Ok(());
         }
@@ -2186,6 +2198,7 @@ impl<B: Backend> Runtime<'_, B> {
             || self.window.first_run.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
+            || self.copy_back_card_is_up()
             || self.settings_layout().is_some()
             || self.restore_card_is_up()
             || self.window.rename.is_some()
@@ -2912,6 +2925,7 @@ impl<B: Backend> Runtime<'_, B> {
             ImeOwner::Modal if self.window.first_run.is_open() => "first_run",
             ImeOwner::Modal if self.paste_card_seat().is_some() => "paste_card",
             ImeOwner::Modal if self.update_card_is_up() => "update_card",
+            ImeOwner::Modal if self.copy_back_card_is_up() => "copy_back_card",
             ImeOwner::Modal if self.window.settings.is_open() => "settings",
             ImeOwner::Modal => match popup_takes_the_key(self.popups_up()) {
                 Some(Popup::Profile) => "profile_popup",

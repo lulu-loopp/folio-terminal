@@ -390,6 +390,7 @@ impl<B: Backend> Runtime<'_, B> {
             self.take_powershell_profile_undo(id);
             self.take_checkout_undo(id)?;
             self.take_recovered_folder(id)?;
+            self.take_newer_copy(id)?;
             self.take_quit_choice(id);
             if self
                 .window

@@ -1815,6 +1815,13 @@ impl<B: Backend> Runtime<'_, B> {
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
+        // The copy-back card (0.4.10 plan row 68d): it takes the pointer outright, as the update
+        // card does.
+        if self.hover_copy_back_card(position.x, position.y)? {
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         if settings::geometry::pointer_moved(self, position.x, position.y)? {
             return Ok(());
         }
@@ -4406,6 +4413,17 @@ impl<B: Backend> Runtime<'_, B> {
             if state == ElementState::Pressed && button == MouseButton::Left {
                 let target = restore::update_card_hit(&layout, position.x, position.y);
                 self.press_uninstall_card(target)?;
+            }
+            return Ok(());
+        }
+        // The copy-back card (0.4.10 plan row 68d), in the order it is drawn. Every press is
+        // swallowed, beside the card as well as on it; the `×` is Not now.
+        if let (Some(layout), Some(position)) =
+            (self.copy_back_card_layout(), self.window.pointer_position)
+        {
+            if state == ElementState::Pressed && button == MouseButton::Left {
+                let target = restore::update_card_hit(&layout, position.x, position.y);
+                self.press_copy_back_card(target)?;
             }
             return Ok(());
         }

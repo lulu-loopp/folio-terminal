@@ -826,13 +826,14 @@ fn a_capture(
 
 /// The layers that took a release before it reached the gesture that owned it
 /// (§3.1 column a), each by the door its press arm calls in `mouse_input`.
-const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 23] = [
+const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 24] = [
     ("the quit card", "self.quit_card_layout()"),
     ("the dirty gate", "self.dirty_gate_layout()"),
     ("the first-run card", "self.first_run_layout()"),
     ("the paste card", "self.paste_card_layout()"),
     ("the update card", "self.update_card_layout()"),
     ("the uninstall card", "self.uninstall_card_layout()"),
+    ("the copy-back card", "self.copy_back_card_layout()"),
     ("the toasts", "self.press_toast("),
     ("the settings sheet", "self.settings_mouse_input("),
     ("the restore card", "self.restore_layout()"),

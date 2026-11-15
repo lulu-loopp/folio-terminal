@@ -66,6 +66,7 @@ mod cmdrail;
 mod coalesce;
 mod computation_lane;
 mod context_menu;
+mod copy_back;
 mod diagnostics;
 mod dir_news;
 mod document_request;
@@ -9593,6 +9594,15 @@ struct App<B: Backend = Native> {
     /// window seed if it is declined, which is the same thing closing it would
     /// have done.
     pending_restore_windows: Vec<SessionWindowV1>,
+    /// **The copy-back card, while it is up** (0.4.10 plan row 68d, R6): the carry pass's offer
+    /// of the documents an older build replaced, in the window it was raised in.
+    copy_back: Option<copy_back::OfferUp>,
+    /// **The copies this process has offered**, by name: a later round of the carry pass offers
+    /// them again (it reads the version the start read), and the card asks once a start.
+    copy_back_asked: Vec<String>,
+    /// **The Bring backs on the storage worker** (row 68d, R7), until each is answered and said
+    /// (`Runtime::say_copy_back_answers`).
+    copy_back_owed: Vec<copy_back::CopyOffered>,
     /// The answer the restore prompt was given, until the loop's door can spend
     /// it (multiwindow slice D).
     ///
@@ -9978,6 +9988,9 @@ impl<B: Backend> App<B> {
             run_retiring_until: None,
             web_pages_open: false,
             pending_restore_windows: Vec::new(),
+            copy_back: None,
+            copy_back_asked: Vec::new(),
+            copy_back_owed: Vec::new(),
             pending_restore_answer: None,
             pending_application_change: None,
             pending_new_windows: Vec::new(),
@@ -10561,6 +10574,10 @@ struct WindowRuntime<B: Backend = Native> {
     /// The card that said where the edits a stop kept are, and the folder a press on it opens
     /// (T-RECOVERED-FOLDER) — [`Self::checkout_undo`]'s shape, for its reason.
     recovered_card: Option<recovered::Raised>,
+    /// **The cards about a newer document's copy** (0.4.10 plan row 68d): each card, and the copy
+    /// a press of its verb reveals — one per document the older build refused, and one per Bring
+    /// back that did not happen.
+    newer_copy_cards: Vec<(toast::ToastId, std::path::PathBuf)>,
     /// **The card a cancelled quit raised on this window**, and the documents its one
     /// choice leaves without (T-QUIT-DOCUMENTS) — [`Self::recovered_card`]'s shape, for
     /// its reason: a verb pressed on another card chooses nothing.
@@ -35277,6 +35294,7 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         checkout_from: None,
         checkout_undo: None,
         recovered_card: None,
+        newer_copy_cards: Vec::new(),
         quit_card: None,
         settings_scroll: 0.0,
         profile_menu: profiles::ProfileMenu::default(),
@@ -37034,7 +37052,8 @@ impl<B: Backend> Runtime<'_, B> {
         self.take_kept_news(heard.settings, heard.keybindings)?;
         self.merge_documents()?;
         self.take_profiles_news(heard.profiles)?;
-        self.take_pins_news(heard.pins)
+        self.take_pins_news(heard.pins)?;
+        self.say_copy_back_answers()
     }
 
     /// **What a re-read of `pins.json` says** — [`Self::take_profiles_news`]'s
@@ -49623,10 +49642,20 @@ impl<B: Backend> FolioApp<B> {
     fn adopt_carry_snapshot(&mut self) -> Result<()> {
         // The app first: a wake handled with no `App` leaves the snapshot for the one that has it
         // (row 68b, review N8), where taking it first would drop the classic answer for good.
-        let Some(app) = self.app.as_mut() else {
+        if self.app.is_none() {
             return Ok(());
-        };
-        let Some(carried) = carry_pass::take_carry_snapshot() else {
+        }
+        match carry_pass::take_carry_snapshot() {
+            Some(carried) => self.adopt_carried(carried),
+            None => Ok(()),
+        }
+    }
+
+    /// **One snapshot of the carry pass, adopted** — [`Self::adopt_carry_snapshot`]'s whole work,
+    /// over the snapshot it took (0.4.10 plan row 68d: a test hands it one of its own, as the
+    /// process's published snapshot is one for every test).
+    fn adopt_carried(&mut self, carried: carry_pass::CarrySnapshot) -> Result<()> {
+        let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
         // The classic verb's answer, unless a press has written since its read (row 68b, R4): the
@@ -49655,6 +49684,19 @@ impl<B: Backend> FolioApp<B> {
             }
             None => Vec::new(),
         };
+        // The refused copies' part (row 68d): the notices, and the offer of the copies this
+        // process has not offered yet. **Not while a trial holds this process's writes**: a Bring
+        // back and a Keep current are writes, so the card waits for the commit, whose release of
+        // the refused copies' writer — recorded here — runs the member again and offers it then.
+        let copy_back = carried.copy_back.unwrap_or_default();
+        let mut offer: Vec<copy_back::CopyOffered> = copy_back
+            .offer
+            .into_iter()
+            .filter(|offered| !app.copy_back_asked.contains(&offered.copy))
+            .collect();
+        if !offer.is_empty() && update_trial::defer(update_trial::Writer::RefusedCopies) {
+            offer.clear();
+        }
         let oldest_standing = |app: &mut Self| {
             (0..app.windows.len()).find_map(|index| {
                 let id = app.windows.key_at(index)?;
@@ -49665,6 +49707,22 @@ impl<B: Backend> FolioApp<B> {
             })
         };
         let told = self.frontmost_window().or_else(|| oldest_standing(self));
+        if let (Some(window), Some(app)) = (told, self.app.as_mut())
+            && !offer.is_empty()
+        {
+            app.copy_back_asked
+                .extend(offer.iter().map(|offered| offered.copy.clone()));
+            match app.copy_back.as_mut() {
+                Some(up) => up.offer_too(offer),
+                None => {
+                    app.copy_back = Some(copy_back::OfferUp {
+                        window,
+                        offer,
+                        card: update_card::Card::default(),
+                    });
+                }
+            }
+        }
         self.for_each_window(|runtime| {
             if Some(runtime.window_id()) == told {
                 for notice in &notices {
@@ -49674,6 +49732,15 @@ impl<B: Backend> FolioApp<B> {
                         None,
                         notice.text().to_owned(),
                     )?;
+                }
+                for kept in &copy_back.notices {
+                    runtime.raise_newer_copy_card(
+                        copy_back::newer_kept_sentence(kept),
+                        kept.path.clone(),
+                    )?;
+                }
+                if runtime.copy_back_card_is_up() && runtime.refresh_overlay() {
+                    runtime.present_chrome_change()?;
                 }
             }
             if runtime.refresh_chrome() {
@@ -62189,6 +62256,7 @@ mod edit_menu_clipboard_tests {
             "self.window.first_run.is_open()",
             "self.paste_card_seat().is_some()",
             "self.update_card_is_up()",
+            "self.copy_back_card_is_up()",
             "self.settings_layout().is_some()",
             "self.restore_card_is_up()",
             "self.window.rename.is_some()",

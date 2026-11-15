@@ -306,6 +306,11 @@ impl<B: Backend> Runtime<'_, B> {
             // it was raised from, in its place for as long as it is up — the update card's
             // arrangement, and its chassis. No scrim.
             (self.uninstall_card_build(&layout), ModalBand::Fixed)
+        } else if let Some(layout) = self.copy_back_card_layout() {
+            // **The copy-back card** (0.4.10 plan row 68d), on the update card's chassis, raised
+            // at the start by the carry pass's offer; over the settings dialog and the restore
+            // card, so a start that asks both asks this first. No scrim.
+            (self.copy_back_card_build(&layout), ModalBand::Fixed)
         } else if let Some(layout) = self.settings_layout() {
             // **The focused field's scroll, settled once for the frame** (0.4.9 plan row 180,
             // ruling 2): the painter draws the field pushed left by it and the run a press
