@@ -4133,3 +4133,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
+
+// The key sets of the documents this crate reads, pinned per version against
+// `docs/plans/DOCUMENT-KEYS.tsv` (0.4.10 plan row 68d).
+#[cfg(test)]
+#[path = "document_keys_tests.rs"]
+mod document_keys_tests;
