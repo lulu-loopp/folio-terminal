@@ -342,12 +342,12 @@ pub(crate) fn retire_rejected_copies(
             held: false,
         };
         'phases: for phase in [CopyRetirement::Duplicate, CopyRetirement::BeyondKept] {
-            for (copy, _) in copies
-                .iter()
-                .zip(&fate)
-                .rev()
-                .filter(|(_, retirement)| **retirement == Some(phase))
-            {
+            // Oldest first: the copies are newest first.
+            for index in (0..copies.len()).rev() {
+                if fate[index] != Some(phase) {
+                    continue;
+                }
+                let copy: &FoundCopy = &copies[index];
                 if !gate.may_remove() {
                     answer.held = true;
                     break 'phases;
