@@ -437,10 +437,10 @@ fn each_documents_protected_copy_is_read_by_its_own_parser() {
 }
 
 /// RED (0.4.10 plan row 68f, fold re-review F2) — **the newest copy only a newer build reads is
-/// kept whatever the count**: at an ordinary start (the file at this build's version), of five
-/// `settings.json` copies — three this build reads, then one above this build's version, then
-/// the oldest — the one above is kept as the fourth and only the oldest goes; of two above, the
-/// older goes as any other.
+/// kept whatever the count**: at an ordinary start (the file at this build's version), of six
+/// `settings.json` copies — three this build reads, then one above this build's version, then an
+/// old one, then an older one above — the newer one above is kept as the fourth and the other two
+/// go: of two above, the older goes as any other.
 ///
 /// MUTATION: the copy only a newer build reads is not looked for
 /// (`plant-68f-newer-copy-retired.py`).
