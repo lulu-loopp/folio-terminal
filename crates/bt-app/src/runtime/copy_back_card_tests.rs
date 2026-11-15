@@ -119,7 +119,9 @@ fn bringing_back_the_layout_opens_its_windows_beside_the_open_ones() {
 /// in the window the round was adopted in, naming both documents; `Escape` puts it away and
 /// writes nothing; and a later round offering the same copies asks nothing more at this start.
 ///
-/// MUTATION: the card offers its first document alone (`plant-68d-one-card-per-document.py`).
+/// MUTATION: the card offers its first document alone (`plant-68d-one-card-per-document.py`);
+/// `Escape` keeps the current documents (`plant-68d-escape-writes.py`); a later round asks the
+/// same copies again (`plant-68d-asked-again.py`).
 #[test]
 fn the_copy_back_card_asks_once_for_every_document() {
     let mut application = HeadlessApplication::of(HeadlessFolio::with_tabs(
@@ -193,5 +195,61 @@ fn the_copy_back_card_asks_once_for_every_document() {
             .copy_back
             .is_none(),
         "the same copies are not asked again at this start"
+    );
+}
+
+/// RED (row 68d, R4; review N12) — **a notice no window took waits for the next adoption that
+/// has a window**: a round adopted while the only window is leaving raises nothing and keeps the
+/// notice; the next adoption, with the window standing, raises it there, once.
+///
+/// MUTATION: a round with no window drops its notices (`plant-68d-untold-notice-dropped.py`).
+#[test]
+fn a_notice_no_window_took_waits_for_the_next_adoption() {
+    let mut application = HeadlessApplication::of(HeadlessFolio::with_tabs(
+        "copy-back-untold",
+        vec![tab_holding(leaf_saying("PS> "))],
+        0,
+    ));
+    let notice = crate::copy_back::NewerKept {
+        document: KeptDocument::Settings,
+        copy: "settings.json.rejected-20261115-000003".to_owned(),
+        path: PathBuf::from("settings.json.rejected-20261115-000003"),
+    };
+    application.runtime().window.leaving = Some(std::time::Instant::now());
+    application
+        .folio
+        .adopt_carried(CarrySnapshot {
+            copy_back: Some(CopyBackAnswer {
+                notices: vec![notice.clone()],
+                offer: Vec::new(),
+            }),
+            ..CarrySnapshot::default()
+        })
+        .expect("the round is adopted");
+    assert!(
+        application.runtime().window.newer_copy_cards.is_empty(),
+        "no window to tell"
+    );
+    application.runtime().window.leaving = None;
+    application
+        .folio
+        .adopt_carried(CarrySnapshot::default())
+        .expect("the next round is adopted");
+    let cards: Vec<std::path::PathBuf> = application
+        .runtime()
+        .window
+        .newer_copy_cards
+        .iter()
+        .map(|(_, copy)| copy.clone())
+        .collect();
+    assert_eq!(cards, [notice.path], "raised once a window stands");
+    assert!(
+        application
+            .folio
+            .app
+            .as_ref()
+            .expect("the application")
+            .copy_back_untold
+            .is_empty()
     );
 }

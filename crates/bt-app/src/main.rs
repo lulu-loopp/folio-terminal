@@ -9603,6 +9603,11 @@ struct App<B: Backend = Native> {
     /// **The Bring backs on the storage worker** (row 68d, R7), until each is answered and said
     /// (`Runtime::say_copy_back_answers`).
     copy_back_owed: Vec<copy_back::CopyOffered>,
+    /// **The notices of a newer document kept that no window has taken yet** (row 68d, review
+    /// N12): a round adopted with no window standing keeps them here, and the next adoption with
+    /// a window raises them first. The carry pass marked them answered when it said them, so they
+    /// live only here until a window takes them.
+    copy_back_untold: Vec<copy_back::NewerKept>,
     /// The answer the restore prompt was given, until the loop's door can spend
     /// it (multiwindow slice D).
     ///
@@ -9991,6 +9996,7 @@ impl<B: Backend> App<B> {
             copy_back: None,
             copy_back_asked: Vec::new(),
             copy_back_owed: Vec::new(),
+            copy_back_untold: Vec::new(),
             pending_restore_answer: None,
             pending_application_change: None,
             pending_new_windows: Vec::new(),
@@ -49689,6 +49695,9 @@ impl<B: Backend> FolioApp<B> {
         // back and a Keep current are writes, so the card waits for the commit, whose release of
         // the refused copies' writer — recorded here — runs the member again and offers it then.
         let copy_back = carried.copy_back.unwrap_or_default();
+        // The notices a round adopted with no window kept first, then this round's (review N12).
+        let mut kept_notices = std::mem::take(&mut app.copy_back_untold);
+        kept_notices.extend(copy_back.notices);
         let mut offer: Vec<copy_back::CopyOffered> = copy_back
             .offer
             .into_iter()
@@ -49707,6 +49716,13 @@ impl<B: Backend> FolioApp<B> {
             })
         };
         let told = self.frontmost_window().or_else(|| oldest_standing(self));
+        if told.is_none()
+            && let Some(app) = self.app.as_mut()
+        {
+            // No window to tell: the notices wait for the next adoption that has one.
+            app.copy_back_untold = kept_notices;
+            kept_notices = Vec::new();
+        }
         if let (Some(window), Some(app)) = (told, self.app.as_mut())
             && !offer.is_empty()
         {
@@ -49733,7 +49749,7 @@ impl<B: Backend> FolioApp<B> {
                         notice.text().to_owned(),
                     )?;
                 }
-                for kept in &copy_back.notices {
+                for kept in &kept_notices {
                     runtime.raise_newer_copy_card(
                         copy_back::newer_kept_sentence(kept),
                         kept.path.clone(),
