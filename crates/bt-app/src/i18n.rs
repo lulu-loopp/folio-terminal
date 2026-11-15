@@ -484,6 +484,11 @@ text_entries! {
     CopyBackNotBrought,
     /// The reason when the file a Bring back would replace could not be kept as a copy.
     CopyBackNotKept,
+    /// **The last of the offered documents' nouns after the others**: `{names}`, then `{last}`.
+    /// Not [`Self::ListLast`], whose Chinese spaces its 和 for the file names it joins: these
+    /// nouns are Chinese words, and one of them (窗口和标签页) holds a 和 of its own, so the
+    /// Chinese joins them with `、` throughout.
+    CopyBackNounsLast,
 
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
     PastePathEncoding,
@@ -5782,6 +5787,7 @@ impl Text {
                 "the file it would replace could not be kept as a copy",
                 "现有文件无法保留为副本",
             ),
+            Self::CopyBackNounsLast => pick(lang, "{names} and {last}", "{names}、{last}"),
             Self::CleanupRemoved => pick(lang, "removed", "已移除"),
             Self::CleanupAbsent => pick(lang, "not present", "不存在"),
             Self::CleanupLeft => pick(
@@ -6902,8 +6908,9 @@ impl Text {
     /// (U+3000–303F, U+FF00–FFEF) and nothing else: no ASCII, so the English
     /// column copied over fails, and no Han, so a row with words listed here fails.
     #[cfg(test)]
-    const PUNCTUATION_ONLY: [Self; 4] = [
+    const PUNCTUATION_ONLY: [Self; 5] = [
         Self::ListSeparator,
+        Self::CopyBackNounsLast,
         Self::MergeClauseSeparator,
         Self::MergedProfileValue,
         Self::MergeFileLine,

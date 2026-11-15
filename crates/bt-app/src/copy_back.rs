@@ -94,20 +94,30 @@ impl KeptDocument {
 }
 
 /// **The nouns of `documents`, joined as one list** — "settings, shortcuts and pins" — in the
-/// order given, for the offer's heading.
+/// order given, for the offer's heading. The last one is joined by [`Text::CopyBackNounsLast`],
+/// not the file lists' [`Text::ListLast`]: in Chinese these are words, joined with `、`.
 #[must_use]
 pub(crate) fn nouns_of(documents: impl IntoIterator<Item = KeptDocument>) -> String {
+    nouns_of_in(crate::i18n::current(), documents)
+}
+
+/// [`nouns_of`] in a named language.
+#[must_use]
+pub(crate) fn nouns_of_in(
+    lang: crate::i18n::Lang,
+    documents: impl IntoIterator<Item = KeptDocument>,
+) -> String {
     let nouns: Vec<&'static str> = documents
         .into_iter()
         .filter_map(KeptDocument::saved_noun)
-        .map(Text::text)
+        .map(|noun| noun.in_lang(lang))
         .collect();
     match nouns.split_last() {
         None => String::new(),
         Some((last, [])) => (*last).to_owned(),
-        Some((last, rest)) => Text::ListLast
-            .text()
-            .replace("{names}", &rest.join(Text::ListSeparator.text()))
+        Some((last, rest)) => Text::CopyBackNounsLast
+            .in_lang(lang)
+            .replace("{names}", &rest.join(Text::ListSeparator.in_lang(lang)))
             .replace("{last}", last),
     }
 }

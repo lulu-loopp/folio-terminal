@@ -49,6 +49,45 @@ fn the_offer_heading_names_every_offered_document() {
     );
 }
 
+/// PIN (0.4.10 Chinese pass 3) — **in Chinese the offered documents' nouns are joined with `、`
+/// throughout**: the nouns are words, and 窗口和标签页 holds a 和 of its own, so the file lists'
+/// last joiner (`{names} 和 {last}`, spaced for the file names it joins) would read
+/// 窗口和标签页 和 设置.
+///
+/// MUTATION: `Text::ListLast` in place of `Text::CopyBackNounsLast` in `nouns_of_in`.
+#[test]
+fn the_chinese_offer_joins_its_nouns_as_words() {
+    use crate::i18n::Lang;
+    assert_eq!(
+        nouns_of_in(Lang::Chinese, [KeptDocument::Session]),
+        "窗口和标签页"
+    );
+    assert_eq!(
+        nouns_of_in(
+            Lang::Chinese,
+            [KeptDocument::Session, KeptDocument::Settings]
+        ),
+        "窗口和标签页、设置"
+    );
+    assert_eq!(
+        nouns_of_in(
+            Lang::Chinese,
+            [
+                KeptDocument::Session,
+                KeptDocument::Settings,
+                KeptDocument::Keybindings,
+                KeptDocument::Profiles,
+                KeptDocument::Pins,
+            ]
+        ),
+        "窗口和标签页、设置、快捷键、配置文件、钉住条目"
+    );
+    assert_eq!(
+        nouns_of_in(Lang::English, [KeptDocument::Settings, KeptDocument::Pins]),
+        "settings and pins"
+    );
+}
+
 /// RED (row 68d, R6, R7; review N3) — **the offer's sentence says what Bring back does to what
 /// is offered**: a store's document kept as a copy; the layout's windows opening beside the open
 /// ones; both, when both are offered.
