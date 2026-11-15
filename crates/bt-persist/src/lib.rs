@@ -83,8 +83,9 @@ pub use layout::{
 pub use migrate::{
     DocumentBytes, FallbackReason, KEYBINDINGS_MIGRATIONS, Keeping, MAX_DOCUMENT_BYTES,
     MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS, ReadReport, RejectedStamp,
-    SESSION_MIGRATIONS, SETTINGS_MIGRATIONS, StableRead, UPDATE_CHECK_MIGRATIONS, read_kept_copy,
-    read_stable, read_stable_between, rejected_stamp_of, schema_version_of,
+    SESSION_MIGRATIONS, SETTINGS_MIGRATIONS, StableRead, UPDATE_CHECK_MIGRATIONS,
+    keep_beside_as_rejected, read_kept_copy, read_stable, read_stable_between, rejected_stamp_of,
+    schema_version_of,
 };
 pub use pins::{PINS_SCHEMA_VERSION, PinEntryV1, PinKind, PinsV1};
 pub use profiles::{

@@ -1866,6 +1866,15 @@ fn keep_rejected(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
     Some(kept)
 }
 
+/// **Keep `bytes` beside `path` as a `.rejected-` copy of it**, named as a refused read's copy is
+/// ([`rejected_sibling`]), and answer where they went — the write a newer build's Bring back
+/// replaces (0.4.10 plan row 68d, R7), kept by the one namer so the carry pass counts it among
+/// the document's copies. `None` when no name was free or the write failed.
+#[must_use]
+pub fn keep_beside_as_rejected(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    keep_rejected(path, bytes)
+}
+
 /// The same keeping for a document too large to have been read (review row
 /// R4-9), which is the one case where the bytes are not in hand.
 ///
