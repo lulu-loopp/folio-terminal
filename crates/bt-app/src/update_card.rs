@@ -151,7 +151,8 @@ pub(crate) enum CopyBackVerb {
     BringBack,
     /// Keep what this start read, written at this build's version (R8).
     KeepCurrent,
-    /// Not now: nothing is written, and the next start asks again — the update card's Later.
+    /// Not now: nothing is written, and the next start asks again while the case holds — the
+    /// update card's Later.
     NotNow,
 }
 
@@ -178,13 +179,14 @@ impl Verbs for CopyBackVerb {
 }
 
 /// **What the copy-back card says** (row 68d, R6): the heading naming every offered document
-/// ([`crate::copy_back::offer_heading`]), the sentence, and the two verbs, *Bring back* first.
+/// ([`crate::copy_back::offer_heading`]), the sentence chosen by what is offered
+/// ([`crate::copy_back::offer_sentence`]), and the two verbs, *Bring back* first.
 #[must_use]
-pub(crate) fn copy_back_paint(heading: String) -> Paint<CopyBackVerb> {
+pub(crate) fn copy_back_paint(heading: String, sentence: String) -> Paint<CopyBackVerb> {
     Paint {
         heading: Some(heading),
         bar: None,
-        detail: Some(Text::CopyBackSub.text().to_owned()),
+        detail: Some(sentence),
         folder: None,
         verbs: vec![CopyBackVerb::BringBack, CopyBackVerb::KeepCurrent],
     }

@@ -49,6 +49,30 @@ fn the_offer_heading_names_every_offered_document() {
     );
 }
 
+/// RED (row 68d, R6, R7; review N3) — **the offer's sentence says what Bring back does to what
+/// is offered**: a store's document kept as a copy; the layout's windows opening beside the open
+/// ones; both, when both are offered.
+///
+/// MUTATION: the stores' sentence on every card (`plant-68d-one-sentence-for-every-offer.py`).
+#[test]
+fn the_offer_sentence_says_what_bring_back_does() {
+    let settings = offered(KeptDocument::Settings, "s", b"");
+    let layout = offered(KeptDocument::Session, "l", b"");
+    assert_eq!(
+        offer_sentence(std::slice::from_ref(&settings)),
+        "An older Folio replaced them. What you have now is kept as a copy."
+    );
+    assert_eq!(
+        offer_sentence(std::slice::from_ref(&layout)),
+        "An older Folio replaced them. Your open windows stay; the newer ones open beside them."
+    );
+    assert_eq!(
+        offer_sentence(&[layout, settings]),
+        "An older Folio replaced them. What you have now is kept as a copy. Your open windows \
+         stay; the newer ones open beside them."
+    );
+}
+
 /// PIN (row 68d, R4) — **the notice names the document and the copy it is kept in**.
 #[test]
 fn the_notice_names_the_document_and_its_copy() {

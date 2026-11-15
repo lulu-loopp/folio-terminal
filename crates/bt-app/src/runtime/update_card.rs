@@ -473,8 +473,8 @@ impl<B: Backend> Runtime<'_, B> {
     /// **Spend a verb of the copy-back card** (0.4.10 plan row 68d, R6-R8). The card goes in
     /// every case. *Bring back* brings every offered document back ([`Self::bring_back_copy`]);
     /// *Keep current* writes each at this build's version ([`Self::keep_current_document`]);
-    /// *Not now* writes nothing, and the next start asks again. One diagnostics line per
-    /// document says which.
+    /// *Not now* writes nothing, and the next start asks again while the case holds. One
+    /// diagnostics line per document says which.
     fn answer_copy_back_card(&mut self, verb: update_card::CopyBackVerb) -> Result<()> {
         let Some(up) = self.app.copy_back.take() else {
             return Ok(());

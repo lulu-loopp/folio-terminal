@@ -13,7 +13,8 @@
 //! - **The newer build's offer** ([`CopyOffered`]): when the version a store read at this start is
 //!   below a copy's that this build reads, one card for every such document, on the update card's
 //!   chassis (`update_card::CopyBackVerb`): *Bring back*, *Keep current*, and `Escape` or the `×`,
-//!   which writes nothing and asks again at the next start.
+//!   which writes nothing and asks again at the next start while the case holds (the layout's
+//!   first autosave writes this build's version, which ends it).
 //!
 //! **Bring back**, for the four documents a store writes as it is pressed (settings, shortcuts,
 //! profiles, pins), runs on the storage worker ([`CopyBackJob`], `document_request`'s
@@ -129,6 +130,26 @@ pub(crate) fn offer_heading(offer: &[CopyOffered]) -> String {
         .replace("{what}", &nouns_of(offer.iter().map(|copy| copy.document)))
 }
 
+/// **The offer's sentence** (R6; review N3), by what *Bring back* does to what is offered: a
+/// store's document is replaced and what the person has now kept as a copy; the layout replaces
+/// nothing, its windows opening beside the open ones. An offer of both says both.
+#[must_use]
+pub(crate) fn offer_sentence(offer: &[CopyOffered]) -> String {
+    let layout = offer
+        .iter()
+        .any(|offered| offered.document == KeptDocument::Session);
+    let store = offer
+        .iter()
+        .any(|offered| offered.document != KeptDocument::Session);
+    match (store, layout) {
+        (true, true) => Text::CopyBackSubBoth,
+        (false, true) => Text::CopyBackSubLayout,
+        (_, false) => Text::CopyBackSub,
+    }
+    .text()
+    .to_owned()
+}
+
 /// **The offer, up in one window** (R6): the window it was raised in, the documents it offers,
 /// and the card's hover and ring. On `App`, as the update card's job is: the question is the
 /// application's, asked in one window.
@@ -143,7 +164,7 @@ impl OfferUp {
     /// What the card draws.
     #[must_use]
     pub(crate) fn paint(&self) -> crate::update_card::Paint<crate::update_card::CopyBackVerb> {
-        crate::update_card::copy_back_paint(offer_heading(&self.offer))
+        crate::update_card::copy_back_paint(offer_heading(&self.offer), offer_sentence(&self.offer))
     }
 
     /// **More documents offered while the card is up**: each replaces the one it offers the

@@ -466,8 +466,14 @@ text_entries! {
     SavedPins,
     /// The newer build's offer (row 68d, R6): `{what}` the offered documents' nouns, joined.
     CopyBackHeading,
-    /// Its sentence.
+    /// Its sentence when it offers only documents a store writes: what the person has now is
+    /// kept as a copy (review N3).
     CopyBackSub,
+    /// Its sentence when it offers only the layout: the open windows stay, the newer ones open
+    /// beside them (review N3).
+    CopyBackSubLayout,
+    /// Its sentence when it offers the layout and a store's document: both of the above.
+    CopyBackSubBoth,
     /// Its first verb.
     CopyBackBringBack,
     /// Its second verb.
@@ -5775,6 +5781,20 @@ impl Text {
                 // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
                 "An older Folio replaced them. What you have now is kept as a copy.",
             ),
+            Self::CopyBackSubLayout => pick(
+                lang,
+                "An older Folio replaced them. Your open windows stay; the newer ones open beside them.",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "An older Folio replaced them. Your open windows stay; the newer ones open beside them.",
+            ),
+            Self::CopyBackSubBoth => pick(
+                lang,
+                "An older Folio replaced them. What you have now is kept as a copy. Your open \
+                 windows stay; the newer ones open beside them.",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "An older Folio replaced them. What you have now is kept as a copy. Your open \
+                 windows stay; the newer ones open beside them.",
+            ),
             Self::CopyBackBringBack => pick(
                 lang,
                 "Bring back",
@@ -7082,6 +7102,10 @@ impl Text {
         (Self::CopyBackHeading, HostPlatform::MacOs),
         (Self::CopyBackSub, HostPlatform::Windows),
         (Self::CopyBackSub, HostPlatform::MacOs),
+        (Self::CopyBackSubLayout, HostPlatform::Windows),
+        (Self::CopyBackSubLayout, HostPlatform::MacOs),
+        (Self::CopyBackSubBoth, HostPlatform::Windows),
+        (Self::CopyBackSubBoth, HostPlatform::MacOs),
         (Self::CopyBackBringBack, HostPlatform::Windows),
         (Self::CopyBackBringBack, HostPlatform::MacOs),
         (Self::CopyBackKeepCurrent, HostPlatform::Windows),
