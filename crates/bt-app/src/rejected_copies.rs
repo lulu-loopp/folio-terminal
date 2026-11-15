@@ -165,7 +165,7 @@ pub(crate) struct OpenedDocument {
 
 impl OpenedDocument {
     /// What `document`'s store read: `bytes`, or nothing.
-    pub(crate) fn read(document: KeptDocument, bytes: Option<Arc<[u8]>>) -> Self {
+    pub(crate) fn noted(document: KeptDocument, bytes: Option<Arc<[u8]>>) -> Self {
         Self {
             document,
             read: bytes.map_or(StartRead::Version(None), StartRead::Bytes),
@@ -196,7 +196,7 @@ fn opened_entry(opened: &mut Vec<OpenedDocument>, document: KeptDocument) -> &mu
     let index = match opened.iter().position(|entry| entry.document == document) {
         Some(index) => index,
         None => {
-            opened.push(OpenedDocument::read(document, None));
+            opened.push(OpenedDocument::noted(document, None));
             opened.len() - 1
         }
     };

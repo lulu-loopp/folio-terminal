@@ -332,7 +332,7 @@ fn a_copy_a_newer_build_can_bring_back_is_never_removed() {
             for day in 3..=5 {
                 copy_written(&folder, "settings.json", day, 0, future(day).as_bytes());
             }
-            let mut opened = [OpenedDocument::read(KeptDocument::Settings, start.clone())];
+            let mut opened = [OpenedDocument::noted(KeptDocument::Settings, start.clone())];
             let retired =
                 retire_rejected_copies(worker, &folder, &mut opened, |_| false, &mut |path| {
                     std::fs::remove_file(path)
@@ -411,7 +411,7 @@ fn each_documents_protected_copy_is_read_by_its_own_parser() {
             }
             let older_start: Arc<[u8]> =
                 Arc::from(format!("{{\"schema_version\":{}}}", current - 1).as_bytes());
-            let mut opened = [OpenedDocument::read(document, Some(older_start))];
+            let mut opened = [OpenedDocument::noted(document, Some(older_start))];
             let retired =
                 retire_rejected_copies(worker, &folder, &mut opened, |_| false, &mut |path| {
                     std::fs::remove_file(path)
@@ -473,7 +473,7 @@ fn the_newest_copy_only_a_newer_build_reads_is_kept() {
             bytes.extend(std::iter::repeat_n(b' ', day as usize));
             copy_written(&folder, "settings.json", day, 0, &bytes);
         }
-        let mut opened = [OpenedDocument::read(KeptDocument::Settings, Some(start))];
+        let mut opened = [OpenedDocument::noted(KeptDocument::Settings, Some(start))];
         let retired =
             retire_rejected_copies(worker, &folder, &mut opened, |_| false, &mut |path| {
                 std::fs::remove_file(path)
@@ -632,7 +632,7 @@ fn only_the_data_folders_writer_retires_copies() {
 
 /// `document`'s start, which refused a newer file and kept it as `copy`.
 fn refused_newer(document: KeptDocument, copy: &str) -> OpenedDocument {
-    let mut entry = OpenedDocument::read(document, None);
+    let mut entry = OpenedDocument::noted(document, None);
     entry.refused_newer = Some(copy.to_owned());
     entry
 }
@@ -640,7 +640,7 @@ fn refused_newer(document: KeptDocument, copy: &str) -> OpenedDocument {
 /// `document`'s start, which read bytes claiming `version`.
 fn read_at_version(document: KeptDocument, version: u32) -> OpenedDocument {
     let bytes = format!("{{\"schema_version\":{version}}}");
-    OpenedDocument::read(document, Some(Arc::from(bytes.as_bytes())))
+    OpenedDocument::noted(document, Some(Arc::from(bytes.as_bytes())))
 }
 
 /// The copies a round said, by name.
