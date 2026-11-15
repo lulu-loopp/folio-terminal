@@ -26,7 +26,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Changed
 
 - While a command is running in a tab, a Folio window wakes about half as often as before: each step of the tab's working mark, each blink of the text cursor and most bursts of a pane's output now reach the screen in one pass of the window's loop instead of two. What you see, and when, is unchanged. <!-- zh: 标签页中有命令运行时，Folio 窗口被唤醒的次数约为以前的一半：标签页运行标记的每一步、文本光标的每次闪烁以及窗格的大部分输出，现在只需窗口循环的一轮就能显示到屏幕上，而不是两轮。你看到的内容及其出现的时间都没有变化。 -->
-- Folio keeps the newest three copies of each file it could not read, such as `settings.json.rejected-…`, and removes older ones when it starts. <!-- zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK -->
+- Folio keeps the newest three copies of each file it could not read, such as `settings.json.rejected-…`, and removes older ones when it starts. It never removes the newest copy that a newer version of Folio wrote, so going back to that version can still bring it back. <!-- zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK -->
 
 ### Fixed
 

@@ -353,10 +353,15 @@ fn a_copy_a_newer_build_can_bring_back_is_never_removed() {
 /// own parser**: for each of the five documents a store opens, of five copies — three above this
 /// build, then two holding the document's default as its own `serialize_*` writes it — the newer of
 /// the two is kept as the fourth when the start read the version before this build's; and a start
-/// at this build's own version answers that no copy is protected without reading one.
+/// at this build's own version answers that no copy is protected without reading one. The
+/// profiles get one more copy, newer than the kept one: `{"schema_version":1}`, which the pins
+/// parser reads (any version-1 object) and the profiles' own refuses — it is not the protected copy
+/// and goes beyond the three.
 ///
 /// MUTATION: one document's arm of `this_build_reads` calls another document's parser
-/// (`plant-68f-wrong-parser.py`).
+/// (`plant-68f-wrong-parser.py`; `plant-68f-profiles-read-by-pins.py`, the one pair whose wrong
+/// parser reads the default); the early return is dropped, so a start at this build's version
+/// reads every copy (`plant-68f-reads-on-a-normal-start.py`).
 #[test]
 fn each_documents_protected_copy_is_read_by_its_own_parser() {
     copies_on_a_worker(|worker| {
@@ -391,6 +396,8 @@ fn each_documents_protected_copy_is_read_by_its_own_parser() {
             let mut newer = readable.clone();
             newer.extend_from_slice(b"\n");
             let brought_back = copy_written(&folder, name, 2, 0, &newer);
+            let decoy = (document == KeptDocument::Profiles)
+                .then(|| copy_written(&folder, name, 2, 1, b"{\"schema_version\":1}"));
             for day in 3..=5 {
                 copy_written(&folder, name, day, 0, future(day).as_bytes());
             }
@@ -402,9 +409,10 @@ fn each_documents_protected_copy_is_read_by_its_own_parser() {
                     std::fs::remove_file(path)
                 })
                 .unwrap();
+            let mut expected_removed = vec![older_readable];
+            expected_removed.extend(decoy);
             assert_eq!(
-                retired[0].removed,
-                [older_readable],
+                retired[0].removed, expected_removed,
                 "{name}: the newest copy its own parser reads, above the start's version, is kept"
             );
             assert!(
@@ -425,6 +433,45 @@ fn each_documents_protected_copy_is_read_by_its_own_parser() {
                 "{name}: a start at this build's version reads no copy"
             );
         }
+    });
+}
+
+/// RED (0.4.10 plan row 68f, fold re-review F2) — **the newest copy only a newer build reads is
+/// kept whatever the count**: at an ordinary start (the file at this build's version), of five
+/// `settings.json` copies — three this build reads, then one above this build's version, then
+/// the oldest — the one above is kept as the fourth and only the oldest goes; of two above, the
+/// older goes as any other.
+///
+/// MUTATION: the copy only a newer build reads is not looked for
+/// (`plant-68f-newer-copy-retired.py`).
+#[test]
+fn the_newest_copy_only_a_newer_build_reads_is_kept() {
+    copies_on_a_worker(|worker| {
+        let current = bt_persist::SETTINGS_SCHEMA_VERSION;
+        let readable = bt_persist::serialize_settings(&bt_persist::SettingsV1::default()).unwrap();
+        let start: Arc<[u8]> = Arc::from(readable.as_slice());
+        let above = |n: u32| format!("{{\"schema_version\":{},\"n\":{n}}}", current + 1);
+        let folder = copies_scratch("newer-build");
+        let oldest_above = copy_written(&folder, "settings.json", 1, 0, above(1).as_bytes());
+        let oldest = copy_written(&folder, "settings.json", 2, 0, b"{\"schema_version\":1}");
+        let newer_build = copy_written(&folder, "settings.json", 3, 0, above(3).as_bytes());
+        for day in 4..=6 {
+            let mut bytes = readable.clone();
+            bytes.extend(std::iter::repeat_n(b' ', day as usize));
+            copy_written(&folder, "settings.json", day, 0, &bytes);
+        }
+        let opened = [(KeptDocument::Settings, Some(start))];
+        let retired = retire_rejected_copies(worker, &folder, &opened, |_| false, &mut |path| {
+            std::fs::remove_file(path)
+        })
+        .unwrap();
+        assert_eq!(
+            retired[0].removed,
+            [oldest_above, oldest],
+            "only the newest copy above this build's version is kept beyond the three"
+        );
+        assert!(folder.join(&newer_build).is_file(), "kept as the fourth");
+        assert_eq!(retired[0].kept, 4);
     });
 }
 

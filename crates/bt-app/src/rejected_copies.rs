@@ -260,6 +260,29 @@ fn copy_a_newer_build_can_bring_back(
     })
 }
 
+/// **The copy only a newer build reads**, as an index into `copies` (newest first): the newest
+/// whose `schema_version` is above `current`, this build's own (R9 as the owner read it: the newer
+/// build's things are kept). It is the copy 68d offers back when the newer build returns, so it
+/// stays whatever the count. Only its version is read, from the envelope; a copy read for it is
+/// not kept in `bytes`, so asking holds at most one copy more in memory. `None` for a document no
+/// build offers back (`current` is `None`) or when no copy stands above this build.
+fn copy_only_a_newer_build_reads(
+    copies: &[FoundCopy],
+    bytes: &[Option<Option<Vec<u8>>>],
+    current: Option<u32>,
+) -> Option<usize> {
+    let current = current?;
+    (0..copies.len()).find(|&index| {
+        let version = match &bytes[index] {
+            Some(read) => read.as_deref().and_then(bt_persist::schema_version_of),
+            None => bt_persist::read_kept_copy(&copies[index].path)
+                .as_deref()
+                .and_then(bt_persist::schema_version_of),
+        };
+        version.is_some_and(|version| version > current)
+    })
+}
+
 /// `copies[index]`'s bytes, read once a round through `bt_persist`'s bounded read; `None` when
 /// they were not obtained.
 fn copy_bytes<'a>(
@@ -282,12 +305,16 @@ enum CopyRetirement {
 }
 
 /// **Which of one document's copies (newest first) go this round, and why**: the older of two
-/// holding the same bytes first, then all but the newest [`KEPT_COPIES`] of the rest, never
-/// `protected`.
+/// holding the same bytes first, then all but the newest [`KEPT_COPIES`] of the rest. Never
+/// `protected` (the copy a newer build could bring back, [`copy_a_newer_build_can_bring_back`]),
+/// and never the copy only a newer build reads ([`copy_only_a_newer_build_reads`] above
+/// `current`), which is looked for only once a copy is otherwise due beyond the kept ones. Neither
+/// is ever the older of two equal copies: an equal newer one would answer before it.
 fn copies_to_retire(
     copies: &[FoundCopy],
     bytes: &mut [Option<Option<Vec<u8>>>],
     protected: Option<usize>,
+    current: Option<u32>,
 ) -> Vec<Option<CopyRetirement>> {
     let mut fate = vec![None; copies.len()];
     for older in 0..copies.len() {
@@ -308,12 +335,18 @@ fn copies_to_retire(
         }
     }
     let mut survivors = 0;
+    let mut newer_builds: Option<Option<usize>> = None;
     for (index, retirement) in fate.iter_mut().enumerate() {
         if retirement.is_some() {
             continue;
         }
         survivors += 1;
-        if survivors > KEPT_COPIES && Some(index) != protected {
+        if survivors <= KEPT_COPIES || Some(index) == protected {
+            continue;
+        }
+        let newer_build = *newer_builds
+            .get_or_insert_with(|| copy_only_a_newer_build_reads(copies, bytes, current));
+        if Some(index) != newer_build {
             *retirement = Some(CopyRetirement::BeyondKept);
         }
     }
@@ -354,7 +387,7 @@ pub(crate) fn retire_rejected_copies(
             .find(|(noted, _)| *noted == document)
             .and_then(|(_, bytes)| bytes.as_deref());
         let protected = copy_a_newer_build_can_bring_back(document, start, &copies, &mut bytes);
-        let fate = copies_to_retire(&copies, &mut bytes, protected);
+        let fate = copies_to_retire(&copies, &mut bytes, protected, document.current_version());
         let mut answer = CopiesRetired {
             document,
             kept: copies.len(),
