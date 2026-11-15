@@ -1875,10 +1875,12 @@ fn keep_rejected(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
 /// only place the older build's write will be once the Bring back lands, so the copy is made a
 /// new file (never over another), written whole and flushed (`sync_all`) before `Some`. A copy
 /// that could not be written whole is removed again — it is this call's own new file — and the
-/// answer is `None`, which writes nothing over the original.
+/// answer is `None`, which writes nothing over the original. On the storage worker, whose context
+/// it takes: the flush is a wait on the disk (a `worker-door-body` of the waits registry).
 #[must_use]
-pub fn keep_beside_as_rejected(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
+pub fn keep_beside_as_rejected(worker: &WorkerCtx, path: &Path, bytes: &[u8]) -> Option<PathBuf> {
     use std::io::Write;
+    let _ = worker;
     let kept = rejected_sibling(path, SystemTime::now())?;
     let mut file = std::fs::File::create_new(&kept).ok()?;
     if file

@@ -261,7 +261,7 @@ pub(crate) fn serve_copy_back(worker: &WorkerCtx, job: &crate::copy_back::CopyBa
 fn copy_back(
     worker: &WorkerCtx,
     job: &crate::copy_back::CopyBackJob,
-    keep: &dyn Fn(&Path, &[u8]) -> Option<PathBuf>,
+    keep: &dyn Fn(&WorkerCtx, &Path, &[u8]) -> Option<PathBuf>,
 ) -> crate::copy_back::CopyBackDone {
     use crate::copy_back::CopyBackDone;
     match precondition(
@@ -273,7 +273,7 @@ fn copy_back(
         Precondition::Unread(error) => return CopyBackDone::NotBrought(error),
     }
     let kept = match &job.expected {
-        Some(older) => match keep(&job.which, older) {
+        Some(older) => match keep(worker, &job.which, older) {
             Some(kept) => Some(kept),
             None => {
                 return CopyBackDone::NotBrought(

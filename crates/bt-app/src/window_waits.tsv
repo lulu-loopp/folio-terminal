@@ -271,6 +271,7 @@ bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_time
 bt-app	-	crate::diagnostics::Queue::settle	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	DiagnosticsSettle
 bt-app	-	crate::diagnostics::Queue::settle_in_panic	std::sync::mpsc::Receiver::recv_timeout 1	emergency	emergency (panic hook)	
 bt-app	-	crate::diagnostics::Drain::serve	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-persist	-	crate::migrate::keep_beside_as_rejected	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
 bt-persist	-	crate::migrate::read_stable_between	std::fs::metadata 2	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::copy_new	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::failure_without_plan	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	

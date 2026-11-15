@@ -65,7 +65,7 @@ fn a_bring_back_whose_keep_failed_writes_nothing() {
             bytes: Arc::from(&b"{\"schema_version\":2,\"bindings\":[]}"[..]),
             answer,
         };
-        let done = copy_back(worker, &job, &|_, _| None);
+        let done = copy_back(worker, &job, &|_, _, _| None);
         assert_eq!(
             done,
             CopyBackDone::NotBrought(crate::i18n::Text::CopyBackNotKept.text().to_owned())
