@@ -1935,6 +1935,27 @@ the shape never has to decide which attributes serde reads. Not pinned: `recover
 `session.prev.json`, `schemes\*.json` and the WebView2 profile, none of which
 is versioned by Folio.
 
+Known limits (0.4.10 row 68d's review N13, 2026-11-15; the K-series row 101,
+T-DOCUMENT-KEYS-REGISTER-LIMITS, closes them):
+
+- **Stacked landings.** The CI half compares with the merge base. A stack of
+  branches landed on one another's heads has no base register for the rows a
+  lower branch added, so a later branch of the stack can edit those rows in
+  place and pass.
+- **The shape is more than the keys.** It keeps the attributes, the derives
+  and the type's name, so a change that leaves every key as it was (a derive
+  added, a type renamed, an attribute reworded) is a new version all the same,
+  with its migration step and a full set of rows.
+- **`//` inside an attribute's string literal.** The shape drops every `//`
+  comment as `bt_source` reads them, and the attribute text is read without
+  lexing its literals, so a `//` inside one (a URL in a `#[doc = "…"]` or a
+  `#[serde(rename = "…")]`) cuts the shape there and the rest of that line is
+  not pinned.
+- **bt-app's records are a hand list.** bt-persist's documents are found from
+  the version constants its reads pass; bt-app's three (integration-marks,
+  integration-profile-files, update-homes) are named in the test by hand, so a
+  fourth versioned record in bt-app lands with no rows unless someone adds it.
+
 ## Machine-independent paths
 
 The rule: committed code, tests, and documentation do not carry one developer's
