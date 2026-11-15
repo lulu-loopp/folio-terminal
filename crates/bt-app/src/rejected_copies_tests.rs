@@ -857,3 +857,25 @@ fn the_window_thread_lists_no_rejected_copy() {
         }
     }
 }
+
+/// RED (row 68d, R4; review N7) — **a kept copy whose bytes cannot be read is said**: a failed
+/// read is no evidence that the refusal was said before, and the start said nothing.
+///
+/// MUTATION: a copy that could not be read counts as said before
+/// (`plant-68d-unread-copy-not-said.py`).
+#[test]
+fn a_kept_copy_that_cannot_be_read_is_said() {
+    let name = "settings.json.rejected-20261115-000001";
+    let copies = [FoundCopy {
+        document: KeptDocument::Settings,
+        stamp: bt_persist::rejected_stamp_of(name, "settings.json").expect("the namer's name"),
+        name: name.to_owned(),
+        path: bt_testpath::temp_path("rejected-copies-never-made").join(name),
+        length: 10,
+    }];
+    let mut bytes = vec![None; copies.len()];
+    let mut entry = refused_newer(KeptDocument::Settings, name);
+    let said = newer_refusal_to_say(&mut entry, &copies, &mut bytes);
+    assert_eq!(said.map(|notice| notice.copy).as_deref(), Some(name));
+    assert!(entry.refusal_answered, "and answered, once");
+}

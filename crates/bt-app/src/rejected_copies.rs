@@ -409,7 +409,8 @@ fn copy_only_a_newer_build_reads(
 /// copy the start kept, unless another copy of the document holds the same bytes — then the
 /// refusal was said when that copy was made, and the older of the two goes as a duplicate. The
 /// entry is answered either way, so a later round of this process says nothing; a copy no longer
-/// there (removed by hand) is answered with nothing to say.
+/// there (removed by hand) is answered with nothing to say. A kept copy whose bytes could not be
+/// read is said (review N7): a failed read is no evidence that the refusal was said before.
 fn newer_refusal_to_say(
     entry: &mut OpenedDocument,
     copies: &[FoundCopy],
@@ -421,12 +422,14 @@ fn newer_refusal_to_say(
     let name = entry.refused_newer.clone()?;
     entry.refusal_answered = true;
     let kept = copies.iter().position(|copy| copy.name == name)?;
-    let kept_bytes = copy_bytes(copies, bytes, kept)?.to_vec();
-    let said_before = (0..copies.len()).any(|other| {
-        other != kept
-            && copies[other].length == copies[kept].length
-            && copy_bytes(copies, bytes, other) == Some(kept_bytes.as_slice())
-    });
+    let said_before = match copy_bytes(copies, bytes, kept).map(<[u8]>::to_vec) {
+        Some(kept_bytes) => (0..copies.len()).any(|other| {
+            other != kept
+                && copies[other].length == copies[kept].length
+                && copy_bytes(copies, bytes, other) == Some(kept_bytes.as_slice())
+        }),
+        None => false,
+    };
     (!said_before).then(|| NewerKept {
         document: entry.document,
         copy: name,
