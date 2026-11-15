@@ -1870,9 +1870,27 @@ fn keep_rejected(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
 /// ([`rejected_sibling`]), and answer where they went — the write a newer build's Bring back
 /// replaces (0.4.10 plan row 68d, R7), kept by the one namer so the carry pass counts it among
 /// the document's copies. `None` when no name was free or the write failed.
+///
+/// **On the disk before it answers** (review N5): unlike a refused read's copy, this one is the
+/// only place the older build's write will be once the Bring back lands, so the copy is made a
+/// new file (never over another), written whole and flushed (`sync_all`) before `Some`. A copy
+/// that could not be written whole is removed again — it is this call's own new file — and the
+/// answer is `None`, which writes nothing over the original.
 #[must_use]
 pub fn keep_beside_as_rejected(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
-    keep_rejected(path, bytes)
+    use std::io::Write;
+    let kept = rejected_sibling(path, SystemTime::now())?;
+    let mut file = std::fs::File::create_new(&kept).ok()?;
+    if file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .is_err()
+    {
+        drop(file);
+        let _ = std::fs::remove_file(&kept);
+        return None;
+    }
+    Some(kept)
 }
 
 /// The same keeping for a document too large to have been read (review row
