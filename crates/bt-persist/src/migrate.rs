@@ -1882,12 +1882,20 @@ pub fn keep_beside_as_rejected(worker: &WorkerCtx, path: &Path, bytes: &[u8]) ->
     use std::io::Write;
     let _ = worker;
     let kept = rejected_sibling(path, SystemTime::now())?;
+    keep_as_new_file(kept, |file: &mut std::fs::File| {
+        file.write_all(bytes).and_then(|()| file.sync_all())
+    })
+}
+
+/// [`keep_beside_as_rejected`]'s copy at the name it chose: made a new file — a name already
+/// taken (another copy made since the namer looked) is refused, never written over — then
+/// `write` fills it. A `write` that fails removes this call's own new file and nothing else.
+fn keep_as_new_file(
+    kept: PathBuf,
+    write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> Option<PathBuf> {
     let mut file = std::fs::File::create_new(&kept).ok()?;
-    if file
-        .write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .is_err()
-    {
+    if write(&mut file).is_err() {
         drop(file);
         let _ = std::fs::remove_file(&kept);
         return None;
@@ -3715,6 +3723,62 @@ mod tests {
         let dir = bt_testpath::temp_path(&format!("bt-persist-migrate-{tag}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// RED (0.4.10 plan row 68d, review N5; re-review F5) — **the Bring back's keep never writes
+    /// over an existing copy**: a name already taken is refused and the file there is left as it
+    /// was, `write` never called; a `write` that fails removes the keep's own new file and only
+    /// that; and on a worker the keep puts the bytes in a new copy beside the file, the file
+    /// untouched.
+    ///
+    /// MUTATION: the copy is made with `File::create`, which writes over a taken name
+    /// (`plant-68d-keep-overwrites.py`).
+    #[test]
+    fn the_bring_backs_keep_never_writes_over_an_existing_copy() {
+        let dir = unique_dir("keep-new-file");
+        let taken = write_fixture(
+            &dir,
+            "settings.json.rejected-20261115-000001",
+            "an older copy",
+        );
+        let mut wrote = false;
+        let kept = keep_as_new_file(taken.clone(), |_| {
+            wrote = true;
+            Ok(())
+        });
+        assert_eq!(kept, None, "a taken name is refused");
+        assert!(!wrote, "and nothing is written to it");
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "an older copy");
+
+        let fresh = dir.join("settings.json.rejected-20261115-000002");
+        let kept = keep_as_new_file(fresh.clone(), |_| Err(io::Error::other("the disk is full")));
+        assert_eq!(kept, None, "a failed write keeps nothing");
+        assert!(!fresh.exists(), "its own new file is removed");
+        assert_eq!(
+            std::fs::read_to_string(&taken).unwrap(),
+            "an older copy",
+            "and no other file"
+        );
+
+        let file = write_fixture(&dir, "settings.json", "the older build's write");
+        let on_worker = file.clone();
+        let kept = bt_platform::spawn_at_priority(
+            "bt-persist-keep-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| keep_beside_as_rejected(worker, &on_worker, b"the older build's write"),
+        )
+        .expect("the thread door starts a thread")
+        .join()
+        .expect("the keep returns")
+        .expect("a copy is kept");
+        assert_ne!(kept, taken, "beside the copies already there");
+        assert_eq!(std::fs::read(&kept).unwrap(), b"the older build's write");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "the older build's write",
+            "the file itself untouched"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -819,6 +819,11 @@ fn the_window_thread_lists_no_rejected_copy() {
             method_body("FolioApp", "adopt_carried"),
         ),
         ("read_fault", free_fn_body("read_fault")),
+        ("read_fault_noting", free_fn_body("read_fault_noting")),
+        (
+            "newer_refusal_to_note",
+            free_fn_body("newer_refusal_to_note"),
+        ),
         ("note_opened_document", free_fn_body("note_opened_document")),
         ("note_refused_newer", free_fn_body("note_refused_newer")),
         (
