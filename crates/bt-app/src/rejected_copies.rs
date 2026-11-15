@@ -25,6 +25,17 @@
 //!    the newest copy whose version is above the version of the file this start read and which
 //!    this build reads, kept even when it is the fourth. The next part (68d) offers it back.
 //!
+//! **And what the window is told** (row 68d, R4 and R5 of 2026-11-14), decided per document
+//! before anything is removed and handed to the window in the round's part
+//! ([`crate::copy_back::CopyBackAnswer`]):
+//!
+//! - **the notice**: this start refused a newer file and kept it as a copy, and no other copy of
+//!   the document holds those bytes — a refusal an earlier copy already holds was said when that
+//!   copy was made, and the older copy goes as a duplicate (the copies are the memory: "once"
+//!   needs no record);
+//! - **the offer**: the copy a newer build could bring back (step 4), for each document that has
+//!   one — the window asks once for all of them.
+//!
 //! Each removal is `remove_file` on that one file. A copy that will not go is left and said; the
 //! others go on. **During an update's trial nothing is removed**: the trial's gate is asked for
 //! [`Writer::RefusedCopies`] once a round, and only when a removal is due, and the commit's
@@ -32,8 +43,9 @@
 //!
 //! **One diagnostics line per document when what it did changes**: `BT_REJECTED_COPIES
 //! <document> kept=<n> removed=<copy>[,<copy>…]`, `BT_REJECTED_COPIES <document> left <copy>
-//! (<error kind>)`, `BT_REJECTED_COPIES <document> held`, or `BT_REJECTED_COPIES unlisted (<error
-//! kind>)` for a folder that will not list. A line names copies by their own names, never a path.
+//! (<error kind>)`, `BT_REJECTED_COPIES <document> held`, `BT_REJECTED_COPIES <document> said
+//! <copy>`, `BT_REJECTED_COPIES <document> offered <copy> v<copy's> over v<file's>`, or
+//! `BT_REJECTED_COPIES unlisted (<error kind>)` for a folder that will not list. A line names copies by their own names, never a path.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -43,6 +55,7 @@ use bt_persist::RejectedStamp;
 use bt_platform::admission::WorkerCtx;
 
 use crate::carry_pass::MemberAnswer;
+use crate::copy_back::{CopyBackAnswer, CopyOffered, NewerKept};
 use crate::update_orphans::OrphansSaid;
 use crate::update_trial::Writer;
 
@@ -74,6 +87,15 @@ impl KeptDocument {
         Self::Pins,
         Self::UpdateCheck,
     ];
+
+    /// **The live document whose file is named `file`**, as a store names its file to
+    /// `read_fault`: one of the five a build writes at a version ([`Self::current_version`]),
+    /// never `update-check.json`.
+    pub(crate) fn live_named(file: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|document| {
+            document.kept_file_name() == file && document.current_version().is_some()
+        })
+    }
 
     /// The document's file name in the data folder, which its copies' names begin with.
     pub(crate) const fn kept_file_name(self) -> &'static str {
@@ -117,22 +139,109 @@ impl KeptDocument {
     }
 }
 
-/// **A document and the bytes its store read at this start**: loaded or refused, or `None` when
-/// there was no file or none whose bytes were obtained.
-pub(crate) type OpenedDocument = (KeptDocument, Option<Arc<[u8]>>);
+/// **What a store read at this start, as the pass needs it**: the bytes until the pass's worker
+/// has read their version, then the version alone (review N8: the version is all 68f and 68d
+/// need, and the bytes are let go at the first round that reads it). `Version(None)` when there
+/// was no file, no bytes, or bytes that claim no version.
+#[derive(Clone, Debug)]
+pub(crate) enum StartRead {
+    Bytes(Arc<[u8]>),
+    Version(Option<u32>),
+}
+
+/// **One document's start, as the pass reads it**: what its store read, and this start's refusal
+/// of a newer file — the copy it kept, and whether this process has answered it yet.
+#[derive(Clone, Debug)]
+pub(crate) struct OpenedDocument {
+    pub(crate) document: KeptDocument,
+    pub(crate) read: StartRead,
+    /// The copy this start kept of a file newer than this build (`FutureSchemaVersion`), by
+    /// its name; `None` when this start refused no newer file or kept no copy of it.
+    pub(crate) refused_newer: Option<String>,
+    /// Whether this process has decided the notice for [`Self::refused_newer`] — said it, or
+    /// found it said — so a later round of the same process does not say it again.
+    pub(crate) refusal_answered: bool,
+}
+
+impl OpenedDocument {
+    /// What `document`'s store read: `bytes`, or nothing.
+    pub(crate) fn read(document: KeptDocument, bytes: Option<Arc<[u8]>>) -> Self {
+        Self {
+            document,
+            read: bytes.map_or(StartRead::Version(None), StartRead::Bytes),
+            refused_newer: None,
+            refusal_answered: false,
+        }
+    }
+
+    /// **The version this start read**, reading it from the bytes once and keeping only it.
+    fn version(&mut self) -> Option<u32> {
+        let version = match &self.read {
+            StartRead::Bytes(bytes) => bt_persist::schema_version_of(bytes),
+            StartRead::Version(version) => *version,
+        };
+        self.read = StartRead::Version(version);
+        version
+    }
+}
 
 /// **What each document's store read at this start** ([`OpenedDocument`]). Written by each
-/// store's `open` on the window thread — an `Arc` clone under a lock, nothing read — before the
-/// start begins the carry pass; read by the pass's worker.
+/// store's `open` on the window thread — an `Arc` clone or a name under a lock, nothing read —
+/// before the start begins the carry pass; read, and its versions and answers kept, by the
+/// pass's worker.
 static OPENED_AT_START: Mutex<Vec<OpenedDocument>> = Mutex::new(Vec::new());
 
-/// **A store's open says what it read** ([`OPENED_AT_START`]).
+/// `document`'s entry in `opened`, made when there is none.
+fn opened_entry(opened: &mut Vec<OpenedDocument>, document: KeptDocument) -> &mut OpenedDocument {
+    let index = match opened.iter().position(|entry| entry.document == document) {
+        Some(index) => index,
+        None => {
+            opened.push(OpenedDocument::read(document, None));
+            opened.len() - 1
+        }
+    };
+    &mut opened[index]
+}
+
+/// **A store's open says what it read** ([`OPENED_AT_START`]); a refusal it noted stays.
 pub(crate) fn note_opened_document(document: KeptDocument, bytes: Option<Arc<[u8]>>) {
     let mut opened = OPENED_AT_START
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    opened.retain(|(noted, _)| *noted != document);
-    opened.push((document, bytes));
+    opened_entry(&mut opened, document).read =
+        bytes.map_or(StartRead::Version(None), StartRead::Bytes);
+}
+
+/// **A store's open refused a file newer than this build and kept it as `copy`** (row 68d, R4):
+/// the member says so once ([`newer_refusal_to_say`]); the start raises nothing for it.
+pub(crate) fn note_refused_newer(document: KeptDocument, copy: String) {
+    let mut opened = OPENED_AT_START
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let entry = opened_entry(&mut opened, document);
+    entry.refused_newer = Some(copy);
+    entry.refusal_answered = false;
+}
+
+/// **A round's reading of the cell kept**: each document's version in place of its bytes, and
+/// the answers given, for an entry whose refusal is still the one the round read.
+fn settle_opened(read: &[OpenedDocument]) {
+    let mut opened = OPENED_AT_START
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    for after in read {
+        if let Some(entry) = opened
+            .iter_mut()
+            .find(|entry| entry.document == after.document)
+        {
+            if let (StartRead::Bytes(_), StartRead::Version(version)) = (&entry.read, &after.read) {
+                entry.read = StartRead::Version(*version);
+            }
+            if entry.refused_newer == after.refused_newer {
+                entry.refusal_answered |= after.refusal_answered;
+            }
+        }
+    }
 }
 
 /// One copy found: its document, where it stands, its name and path, and its length.
@@ -189,6 +298,10 @@ pub(crate) struct CopiesRetired {
     pub(crate) removed: Vec<String>,
     pub(crate) left: Vec<(String, io::ErrorKind)>,
     pub(crate) held: bool,
+    /// This start's refusal of a newer file, when it is said now (row 68d, R4).
+    pub(crate) said: Option<NewerKept>,
+    /// The copy a newer build could bring back, offered (row 68d, R5).
+    pub(crate) offered: Option<CopyOffered>,
 }
 
 impl CopiesRetired {
@@ -209,6 +322,15 @@ impl CopiesRetired {
         for (name, kind) in &self.left {
             lines.push(format!(
                 "BT_REJECTED_COPIES {document} left {name} ({kind:?})"
+            ));
+        }
+        if let Some(said) = &self.said {
+            lines.push(format!("BT_REJECTED_COPIES {document} said {}", said.copy));
+        }
+        if let Some(offered) = &self.offered {
+            lines.push(format!(
+                "BT_REJECTED_COPIES {document} offered {} v{} over v{}",
+                offered.copy, offered.copy_version, offered.file_version
             ));
         }
         lines
@@ -243,12 +365,12 @@ impl<D: FnOnce(Writer) -> bool> CopiesGate<D> {
 /// build reads stands above it, so the ordinary start reads nothing.
 fn copy_a_newer_build_can_bring_back(
     document: KeptDocument,
-    start: Option<&[u8]>,
+    start: Option<u32>,
     copies: &[FoundCopy],
     bytes: &mut [Option<Option<Vec<u8>>>],
 ) -> Option<usize> {
     let current = document.current_version()?;
-    let start = bt_persist::schema_version_of(start?)?;
+    let start = start?;
     if start >= current {
         return None;
     }
@@ -280,6 +402,35 @@ fn copy_only_a_newer_build_reads(
                 .and_then(bt_persist::schema_version_of),
         };
         version.is_some_and(|version| version > current)
+    })
+}
+
+/// **The notice this start's refusal of a newer file owes**, once a process (row 68d, R4): the
+/// copy the start kept, unless another copy of the document holds the same bytes — then the
+/// refusal was said when that copy was made, and the older of the two goes as a duplicate. The
+/// entry is answered either way, so a later round of this process says nothing; a copy no longer
+/// there (removed by hand) is answered with nothing to say.
+fn newer_refusal_to_say(
+    entry: &mut OpenedDocument,
+    copies: &[FoundCopy],
+    bytes: &mut [Option<Option<Vec<u8>>>],
+) -> Option<NewerKept> {
+    if entry.refusal_answered {
+        return None;
+    }
+    let name = entry.refused_newer.clone()?;
+    entry.refusal_answered = true;
+    let kept = copies.iter().position(|copy| copy.name == name)?;
+    let kept_bytes = copy_bytes(copies, bytes, kept)?.to_vec();
+    let said_before = (0..copies.len()).any(|other| {
+        other != kept
+            && copies[other].length == copies[kept].length
+            && copy_bytes(copies, bytes, other) == Some(kept_bytes.as_slice())
+    });
+    (!said_before).then(|| NewerKept {
+        document: entry.document,
+        copy: name,
+        path: copies[kept].path.clone(),
     })
 }
 
@@ -354,14 +505,15 @@ fn copies_to_retire(
 }
 
 /// **One round of the retirement over `folder`** — the data folder's, or a test's own: each
-/// document's copies listed, judged ([`copies_to_retire`], against `opened`, what each store read
-/// at this start), and removed through `remove`, the duplicates then the rest, oldest first, the
-/// trial's gate allowing. One answer per document that has copies; an error when the folder would
-/// not list. On a worker: the carry pass's.
+/// document's copies listed, its notice and its offer decided (row 68d), judged
+/// ([`copies_to_retire`], against `opened`, what each store read at this start), and removed
+/// through `remove`, the duplicates then the rest, oldest first, the trial's gate allowing. One
+/// answer per document that has copies; an error when the folder would not list. `opened` keeps
+/// the versions read and the notices answered. On a worker: the carry pass's.
 pub(crate) fn retire_rejected_copies(
     worker: &WorkerCtx,
     folder: &Path,
-    opened: &[OpenedDocument],
+    opened: &mut [OpenedDocument],
     defer: impl FnOnce(Writer) -> bool,
     remove: &mut dyn FnMut(&Path) -> io::Result<()>,
 ) -> Result<Vec<CopiesRetired>, io::ErrorKind> {
@@ -382,11 +534,21 @@ pub(crate) fn retire_rejected_copies(
             continue;
         }
         let mut bytes = vec![None; copies.len()];
-        let start = opened
-            .iter()
-            .find(|(noted, _)| *noted == document)
-            .and_then(|(_, bytes)| bytes.as_deref());
+        let mut entry = opened.iter_mut().find(|entry| entry.document == document);
+        let start = entry.as_mut().and_then(|entry| entry.version());
+        let said = entry.and_then(|entry| newer_refusal_to_say(entry, &copies, &mut bytes));
         let protected = copy_a_newer_build_can_bring_back(document, start, &copies, &mut bytes);
+        let offered = protected.and_then(|index| {
+            let held: Arc<[u8]> = Arc::from(copy_bytes(&copies, &mut bytes, index)?);
+            Some(CopyOffered {
+                document,
+                copy: copies[index].name.clone(),
+                path: copies[index].path.clone(),
+                copy_version: bt_persist::schema_version_of(&held)?,
+                file_version: start?,
+                bytes: held,
+            })
+        });
         let fate = copies_to_retire(&copies, &mut bytes, protected, document.current_version());
         let mut answer = CopiesRetired {
             document,
@@ -394,6 +556,8 @@ pub(crate) fn retire_rejected_copies(
             removed: Vec::new(),
             left: Vec::new(),
             held: false,
+            said,
+            offered,
         };
         'phases: for phase in [CopyRetirement::Duplicate, CopyRetirement::BeyondKept] {
             // Oldest first: the copies are newest first.
@@ -428,29 +592,44 @@ static REJECTED_COPIES_SAID: OrphansSaid = OrphansSaid::new();
 
 /// **The retirement as the pass's part**: `None` unless this process writes the data folder
 /// (`writer`, the rescue card's rule: two processes over one folder never both retire); else one
-/// round over `folder`, its lines said through `said` when they changed.
+/// round over `folder`, its lines said through `said` when they changed, and the window's part —
+/// the notices and the offer (row 68d) — answered.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rejected_copies_member(
     worker: &WorkerCtx,
     writer: bool,
     folder: &Path,
-    opened: &[OpenedDocument],
+    opened: &mut [OpenedDocument],
     defer: impl FnOnce(Writer) -> bool,
     remove: &mut dyn FnMut(&Path) -> io::Result<()>,
     said: &OrphansSaid,
     say: &dyn Fn(String),
-) -> Option<MemberAnswer<()>> {
+) -> Option<MemberAnswer<CopyBackAnswer>> {
     if !writer {
         return None;
     }
+    let mut part = CopyBackAnswer::default();
     let lines = match retire_rejected_copies(worker, folder, opened, defer, remove) {
-        Ok(answers) => answers
-            .iter()
-            .flat_map(CopiesRetired::copies_lines)
-            .collect(),
+        Ok(answers) => {
+            for answer in &answers {
+                part.notices.extend(answer.said.clone());
+                part.offer.extend(answer.offered.clone());
+            }
+            answers
+                .iter()
+                .flat_map(CopiesRetired::copies_lines)
+                .collect()
+        }
         Err(kind) => vec![format!("BT_REJECTED_COPIES unlisted ({kind:?})")],
     };
-    Some(said.lines_answer(lines, say))
+    let MemberAnswer {
+        checks, changed, ..
+    } = said.lines_answer(lines, say);
+    Some(MemberAnswer {
+        part,
+        checks,
+        changed,
+    })
 }
 
 /// **The retirement, as a member of the start's carry pass**
@@ -459,24 +638,26 @@ pub(crate) fn rejected_copies_member(
 ///
 /// Nothing in a test process, whose pass must never read or remove the account's copies — the
 /// tests drive [`rejected_copies_member`] over folders of their own.
-pub(crate) fn run_rejected_copies_step(ctx: &WorkerCtx) -> Option<MemberAnswer<()>> {
+pub(crate) fn run_rejected_copies_step(ctx: &WorkerCtx) -> Option<MemberAnswer<CopyBackAnswer>> {
     if cfg!(test) {
         return None;
     }
-    let opened = OPENED_AT_START
+    let mut opened = OPENED_AT_START
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .clone();
-    rejected_copies_member(
+    let answer = rejected_copies_member(
         ctx,
         crate::persist::is_storage_writer(),
         &crate::persist::storage_dir(),
-        &opened,
+        &mut opened,
         crate::update_trial::defer,
         &mut |path| std::fs::remove_file(path),
         &REJECTED_COPIES_SAID,
         &crate::diagnostics::stderr_line,
-    )
+    );
+    settle_opened(&opened);
+    answer
 }
 
 #[cfg(test)]

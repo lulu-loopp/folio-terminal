@@ -48,13 +48,14 @@
 //! runs the members asked for once more before it ends ([`begin_carry_pass_with`]); each moment
 //! asks for the members its ruling names ([`CarryAsk`], row 68b, R2).
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use bt_platform::admission::WorkerCtx;
 
 use crate::agent_hooks_step::HooksSnapshot;
 use crate::context_menu::ClassicAnswer;
+use crate::copy_back::CopyBackAnswer;
 use crate::start_at_sign_in::SignInAnswer;
 use crate::update_trial::Writer;
 
@@ -329,20 +330,22 @@ pub(crate) struct CarryRound {
     pub(crate) homes: Option<MemberAnswer<()>>,
     /// The sign-in entry (row 22a): the row's answer.
     pub(crate) sign_in: Option<MemberAnswer<SignInAnswer>>,
-    /// The data folder's refused copies (row 68f): counted, nothing for the window.
-    pub(crate) rejected_copies: Option<MemberAnswer<()>>,
+    /// The data folder's refused copies (row 68f), and what the window says and offers of them
+    /// (row 68d).
+    pub(crate) rejected_copies: Option<MemberAnswer<CopyBackAnswer>>,
     /// Folio's old `$PROFILE` lines (row 68c): counted in the round's line, nothing for the window.
     pub(crate) profile_lines: Option<MemberAnswer<()>>,
 }
 
 /// **What the window adopts**: the newest part of every member, kept until the window takes it.
 /// `explorer` is the Explorer members' part: the classic verb's answer (row 68b); `sign_in` the
-/// sign-in entry's (row 22a).
+/// sign-in entry's (row 22a); `copy_back` the refused copies' notices and offer (row 68d).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CarrySnapshot {
     pub(crate) hooks: Option<HooksSnapshot>,
     pub(crate) explorer: Option<ClassicAnswer>,
     pub(crate) sign_in: Option<SignInAnswer>,
+    pub(crate) copy_back: Option<CopyBackAnswer>,
 }
 
 /// One member's part of a round's line: how many checks it ran and how many said something new.
@@ -354,12 +357,13 @@ fn member_tally<T>(answer: Option<&MemberAnswer<T>>) -> (usize, usize) {
 /// members its ruling names, so an Agents-page open asks no deployment database and a trial's
 /// release of the Explorer writer runs no agent's scan; the start asks for all of them.
 ///
-/// **One bit per member**, all eight taken: a part that adds a member widens the set to a `u16`,
-/// adds its bit here, joins it into [`Self::ALL`], and names it at the asks its ruling gives (row
-/// 68c's profile lines were the fifth, row 68e's update homes the sixth, row 22a's sign-in entry
-/// the seventh, row 68f's refused copies the eighth).
+/// **One bit per member**, eight of sixteen taken: a part that adds a member adds its bit here,
+/// joins it into [`Self::ALL`], and names it at the asks its ruling gives (row 68c's profile lines
+/// were the fifth, row 68e's update homes the sixth, row 22a's sign-in entry the seventh, row
+/// 68f's refused copies the eighth; row 68d widened the set from a `u8`, which those eight
+/// filled).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CarryAsk(u8);
+pub(crate) struct CarryAsk(u16);
 
 impl CarryAsk {
     /// The agents' hooks ([`crate::agent_hooks_step`]).
@@ -549,10 +553,17 @@ impl CarryPublished {
         // sign-in answer (row 22a).
         let explorer = classic.map(|answer| answer.part).or(untaken.explorer);
         let sign_in = sign_in.map(|answer| answer.part).or(untaken.sign_in);
+        // The refused copies' notices are owed until taken; the offer is the newer round's (row
+        // 68d).
+        let copy_back = match rejected_copies {
+            Some(answer) => Some(answer.part.keeping_untaken(untaken.copy_back)),
+            None => untaken.copy_back,
+        };
         *published = Some(CarrySnapshot {
             hooks,
             explorer,
             sign_in,
+            copy_back,
         });
         Some(format!("BT_CARRY round checks={checks} changed={changed}"))
     }
@@ -740,7 +751,7 @@ pub(crate) fn begin_carry_at_start() -> CarryBegun {
 /// run the agents' hooks on settled folders (row 68c: the `$PROFILE` lines wait for that).
 pub(crate) struct CarryLatch {
     running: AtomicBool,
-    again: AtomicU8,
+    again: AtomicU16,
     hooks_answered: AtomicBool,
 }
 
@@ -748,7 +759,7 @@ impl CarryLatch {
     pub(crate) const fn new() -> Self {
         Self {
             running: AtomicBool::new(false),
-            again: AtomicU8::new(0),
+            again: AtomicU16::new(0),
             hooks_answered: AtomicBool::new(false),
         }
     }
@@ -1158,7 +1169,7 @@ mod tests {
         // The refused copies' part alone is a round (row 68f): counted, and published.
         let line = published.publish(CarryRound {
             rejected_copies: Some(MemberAnswer {
-                part: (),
+                part: CopyBackAnswer::default(),
                 checks: 1,
                 changed: 1,
             }),

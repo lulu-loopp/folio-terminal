@@ -1909,6 +1909,11 @@ mod tests {
                 "FolioApp::adopt_carry_snapshot",
                 method_body("FolioApp", "adopt_carry_snapshot"),
             ),
+            // Its work, over the snapshot it took (row 68d).
+            (
+                "FolioApp::adopt_carried",
+                method_body("FolioApp", "adopt_carried"),
+            ),
             (
                 "adopt_agent_hooks_snapshot",
                 free_fn_body("adopt_agent_hooks_snapshot"),

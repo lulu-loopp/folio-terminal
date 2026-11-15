@@ -450,6 +450,35 @@ text_entries! {
     UninstallCardUninstall,
     UninstallCardCancel,
 
+    // ── a newer Folio's documents, said and offered back (0.4.10 plan row 68d) ──
+    /// The older build's notice (0.4.10 plan row 68d, R4): `{what}` the document's noun, `{copy}` the
+    /// kept copy's name.
+    NewerDocumentKept,
+    /// The layout, as the notice and the offer name it (row 68d).
+    SavedWindowsAndTabs,
+    /// `settings.json`, as they name it.
+    SavedSettings,
+    /// `keybindings.json`, as they name it.
+    SavedShortcuts,
+    /// `profiles.json`, as they name it.
+    SavedProfiles,
+    /// `pins.json`, as they name it.
+    SavedPins,
+    /// The newer build's offer (row 68d, R6): `{what}` the offered documents' nouns, joined.
+    CopyBackHeading,
+    /// Its sentence.
+    CopyBackSub,
+    /// Its first verb.
+    CopyBackBringBack,
+    /// Its second verb.
+    CopyBackKeepCurrent,
+    /// A Bring back over a file changed since the start read it: nothing written; `{what}`, `{copy}`.
+    CopyBackChangedSince,
+    /// A Bring back refused: `{what}`, `{reason}`, `{copy}`.
+    CopyBackNotBrought,
+    /// The reason when the file a Bring back would replace could not be kept as a copy.
+    CopyBackNotKept,
+
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
     PastePathEncoding,
     PastePathControl,
@@ -5701,6 +5730,81 @@ impl Text {
             ),
             Self::UninstallCardUninstall => pick(lang, "Uninstall", "卸载"),
             Self::UninstallCardCancel => pick(lang, "Cancel", "取消"),
+            Self::NewerDocumentKept => pick(
+                lang,
+                "This Folio is older than the one that last saved your {what}. They are kept in {copy}.",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "This Folio is older than the one that last saved your {what}. They are kept in {copy}.",
+            ),
+            Self::SavedWindowsAndTabs => pick(
+                lang,
+                "windows and tabs",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "windows and tabs",
+            ),
+            Self::SavedSettings => pick(
+                lang, "settings",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "settings",
+            ),
+            Self::SavedShortcuts => pick(
+                lang,
+                "shortcuts",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "shortcuts",
+            ),
+            Self::SavedProfiles => pick(
+                lang, "profiles",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "profiles",
+            ),
+            Self::SavedPins => pick(
+                lang, "pins",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "pins",
+            ),
+            Self::CopyBackHeading => pick(
+                lang,
+                "Bring back your newer {what}?",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "Bring back your newer {what}?",
+            ),
+            Self::CopyBackSub => pick(
+                lang,
+                "An older Folio replaced them. What you have now is kept as a copy.",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "An older Folio replaced them. What you have now is kept as a copy.",
+            ),
+            Self::CopyBackBringBack => pick(
+                lang,
+                "Bring back",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "Bring back",
+            ),
+            Self::CopyBackKeepCurrent => pick(
+                lang,
+                "Keep current",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "Keep current",
+            ),
+            Self::CopyBackChangedSince => pick(
+                lang,
+                "Your {what} changed after this Folio started, so the newer ones were not brought back. They are still kept in {copy}.",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "Your {what} changed after this Folio started, so the newer ones were not brought back. They are still kept in {copy}.",
+            ),
+            Self::CopyBackNotBrought => pick(
+                lang,
+                "Your newer {what} could not be brought back: {reason}. They are still kept in {copy}.",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "Your newer {what} could not be brought back: {reason}. They are still kept in {copy}.",
+            ),
+            Self::CopyBackNotKept => pick(
+                lang,
+                "the file it would replace could not be kept as a copy",
+                // zh: pending T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK
+                "the file it would replace could not be kept as a copy",
+            ),
             Self::CleanupRemoved => pick(lang, "removed", "已移除"),
             Self::CleanupAbsent => pick(lang, "not present", "不存在"),
             Self::CleanupLeft => pick(
@@ -6961,7 +7065,34 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        (Self::NewerDocumentKept, HostPlatform::Windows),
+        (Self::NewerDocumentKept, HostPlatform::MacOs),
+        (Self::SavedWindowsAndTabs, HostPlatform::Windows),
+        (Self::SavedWindowsAndTabs, HostPlatform::MacOs),
+        (Self::SavedSettings, HostPlatform::Windows),
+        (Self::SavedSettings, HostPlatform::MacOs),
+        (Self::SavedShortcuts, HostPlatform::Windows),
+        (Self::SavedShortcuts, HostPlatform::MacOs),
+        (Self::SavedProfiles, HostPlatform::Windows),
+        (Self::SavedProfiles, HostPlatform::MacOs),
+        (Self::SavedPins, HostPlatform::Windows),
+        (Self::SavedPins, HostPlatform::MacOs),
+        (Self::CopyBackHeading, HostPlatform::Windows),
+        (Self::CopyBackHeading, HostPlatform::MacOs),
+        (Self::CopyBackSub, HostPlatform::Windows),
+        (Self::CopyBackSub, HostPlatform::MacOs),
+        (Self::CopyBackBringBack, HostPlatform::Windows),
+        (Self::CopyBackBringBack, HostPlatform::MacOs),
+        (Self::CopyBackKeepCurrent, HostPlatform::Windows),
+        (Self::CopyBackKeepCurrent, HostPlatform::MacOs),
+        (Self::CopyBackChangedSince, HostPlatform::Windows),
+        (Self::CopyBackChangedSince, HostPlatform::MacOs),
+        (Self::CopyBackNotBrought, HostPlatform::Windows),
+        (Self::CopyBackNotBrought, HostPlatform::MacOs),
+        (Self::CopyBackNotKept, HostPlatform::Windows),
+        (Self::CopyBackNotKept, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

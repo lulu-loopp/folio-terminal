@@ -142,6 +142,54 @@ pub(crate) fn uninstall_paint(remove_data: bool) -> Paint<UninstallVerb> {
     }
 }
 
+/// **A button on the copy-back card** (0.4.10 plan row 68d, R6): the newer build's offer of the
+/// documents an older build replaced. Two drawn verbs; the third is what `Escape` and the `×`
+/// are, and it is never drawn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CopyBackVerb {
+    /// Bring the newer documents back (R7).
+    BringBack,
+    /// Keep what this start read, written at this build's version (R8).
+    KeepCurrent,
+    /// Not now: nothing is written, and the next start asks again — the update card's Later.
+    NotNow,
+}
+
+impl Verbs for CopyBackVerb {
+    fn text(self) -> &'static str {
+        match self {
+            Self::BringBack => Text::CopyBackBringBack,
+            Self::KeepCurrent => Text::CopyBackKeepCurrent,
+            Self::NotNow => Text::UpdateCardLater,
+        }
+        .text()
+    }
+
+    /// *Bring back*, what the card was raised for; the ring is not lit when the card rises, so
+    /// `Enter` presses nothing until a key has lit it ([`Card`]).
+    fn recommended(verbs: &[Self]) -> Option<Self> {
+        verbs.iter().copied().find(|verb| *verb == Self::BringBack)
+    }
+
+    /// Not now: the `×` and `Escape` write nothing.
+    fn put_away() -> Self {
+        Self::NotNow
+    }
+}
+
+/// **What the copy-back card says** (row 68d, R6): the heading naming every offered document
+/// ([`crate::copy_back::offer_heading`]), the sentence, and the two verbs, *Bring back* first.
+#[must_use]
+pub(crate) fn copy_back_paint(heading: String) -> Paint<CopyBackVerb> {
+    Paint {
+        heading: Some(heading),
+        bar: None,
+        detail: Some(Text::CopyBackSub.text().to_owned()),
+        folder: None,
+        verbs: vec![CopyBackVerb::BringBack, CopyBackVerb::KeepCurrent],
+    }
+}
+
 impl CardVerb {
     /// The word on the button.
     #[must_use]
