@@ -349,6 +349,85 @@ fn a_copy_a_newer_build_can_bring_back_is_never_removed() {
     });
 }
 
+/// RED (0.4.10 plan row 68f, review N1 and N2) — **each document's protected copy is read by its
+/// own parser**: for each of the five documents a store opens, of five copies — three above this
+/// build, then two holding the document's default as its own `serialize_*` writes it — the newer of
+/// the two is kept as the fourth when the start read the version before this build's; and a start
+/// at this build's own version answers that no copy is protected without reading one.
+///
+/// MUTATION: one document's arm of `this_build_reads` calls another document's parser
+/// (`plant-68f-wrong-parser.py`).
+#[test]
+fn each_documents_protected_copy_is_read_by_its_own_parser() {
+    copies_on_a_worker(|worker| {
+        let documents = [
+            (
+                KeptDocument::Session,
+                bt_persist::serialize_session(&bt_persist::SessionV1::default()).unwrap(),
+            ),
+            (
+                KeptDocument::Settings,
+                bt_persist::serialize_settings(&bt_persist::SettingsV1::default()).unwrap(),
+            ),
+            (
+                KeptDocument::Keybindings,
+                bt_persist::serialize_keybindings(&bt_persist::KeybindingsV1::default()).unwrap(),
+            ),
+            (
+                KeptDocument::Profiles,
+                bt_persist::serialize_profiles(&bt_persist::ProfilesV1::default()).unwrap(),
+            ),
+            (
+                KeptDocument::Pins,
+                bt_persist::serialize_pins(&bt_persist::PinsV1::default()).unwrap(),
+            ),
+        ];
+        for (document, readable) in documents {
+            let name = document.kept_file_name();
+            let current = document.current_version().unwrap();
+            let future = |n: u32| format!("{{\"schema_version\":{},\"n\":{n}}}", current + 1);
+            let folder = copies_scratch("own-parser");
+            let older_readable = copy_written(&folder, name, 1, 0, &readable);
+            let mut newer = readable.clone();
+            newer.extend_from_slice(b"\n");
+            let brought_back = copy_written(&folder, name, 2, 0, &newer);
+            for day in 3..=5 {
+                copy_written(&folder, name, day, 0, future(day).as_bytes());
+            }
+            let older_start: Arc<[u8]> =
+                Arc::from(format!("{{\"schema_version\":{}}}", current - 1).as_bytes());
+            let opened = [(document, Some(older_start))];
+            let retired =
+                retire_rejected_copies(worker, &folder, &opened, |_| false, &mut |path| {
+                    std::fs::remove_file(path)
+                })
+                .unwrap();
+            assert_eq!(
+                retired[0].removed,
+                [older_readable],
+                "{name}: the newest copy its own parser reads, above the start's version, is kept"
+            );
+            assert!(
+                folder.join(&brought_back).is_file(),
+                "{name}: kept as the fourth"
+            );
+            assert_eq!(retired[0].kept, 4, "{name}");
+
+            let copies = rejected_copies_listed(worker, &folder).unwrap();
+            let mut bytes = vec![None; copies.len()];
+            assert_eq!(
+                copy_a_newer_build_can_bring_back(document, Some(&readable), &copies, &mut bytes),
+                None,
+                "{name}: nothing stands above this build's own version"
+            );
+            assert!(
+                bytes.iter().all(Option::is_none),
+                "{name}: a start at this build's version reads no copy"
+            );
+        }
+    });
+}
+
 /// RED (0.4.10 plan row 68f, R1) — **during an update's trial nothing is removed**: the gate is
 /// asked once for `Writer::RefusedCopies` when removals are due across two documents, holds them
 /// all, and says so; the commit's round removes them; a round with nothing due asks no gate.
