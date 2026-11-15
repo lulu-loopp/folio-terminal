@@ -5744,7 +5744,7 @@ impl Text {
             Self::NewerDocumentKept => pick(
                 lang,
                 "This Folio is older than the one that last saved your {what}. They are kept in {copy}.",
-                "你的{what}上次由较新版本的 Folio 保存，已保留在 {copy} 中。",
+                "这个 Folio 版本较旧，你的{what}上次由较新版本保存，已保留在 {copy} 中。",
             ),
             Self::SavedWindowsAndTabs => pick(lang, "windows and tabs", "窗口和标签页"),
             Self::SavedSettings => pick(lang, "settings", "设置"),
@@ -5775,7 +5775,7 @@ impl Text {
             Self::CopyBackChangedSince => pick(
                 lang,
                 "Your {what} changed after this Folio started, so the newer ones were not brought back. They are still kept in {copy}.",
-                "本次启动后，你的{what}有了改动，因此未找回。较新的{what}仍保留在 {copy} 中。",
+                "本次启动后，你的{what}已有改动，因此未找回。较新的{what}仍保留在 {copy} 中。",
             ),
             Self::CopyBackNotBrought => pick(
                 lang,
