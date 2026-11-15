@@ -256,12 +256,16 @@ pub(crate) fn serve_copy_back(worker: &WorkerCtx, job: &crate::copy_back::CopyBa
         .send(copy_back(worker, job, &bt_persist::keep_beside_as_rejected));
 }
 
+/// **What keeps the older build's write beside the file** before a Bring back writes over it, on
+/// the storage worker: where it went, or `None` when it could not be kept.
+type BringBackKeeper = dyn Fn(&WorkerCtx, &Path, &[u8]) -> Option<PathBuf>;
+
 /// [`serve_copy_back`]'s answer, with what keeps the older build's write handed in (`keep`,
 /// `bt_persist::keep_beside_as_rejected` in the product), so a test sees a keep that fails.
 fn copy_back(
     worker: &WorkerCtx,
     job: &crate::copy_back::CopyBackJob,
-    keep: &dyn Fn(&WorkerCtx, &Path, &[u8]) -> Option<PathBuf>,
+    keep: &BringBackKeeper,
 ) -> crate::copy_back::CopyBackDone {
     use crate::copy_back::CopyBackDone;
     match precondition(
