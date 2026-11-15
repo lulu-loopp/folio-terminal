@@ -737,6 +737,48 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-test-globals-tests.ps1
 
+      # The document key-set register (0.4.10 plan row 68d) is held to the merge base's row by
+      # row, so the plants are made of the merge base's own rows: one edited in place (a key added
+      # to its shape) and one removed, each required to be refused for its reason. A row of the
+      # merge base that this checkout still has is the subject. The change that brings the
+      # register has no base rows to plant against, so there the plants are held to this
+      # checkout's HEAD instead, whose register is every later change's base. No cargo.
+      - name: the document-key register can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/DOCUMENT-KEYS.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          $base = (git merge-base HEAD origin/main)
+          if (-not $base) { throw "no merge base with origin/main to size the plants against" }
+          $ref = "origin/main"
+          $then = (git show "${base}:$file" 2>$null) -join "`n"
+          if ($LASTEXITCODE -ne 0) {
+            $ref = "HEAD"
+            $then = (git show "HEAD:$file") -join "`n"
+          }
+          $held = @($then -split "`r?`n" | Where-Object { $_ -and -not $_.StartsWith("#") -and -not $_.StartsWith("document`t") })
+          $row = @($held | Where-Object { $original.Contains("`n$_`n") })[0]
+          if (-not $row) { throw "the register has no row of $ref's merge base to plant against" }
+          $cells = $row -split "`t"
+          $cells[3] = $cells[3].Substring(0, $cells[3].Length - 1) + "pubplanted:bool,}"
+          $plants = @(
+            @{ text = $original.Replace("`n$row`n", "`n" + ($cells -join "`t") + "`n"); want = "edited in place"; what = "a key added to a row in place" },
+            @{ text = $original.Replace("`n$row`n", "`n"); want = "removed: the merge base's row"; what = "a row removed" }
+          )
+          try {
+            foreach ($plant in $plants) {
+              [IO.File]::WriteAllText($file, $plant.text)
+              $said = & ./scripts/ci/check-document-keys.ps1 -MainRef $ref *>&1 | Out-String
+              if ($LASTEXITCODE -ne 1 -or $said -notmatch [regex]::Escape($plant.want)) {
+                throw "the document-key register did not refuse $($plant.what) (exit $LASTEXITCODE):`n$said"
+              }
+              Write-Host "refused, as planted: $($plant.what)"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
       # The PSReadLine artefact gate holds the vendored package, its README, the build script's
       # pinned table and Folio's manifest to one another (T-INTEGRATION-INJECT-2-BUILD). Its
       # scratch-copy suite moves each pin alone, and puts a `.psm1` and a `FormatsToProcess`
@@ -1620,6 +1662,18 @@ jobs:
         run: |
           ./scripts/ci/check-request-door-sites-tests.ps1
           ./scripts/ci/check-request-door-sites.ps1
+
+      # 0.4.10 plan row 68d (R9): the persisted documents' key sets, per version. bt-persist's
+      # `document_keys_tests` and bt-app's `the_integration_records_keep_their_keys` (the suite
+      # above) hold each document's rows of docs/plans/DOCUMENT-KEYS.tsv at its current version to
+      # the source, and this holds the register to the merge base's: no row edited or removed, and
+      # a new row only at a version above its document's highest there. Its scratch-repository
+      # suite runs first, one case per rule.
+      - name: the document key sets change only at a new version
+        shell: pwsh
+        run: |
+          ./scripts/ci/check-document-keys-tests.ps1
+          ./scripts/ci/check-document-keys.ps1
 
       # T-HEADLESS-RUNTIME-SEAM: the places bt-app names a backend holder for the
       # native backend are listed, and the list is held to the merge base's (or
