@@ -180,8 +180,10 @@ fn copies_beyond_the_newest_three_are_removed_oldest_first() {
 
 /// RED (0.4.10 plan row 68f, R3) — **only the names the namer gives, on plain files, are
 /// counted**: a copy name with a date that does not exist, another word after the stamp, the
-/// storage worker's `.displaced-` copy, a name close to a document's, a folder with a copy's
-/// name, and on Unix a link with one are never removed and never counted among the three.
+/// storage worker's `.displaced-` copy, a name close to a document's, and a folder with a copy's
+/// name are never removed and never counted among the three. (A link is refused by the shared
+/// `bt_platform::cleanup::is_link`, beside the plain-file test; a test making one would decide
+/// its platform, which only the listed files may.)
 ///
 /// MUTATION: the stamp's date and time are not checked, so a copy name with a day that does not
 /// exist is counted (`plant-68f-any-name-counted.py`, with `bt_persist`'s half).
@@ -210,12 +212,6 @@ fn only_folios_own_copy_names_are_counted() {
             std::fs::write(folder.join(stranger), b"not ours").unwrap();
         }
         std::fs::create_dir(folder.join("settings.json.rejected-20261102-000001")).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            folder.join("settings.json.rejected-20261101-000000"),
-            folder.join("settings.json.rejected-20261102-000002"),
-        )
-        .unwrap();
         let before = names_in(&folder);
         let retired =
             retire_rejected_copies(worker, &folder, &[], copies_gate_never_asked, &mut |path| {
