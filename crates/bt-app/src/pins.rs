@@ -212,14 +212,18 @@ impl PinsStore {
         // §5.4 case 1 — no file — is the ordinary state of a machine where
         // nobody has pinned anything, and must not alert. Everything else must,
         // naming the file (§5.3).
-        let fault =
-            crate::persist::read_fault(&report, PINS_FILE_NAME, crate::i18n::pins_file_unreadable);
         // **The directory this file is in, and no other** — see
         // `crate::persist::is_writer_of`. Asking `is_storage_writer` here made
         // the answer a fact about `%APPDATA%\Folio` whatever path this store was
         // handed, which is a question about a directory a store opened anywhere
         // else never touches.
         let writer_of_record = crate::persist::is_writer_of_document(&path);
+        let fault = crate::persist::read_fault(
+            &report,
+            PINS_FILE_NAME,
+            writer_of_record,
+            crate::i18n::pins_file_unreadable,
+        );
         Self {
             document: DocumentState::opened(
                 PINS_FILE_NAME,

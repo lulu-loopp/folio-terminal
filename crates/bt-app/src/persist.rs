@@ -249,16 +249,36 @@ impl<T: PartialEq> Revision<T> {
 /// parameter because a sentence that called all six "the defaults" would be the
 /// vaguest of the six everywhere.
 ///
-/// **Except a file newer than this build, kept as a copy** (0.4.10 plan row 68d, R4): the
-/// refusal is noted for the carry pass's refused copies
+/// **Except a file newer than this build, kept as a copy, in the data folder's writer** (0.4.10
+/// plan row 68d, R4; review N6): the refusal is noted for the carry pass's refused copies
 /// ([`crate::rejected_copies::note_refused_newer`]), which says it once — the copies are the
-/// memory — and the start raises nothing for it. The log line stays. A newer file with no copy
-/// kept (a trial owes it, or the keeping failed) keeps the sentence: with no copy there is
-/// nothing to remember it by.
+/// memory — and the start raises nothing for it ([`newer_refusal_to_note`]). The log line
+/// stays. A newer file with no copy kept (a trial owes it, or the keeping failed) keeps the
+/// sentence: with no copy there is nothing to remember it by. So does a process that is not the
+/// writer, whose carry pass says nothing.
 pub(crate) fn read_fault(
     report: &ReadReport,
     file: &str,
+    writer: bool,
     in_force: impl FnOnce(&str) -> String,
+) -> Option<String> {
+    read_fault_noting(
+        report,
+        file,
+        writer,
+        in_force,
+        crate::rejected_copies::note_refused_newer,
+    )
+}
+
+/// [`read_fault`], with what notes a newer file's refusal handed in (`note`), so a test sees
+/// the note without the process's cell.
+fn read_fault_noting(
+    report: &ReadReport,
+    file: &str,
+    writer: bool,
+    in_force: impl FnOnce(&str) -> String,
+    note: impl FnOnce(crate::rejected_copies::KeptDocument, String),
 ) -> Option<String> {
     let ReadReport::FellBackToDefaults { reason, kept } = report else {
         return None;
@@ -272,10 +292,10 @@ pub(crate) fn read_fault(
             .to_string_lossy()
             .into_owned()
     });
-    if let (FallbackReason::FutureSchemaVersion { .. }, Some(copy)) = (reason, &kept_name)
-        && let Some(document) = crate::rejected_copies::KeptDocument::live_named(file)
+    if let Some((document, copy)) =
+        newer_refusal_to_note(reason, kept_name.as_deref(), file, writer)
     {
-        crate::rejected_copies::note_refused_newer(document, copy.clone());
+        note(document, copy);
         return None;
     }
     let sentence = in_force(file);
@@ -283,6 +303,27 @@ pub(crate) fn read_fault(
         Some(kept) => crate::i18n::persisted_file_kept_copy(&sentence, &kept),
         None => sentence,
     })
+}
+
+/// **Which refusal the start leaves to the carry pass's refused copies** (0.4.10 plan row 68d,
+/// R4; review N1, N6): a file newer than this build (`FutureSchemaVersion`) of one of the five
+/// live documents, kept as `copy`, in the process that writes the folder — the document and the
+/// copy's name. Every other reason, a refusal with no copy kept, and a process that is not the
+/// writer answer `None`: the start says those itself.
+fn newer_refusal_to_note(
+    reason: &FallbackReason,
+    copy: Option<&str>,
+    file: &str,
+    writer: bool,
+) -> Option<(crate::rejected_copies::KeptDocument, String)> {
+    let (FallbackReason::FutureSchemaVersion { .. }, Some(copy)) = (reason, copy) else {
+        return None;
+    };
+    if !writer {
+        return None;
+    }
+    let document = crate::rejected_copies::KeptDocument::live_named(file)?;
+    Some((document, copy.to_owned()))
 }
 
 /// **Whether this process is the one that writes `%APPDATA%\Folio\`** (review
@@ -2216,6 +2257,7 @@ impl SessionStore {
         let mut fault = read_fault(
             &report,
             SESSION_FILE_NAME,
+            writer_of_record,
             crate::i18n::session_file_unreadable,
         );
         if !degradation.is_clean() {
@@ -3353,6 +3395,7 @@ impl SettingsStore {
         let fault = read_fault(
             &report,
             SETTINGS_FILE_NAME,
+            writer_of_record,
             crate::i18n::settings_file_unreadable,
         );
         Self {
@@ -3842,6 +3885,7 @@ impl KeybindingsStore {
         let fault = read_fault(
             &report,
             KEYBINDINGS_FILE_NAME,
+            writer_of_record,
             crate::i18n::keybindings_file_unreadable,
         );
         Self {
@@ -4226,12 +4270,13 @@ impl ProfilesStore {
         crate::update_trial::owe_copy(&report, &path, keep_profiles);
         // §5.4 case 1 — no file — is the ordinary state of nearly every machine
         // and must not alert. Everything else must, naming the file (§5.3).
+        let writer_of_record = is_writer_of_document(&path);
         let fault = read_fault(
             &report,
             PROFILES_FILE_NAME,
+            writer_of_record,
             crate::i18n::profiles_file_unreadable,
         );
-        let writer_of_record = is_writer_of_document(&path);
         Self {
             document: DocumentState::opened(
                 PROFILES_FILE_NAME,
@@ -11225,3 +11270,7 @@ pub(crate) mod contract_adapter {
         assert_eq!(delivered, [0, 1, 2], "delivered in the order admitted");
     }
 }
+
+#[cfg(test)]
+#[path = "read_fault_tests.rs"]
+mod read_fault_tests;
