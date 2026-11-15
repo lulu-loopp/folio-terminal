@@ -157,6 +157,76 @@ pub(crate) fn squeezed_body(owner: &str, name: &str) -> String {
     squeezed(method_body(owner, name))
 }
 
+/// **One document's rows of the key-set register** (`docs/plans/DOCUMENT-KEYS.tsv`, 0.4.10 plan
+/// row 68d): each `(version, type, shape)`, in the register's order. The register's header,
+/// columns and reasons are held by bt-persist's `document_keys_tests`, and its history by
+/// `scripts/ci/check-document-keys.ps1`.
+pub(crate) fn document_key_rows(document: &str) -> Vec<(u32, &'static str, &'static str)> {
+    const KEY_REGISTER: &str = include_str!("../../../docs/plans/DOCUMENT-KEYS.tsv");
+    KEY_REGISTER
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .skip(1)
+        .filter_map(|line| {
+            let columns: Vec<&str> = line.split('\t').collect();
+            let [named, version, type_name, shape, _reason] = columns[..] else {
+                panic!("a register row is five columns: {line}");
+            };
+            (named == document).then(|| {
+                let version = version
+                    .parse()
+                    .unwrap_or_else(|_| panic!("a register row's version is a number: {line}"));
+                (version, type_name, shape)
+            })
+        })
+        .collect()
+}
+
+/// **Every data type each root reaches in this crate, by name, with its shape as the key-set
+/// register pins it** (0.4.10 plan row 68d), one map per root: the type, then the types its
+/// fields and its variants' payloads name, walked to a fixed point
+/// (`Resolver::data_types_reached`); a shape is the declaration and the body, [`squeezed`] —
+/// bt-persist's `document_keys_tests` reads its documents by the same rule.
+pub(crate) fn record_shapes_reached(
+    roots: &[ItemQuery],
+) -> Vec<std::collections::BTreeMap<String, String>> {
+    let index = source();
+    let resolver = bt_source::call_graph::Resolver::new(
+        &[("bt-app", index)],
+        bt_source::call_graph::Arms::product(),
+    )
+    .unwrap_or_else(|refusals| panic!("{refusals:?}"));
+    roots
+        .iter()
+        .map(|root| {
+            let record = index
+                .one(root)
+                .unwrap_or_else(|failure| panic!("{failure}"));
+            let id = resolver
+                .id_of("bt-app", record)
+                .expect("the root is an item of bt-app");
+            let reached = resolver.data_types_reached(id).unwrap_or_else(|unread| {
+                panic!("{root} reaches a type the resolver cannot read: {unread:?}")
+            });
+            let mut shapes = std::collections::BTreeMap::new();
+            for id in reached {
+                let record = resolver.record(id);
+                let body = record.body().map_or("", |body| index.text(body));
+                let shape = squeezed(index.text(record.declaration())) + &squeezed(body);
+                if let Some(other) = shapes.insert(record.name().to_owned(), shape.clone()) {
+                    assert_eq!(
+                        other,
+                        shape,
+                        "{root} reaches two types named {}; a row names a type by its name",
+                        record.name()
+                    );
+                }
+            }
+            shapes
+        })
+        .collect()
+}
+
 /// The declaration of one item — its attributes, its visibility and its
 /// signature, stopping in front of the body.
 ///

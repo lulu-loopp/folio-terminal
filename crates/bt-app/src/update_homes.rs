@@ -64,8 +64,9 @@ use crate::update_txn::{Home, MACOS_HOME_SUFFIX};
 /// **The record's file name**, in the data folder.
 pub(crate) const HOMES_RECORD: &str = "update-homes.json";
 
-/// The record's version: its keys are pinned at it
-/// (`tests::the_update_homes_record_keeps_its_keys_at_version_1`, 68d's rule).
+/// The record's version: its keys are pinned at it in `docs/plans/DOCUMENT-KEYS.tsv` (68d's
+/// register, held by `profile_marks::tests::the_integration_records_keep_their_keys`; what a
+/// default record writes, by `tests::the_update_homes_record_keeps_its_keys_at_version_1`).
 const HOMES_RECORD_VERSION: u32 = 1;
 
 /// **The record of the update homes this account's copies made** ([`HOMES_RECORD`]): a version and

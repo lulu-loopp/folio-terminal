@@ -581,29 +581,37 @@ fn a_newer_record_is_left_as_it_is() {
 }
 
 /// PIN (0.4.10 plan row 68e; 68d's rule, R4/R8 of 2026-11-04) — **the record keeps its keys at
-/// version 1**: a key added or taken away without a new version is red here, so a build that
-/// reads version 1 is never handed a shape it refuses unknowingly. The fields are read from the
-/// struct's own source, not only from a written default (review N5): a key added as
-/// `#[serde(default, skip_serializing_if = …)]` is absent from the default's JSON, yet every
-/// version-1 build, reading with `deny_unknown_fields`, would refuse a record that carries it.
+/// version 1**: what a default record writes is version 1's keys, each a field of the shape
+/// `docs/plans/DOCUMENT-KEYS.tsv` pins for `update-homes` at version 1, which refuses a key it
+/// does not know. The shape itself is the register's alone (R9, one source):
+/// `profile_marks::tests::the_integration_records_keep_their_keys` holds the struct's source to
+/// it, so a key added as `#[serde(default, skip_serializing_if = …)]`, absent from the default's
+/// JSON, is red there (review N5).
 ///
-/// MUTATION: a key renamed at version 1 (`plant-68e-record-key-renamed.py`); an optional key
-/// added at version 1 (`plant-68e-record-key-added-optional.py`).
+/// MUTATION: a key renamed at version 1 (`plant-68e-record-key-renamed.py`, red here and there);
+/// an optional key added at version 1 (`plant-68e-record-key-added-optional.py`, red there).
 #[test]
 fn the_update_homes_record_keeps_its_keys_at_version_1() {
-    use crate::test_support::{item_body, item_declaration, squeezed};
     assert_eq!(HOMES_RECORD_VERSION, 1);
-    let record = bt_source::ItemQuery::type_item("UpdateHomesRecord");
-    assert_eq!(
-        squeezed(item_body(&record)),
-        "{version:u32,homes:Vec<PathBuf>,}",
-        "version 1's fields, as declared"
-    );
+    let rows = crate::test_support::document_key_rows("update-homes");
+    let pinned = rows
+        .iter()
+        .find(|(version, type_name, _)| {
+            *version == HOMES_RECORD_VERSION && *type_name == "UpdateHomesRecord"
+        })
+        .map(|(.., shape)| *shape)
+        .expect("the register pins the record at version 1");
     assert!(
-        squeezed(item_declaration(&record)).contains("#[serde(deny_unknown_fields)]"),
-        "version 1 refuses a key it does not know"
+        pinned.contains("#[serde(deny_unknown_fields)]"),
+        "version 1 refuses a key it does not know: {pinned}"
     );
     let written = serde_json::to_value(UpdateHomesRecord::default()).unwrap();
+    for key in written.as_object().expect("an object").keys() {
+        assert!(
+            pinned.contains(&format!("{key}:")),
+            "the written key {key} is a field of version 1's pinned shape: {pinned}"
+        );
+    }
     let keys: Vec<&str> = written
         .as_object()
         .expect("an object")
