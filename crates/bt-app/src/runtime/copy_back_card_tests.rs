@@ -161,24 +161,27 @@ fn the_copy_back_card_asks_once_for_every_document() {
         up.paint().heading.as_deref(),
         Some("Bring back your newer settings and pins?")
     );
-    let writes = (
-        app.settings_store.write_generation(),
-        app.pins_store.write_generation(),
+    // What each store has sent: a Keep current marks the store owed and sends at once, so a
+    // write would show here before any answer (`write_generation` counts presses, not this).
+    let app = application.folio.app.as_mut().expect("the application");
+    let sent = (
+        app.settings_store.document().sent(),
+        app.pins_store.document().sent(),
     );
 
     application
         .runtime()
         .press_copy_back_card_key(&Key::Named(NamedKey::Escape))
         .expect("Escape is answered");
-    let app = application.folio.app.as_ref().expect("the application");
+    let app = application.folio.app.as_mut().expect("the application");
     assert!(app.copy_back.is_none(), "Escape put the card away");
     assert!(app.copy_back_owed.is_empty(), "and brought nothing back");
     assert_eq!(
         (
-            app.settings_store.write_generation(),
-            app.pins_store.write_generation()
+            app.settings_store.document().sent(),
+            app.pins_store.document().sent()
         ),
-        writes,
+        sent,
         "and wrote nothing"
     );
 
