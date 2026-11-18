@@ -281,6 +281,7 @@ dependencies = [
  "bt-viewport",
  "bt-winres",
  "bt-workbench",
+ "ed25519-compact",
  "gif",
  "hayro",
  "image",

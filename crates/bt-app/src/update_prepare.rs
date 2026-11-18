@@ -8,9 +8,16 @@
 //!
 //! * **the worker** both run on ([`WORKER`]) and the progress a fetch reports
 //!   to the job ([`fetching`]);
-//! * **the checksum**: the document's line for the offer's own asset
-//!   ([`sum_for`]) and the downloaded file held to it ([`matches_its_sum`]),
-//!   hashed a bounded chunk at a time ([`digest_of`]);
+//! * **the release statement** (0.4.10 plan row 102, part 1b): the offer's
+//!   `RELEASE-STATEMENT.txt` and its signature fetched by tag and verified with
+//!   this copy's embedded keys, none it remembers as retired ([`Vouching`],
+//!   [`vouched`]) — the one thing a Prepare trusts, on both platforms; what it
+//!   retires remembered in the data folder's `release-keys.json`, whose one
+//!   writer this is; the platform's file then fetched by the name the
+//!   statement gives and held to its SHA-256 and size
+//!   ([`fetch_vouched_asset`]), hashed a bounded chunk at a time
+//!   ([`digest_of`]). No signature of the operating system's decides anything
+//!   here;
 //! * **the worker's last word** ([`finish`]): one report, posted once the
 //!   worker has let go of the transaction or handed it to the job — a Cancel
 //!   included, so its lock is known free when its report is read;
@@ -33,7 +40,7 @@
 //!   kept set with the offer rebuilt from its own version — is
 //!   [`settle_at_launch`] (U-33).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -42,6 +49,10 @@ use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_txn::{self, Hold};
 
 use bt_platform::HostPlatform;
+use bt_winres::release_statement::{
+    KeyId, KeySet, OfferedRelease, SIGNATURE_BYTES, SIGNATURE_FILE, STATEMENT_FILE,
+    STATEMENT_MAX_BYTES, StatementError, VerifiedStatement, verify_statement,
+};
 
 use crate::install_channel::Channel;
 use crate::update_apply::{
@@ -49,7 +60,7 @@ use crate::update_apply::{
     write_journal_on,
 };
 use crate::update_handoff::Staged;
-use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop};
+use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop, Transport};
 use crate::update_txn::{
     Action, Actor, Asker, Disk, Effect, Event, Home, Journal, Located, PhaseKind, PreviousRun,
     Role, TxnId, decide, launch_event, may,
@@ -82,34 +93,280 @@ pub(crate) fn fetching(post: &Poster) -> Fetching {
     }
 }
 
-// ── the checksum ────────────────────────────────────────────────────────────
+// ── the release statement ───────────────────────────────────────────────────
 
-/// **The SHA-256 a checksum document gives for `asset`**, lowercase: the
-/// document is `shasum`'s format (`<64 hex>  <name>`, or `<64 hex> *<name>`
-/// for a binary-mode line), one file a line, as `docs/RELEASING.md` and
-/// `scripts/release/macos/checksums.sh` write it. `None` when no line names
-/// `asset`, or two lines name it with different sums.
-pub(crate) fn sum_for(document: &str, asset: &str) -> Option<String> {
-    let mut found: Option<String> = None;
-    for line in document.lines() {
-        let Some((sum, rest)) = line.trim_end_matches('\r').split_once(' ') else {
-            continue;
-        };
-        let name = rest
-            .strip_prefix(' ')
-            .or_else(|| rest.strip_prefix('*'))
-            .unwrap_or(rest);
-        let well_formed = sum.len() == 64 && sum.bytes().all(|byte| byte.is_ascii_hexdigit());
-        if name != asset || !well_formed {
-            continue;
-        }
-        let sum = sum.to_ascii_lowercase();
-        match &found {
-            Some(earlier) if *earlier != sum => return None,
-            _ => found = Some(sum),
+/// **The file a copy remembers retired release keys in**, in its data folder
+/// (`bt_persist::ReleaseKeysV1`, 0.4.10 plan row 102, ruling R8).
+pub(crate) const RELEASE_KEYS_FILE_NAME: &str = "release-keys.json";
+
+/// **What a release statement is verified with on a copy, and where what it
+/// retires is remembered**: the keys this build embeds
+/// (`release_statement::RELEASE_KEYS`) and the data folder's
+/// [`RELEASE_KEYS_FILE_NAME`]. A Prepare, a resume and the applier each verify
+/// with one; only a Prepare remembers ([`Vouching::remember`]).
+#[derive(Clone, Debug)]
+pub(crate) struct Vouching {
+    keys: KeySet<'static>,
+    memory: PathBuf,
+}
+
+/// **What `release-keys.json` holds, as a statement check reads it**: the
+/// document — or, for a file this build refuses, the default carrying the ids
+/// the refused file retired (`bt_persist::read_release_keys_keeping`) — and
+/// whether a write may replace the file.
+struct Remembered {
+    document: bt_persist::ReleaseKeysV1,
+    /// **Not over a newer build's document**, nor over a file whose bytes
+    /// were neither read nor kept: only a missing file, one this build read,
+    /// or one whose refused bytes were kept beside it may be written over.
+    writable: bool,
+}
+
+impl Vouching {
+    /// **The product's**: the embedded keys, remembered in `data`.
+    #[must_use]
+    pub(crate) fn in_data_folder(data: &Path) -> Self {
+        Self {
+            keys: KeySet::EMBEDDED,
+            memory: data.join(RELEASE_KEYS_FILE_NAME),
         }
     }
-    found
+
+    /// **The running copy's**: [`Self::in_data_folder`] of this process's data
+    /// folder (`persist::storage_dir`).
+    #[must_use]
+    pub(crate) fn of_this_copy() -> Self {
+        Self::in_data_folder(&crate::persist::storage_dir())
+    }
+
+    /// **A test's**: the throwaway test keys (`release_statement::TEST_KEYS`),
+    /// remembered in `memory`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn under_test_keys(memory: PathBuf) -> Self {
+        Self {
+            keys: KeySet::of(&bt_winres::release_statement::TEST_KEYS),
+            memory,
+        }
+    }
+
+    /// **The statement at `statement`, signed by the 64 bytes at `signature`,
+    /// verified** with these keys and none remembered as retired
+    /// (`release_statement::verify_statement`). Each file is refused on its
+    /// size before it is read.
+    ///
+    /// # Errors
+    /// [`Stop::StatementRefused`], after its line ([`statement_refused`]).
+    pub(crate) fn verified(
+        &self,
+        statement: &Path,
+        signature: &Path,
+    ) -> Result<VerifiedStatement, Stop> {
+        let text = statement_file_bytes(statement, STATEMENT_MAX_BYTES as u64)?;
+        let signed = statement_file_bytes(signature, SIGNATURE_BYTES as u64)?;
+        let retired = self.retires_on_disk().retired_ids();
+        verify_statement(&text, &signed, &self.keys, &retired)
+            .map_err(|refusal| statement_refused(&refusal))
+    }
+
+    /// **Remember the keys `statement` retires**, so this copy refuses them
+    /// from now on (§1.6): written only when the list grows, and never over a
+    /// file a write may not replace ([`Remembered::writable`]). A retire that
+    /// is not remembered is said in one line and the Prepare goes on: the
+    /// statement verified, and the next release's statement retires again.
+    pub(crate) fn remember(&self, statement: &VerifiedStatement) {
+        let retires = &statement.what_it_says().retires;
+        if retires.is_empty() {
+            return;
+        }
+        let mut remembered = self.retires_on_disk();
+        if !remembered
+            .document
+            .remember_retired(retires.iter().map(ToString::to_string))
+        {
+            return;
+        }
+        if !remembered.writable {
+            note(
+                "a retired release key is not remembered: release-keys.json is not this build's to replace",
+            );
+            return;
+        }
+        match bt_persist::write_release_keys_atomic(&self.memory, &remembered.document) {
+            Ok(()) => note(&format!(
+                "release keys retired from now on: {}",
+                remembered.document.retired.join(" ")
+            )),
+            Err(error) => note(&format!("a retired release key is not remembered: {error}")),
+        }
+    }
+
+    /// What `release-keys.json` holds now, read the way every document of a
+    /// trial is (`update_trial::keeping`).
+    fn retires_on_disk(&self) -> Remembered {
+        let (document, report) =
+            bt_persist::read_release_keys_keeping(&self.memory, crate::update_trial::keeping());
+        crate::update_trial::owe_copy(&report, &self.memory, |path| {
+            let _ = bt_persist::read_release_keys(path);
+        });
+        let writable = match &report {
+            bt_persist::ReadReport::NotFound | bt_persist::ReadReport::Loaded => true,
+            bt_persist::ReadReport::FellBackToDefaults { reason, kept } => {
+                note(&format!("release-keys.json is refused: {reason:?}"));
+                kept.is_some()
+                    && !matches!(
+                        reason,
+                        bt_persist::FallbackReason::FutureSchemaVersion { .. }
+                    )
+            }
+        };
+        Remembered { document, writable }
+    }
+}
+
+impl Remembered {
+    /// The ids remembered, each one a key id is spelled as; any other entry is
+    /// left out.
+    fn retired_ids(&self) -> Vec<KeyId> {
+        self.document
+            .retired
+            .iter()
+            .filter_map(|id| KeyId::parse_key_id(id))
+            .collect()
+    }
+}
+
+/// **The bytes of a statement's file, refused on its size first**: a server
+/// that answers a statement with an archive is not read whole.
+fn statement_file_bytes(path: &Path, most: u64) -> Result<Vec<u8>, Stop> {
+    let size = std::fs::symlink_metadata(path)
+        .map_err(|error| refused_with(&format!("its file is not there: {error}")))?
+        .len();
+    if size > most {
+        return Err(refused_with(&format!(
+            "its file is {size} bytes, more than {most}"
+        )));
+    }
+    file_reads::read(Lane::Update, path)
+        .map_err(|error| refused_with(&format!("its file was not read: {error}")))
+}
+
+/// [`Stop::StatementRefused`], and its line.
+fn refused_with(why: &str) -> Stop {
+    note(&format!("the release statement is refused: {why}"));
+    Stop::StatementRefused
+}
+
+/// **The stop a statement's refusal is reported as, and its one line**: a
+/// release that needs a newer build is [`Stop::TooOld`] (before the large
+/// download); a file that is not the one the statement lists, [`Stop::Sums`];
+/// a member set that is not the statement's, [`Stop::Identity`]; every other
+/// refusal — the signature, the key, a retired key, the tag, the version, no
+/// file for this platform — [`Stop::StatementRefused`].
+pub(crate) fn statement_refused(refusal: &StatementError) -> Stop {
+    note(&format!("the release statement is refused: {refusal}"));
+    match refusal {
+        StatementError::TooOld { .. } => Stop::TooOld,
+        StatementError::AssetDiffers(_) => Stop::Sums,
+        StatementError::MembersDiffer(_) => Stop::Identity,
+        _ => Stop::StatementRefused,
+    }
+}
+
+/// **Where a staged transaction keeps the statement it was prepared from**:
+/// `H\<txn>\RELEASE-STATEMENT.txt` and its `.sig`, beside `set\` — read
+/// again before a resume and before the apply.
+#[must_use]
+pub(crate) fn kept_statement(home: &Home, txn: TxnId) -> [PathBuf; 2] {
+    let transaction = home.transaction(txn);
+    [STATEMENT_FILE, SIGNATURE_FILE].map(|name| transaction.join(name))
+}
+
+/// [`Stop::Cancelled`] once the job has cancelled `post`'s transaction,
+/// otherwise `stop`.
+fn unless_cancelled(post: &Poster, stop: Stop) -> Stop {
+    if post.cancelled() {
+        Stop::Cancelled
+    } else {
+        stop
+    }
+}
+
+/// **The first step after `Allocated`, on both platforms**: the offer's
+/// statement and its signature fetched by tag into `into`, verified
+/// ([`Vouching::verified`]), what it retires remembered, and held to the offer
+/// — its tag and version the offer's, its `min_from` no newer than this build
+/// (`VerifiedStatement::vouches_for`). Answers the statement and where its two
+/// files are. The fetch reports no progress: the card's bar is the asset's.
+///
+/// # Errors
+/// [`Stop::Download`], [`Stop::Cancelled`]; [`Stop::TooOld`],
+/// [`Stop::StatementRefused`] ([`statement_refused`]).
+pub(crate) fn vouched(
+    transport: &dyn Transport,
+    offer: &Offer,
+    post: &Poster,
+    into: &Path,
+    vouching: &Vouching,
+) -> Result<(VerifiedStatement, [PathBuf; 2]), Stop> {
+    let quiet = Fetching {
+        report: Arc::new(|_| {}),
+        cancelled: post.cancel_flag(),
+    };
+    let [statement, signature] = offer.requests().map(|request| {
+        transport
+            .fetch(&request, into, &quiet)
+            .map_err(|_| unless_cancelled(post, Stop::Download))
+    });
+    let files = [statement?, signature?];
+    if post.cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    let verified = vouching.verified(&files[0], &files[1])?;
+    vouching.remember(&verified);
+    verified
+        .vouches_for(&OfferedRelease {
+            tag: offer.tag(),
+            version: offer.to_version(),
+            running: crate::version::VERSION,
+        })
+        .map_err(|refusal| statement_refused(&refusal))?;
+    Ok((verified, files))
+}
+
+/// **The platform's file, by the name `statement` gives it**, fetched by the
+/// offer's tag into `into` (reporting to the card), and held to the
+/// statement's SHA-256 and size for the offer's platform
+/// (`VerifiedStatement::asset_matches`). Answers where it is.
+///
+/// # Errors
+/// [`Stop::StatementRefused`] when the statement lists no file for the
+/// platform; [`Stop::Download`], [`Stop::Cancelled`]; [`Stop::Sums`] for a file
+/// that is not the one listed.
+pub(crate) fn fetch_vouched_asset(
+    transport: &dyn Transport,
+    offer: &Offer,
+    post: &Poster,
+    into: &Path,
+    statement: &VerifiedStatement,
+) -> Result<PathBuf, Stop> {
+    let platform = offer.release_platform();
+    let name = statement
+        .asset_for(platform)
+        .map_err(|refusal| statement_refused(&refusal))?
+        .name
+        .clone();
+    let file = transport
+        .fetch(&offer.asset_request(&name), into, &fetching(post))
+        .map_err(|_| unless_cancelled(post, Stop::Download))?;
+    if post.cancelled() {
+        return Err(Stop::Cancelled);
+    }
+    let (digest, size) = digest_of(&file).map_err(|_| Stop::Sums)?;
+    statement
+        .asset_matches(platform, &digest, size)
+        .map_err(|refusal| statement_refused(&refusal))?;
+    Ok(file)
 }
 
 /// **A file's SHA-256 and length**, lowercase hex — read a bounded chunk at a
@@ -132,22 +389,6 @@ pub(crate) fn digest_of(path: &Path) -> std::io::Result<(String, u64)> {
         length += read as u64;
     }
     Ok((bt_winres::digest::hex(&hasher.finish()), length))
-}
-
-/// **The downloaded `asset` is the one the checksum document `sums` names.**
-///
-/// # Errors
-/// [`Stop::Sums`]: the document cannot be read or names no single sum for
-/// `asset`, or the file hashes to another.
-pub(crate) fn matches_its_sum(file: &Path, sums: &Path, asset: &str) -> Result<(), Stop> {
-    let document = file_reads::read_to_string(Lane::Update, sums).map_err(|_| Stop::Sums)?;
-    let expected = sum_for(&document, asset).ok_or(Stop::Sums)?;
-    let (found, _) = digest_of(file).map_err(|_| Stop::Sums)?;
-    if found == expected {
-        Ok(())
-    } else {
-        Err(Stop::Sums)
-    }
 }
 
 // ── the journal's writes ────────────────────────────────────────────────────
@@ -459,8 +700,8 @@ pub(crate) fn at_launch(
 
 /// **How this copy revalidates a staged transaction before O resumes it**
 /// (F-17), on the job's worker, given how this copy was installed: the staged
-/// transaction back with **the version its set installs**, read from the set
-/// itself — the staged `folio.exe`'s own release manifest on Windows, the
+/// transaction back with **the version its set installs**, read from what was
+/// verified — the kept release statement on Windows (0.4.10 plan row 102), the
 /// staged bundle's recorded version on macOS — never from a download. A
 /// failure has already discarded the transaction (`Discarded`, then
 /// [`clear`]) and says why. `update_job::resumer_for_this_copy` is the
@@ -566,6 +807,105 @@ pub(crate) fn settle_at_launch(
             ));
             Landed::Ordinary
         }
+    }
+}
+
+/// **Release statements a test publishes** (0.4.10 plan row 102, part 1b):
+/// built from what the test serves and signed by one of the throwaway test
+/// keys (`release_statement::TEST_KEYS`, whose private halves are public and
+/// protect nothing) or by a key no build embeds. The seeds stay here, in test
+/// code only; `tests::the_test_seeds_are_the_test_keys` holds each to its
+/// public half.
+#[cfg(test)]
+pub(crate) mod test_statements {
+    use bt_winres::digest::{hex, sha256};
+    use bt_winres::release_manifest::Member;
+    use bt_winres::release_statement::{KeyId, Statement, StatementAsset};
+
+    /// **Who signs a test's statement.**
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Signer {
+        /// The live test key, `TEST_KEYS[0]`.
+        Live,
+        /// The spare test key, `TEST_KEYS[1]`, which may retire the live one.
+        Spare,
+        /// A key no build embeds.
+        Foreign,
+    }
+
+    /// The seeds of `TEST_KEYS`, live then spare (RFC 8032 private halves).
+    const TEST_KEY_SEEDS: [[u8; 32]; 2] = [
+        [
+            0x10, 0x28, 0xb5, 0x4e, 0x7c, 0xc4, 0x77, 0xc9, 0xc6, 0x99, 0x8a, 0xf8, 0x19, 0x6f,
+            0x23, 0x61, 0x52, 0x0e, 0xb9, 0xae, 0x44, 0x10, 0x0e, 0x3e, 0xe3, 0x19, 0x80, 0x93,
+            0x1a, 0x4e, 0x57, 0xe5,
+        ],
+        [
+            0x5d, 0x60, 0xcf, 0xb8, 0xc3, 0xf3, 0x9c, 0x85, 0x78, 0x3e, 0xfb, 0xb7, 0x30, 0x6c,
+            0xad, 0xc7, 0x89, 0x13, 0x44, 0xbb, 0xd8, 0x65, 0x8e, 0x2f, 0xc3, 0x66, 0x9f, 0xb8,
+            0xa6, 0xf6, 0xac, 0x20,
+        ],
+    ];
+
+    /// A seed whose public half no build embeds.
+    const FOREIGN_SEED: [u8; 32] = [0x77; 32];
+
+    /// `signer`'s key pair.
+    pub(crate) fn pair_of(signer: Signer) -> ed25519_compact::KeyPair {
+        let seed = match signer {
+            Signer::Live => TEST_KEY_SEEDS[0],
+            Signer::Spare => TEST_KEY_SEEDS[1],
+            Signer::Foreign => FOREIGN_SEED,
+        };
+        ed25519_compact::KeyPair::from_seed(ed25519_compact::Seed::new(seed))
+    }
+
+    /// `signer`'s key id.
+    pub(crate) fn key_of(signer: Signer) -> KeyId {
+        KeyId::of_public(&pair_of(signer).pk)
+    }
+
+    /// **A statement of the release `tag`** listing one file — `platform`'s,
+    /// called `name`, holding `bytes` — whose archive's members are `members`;
+    /// `min_from 0.4.6`, retiring nothing, by the live test key.
+    pub(crate) fn statement_of(
+        tag: &str,
+        (platform, name, bytes): (&str, &str, &[u8]),
+        members: Vec<Member>,
+    ) -> Statement {
+        let version = tag
+            .strip_prefix('v')
+            .map(|rest| rest.strip_suffix("-preview").unwrap_or(rest))
+            .expect("a release tag")
+            .to_owned();
+        Statement {
+            product: "folio".to_owned(),
+            version,
+            tag: tag.to_owned(),
+            date: "2026-11-25".to_owned(),
+            key: key_of(Signer::Live),
+            min_from: "0.4.6".to_owned(),
+            authenticode: false,
+            retires: Vec::new(),
+            assets: vec![StatementAsset {
+                sha256: hex(&sha256(bytes)),
+                size: bytes.len() as u64,
+                platform: platform.to_owned(),
+                name: name.to_owned(),
+            }],
+            members_of: platform.to_owned(),
+            members,
+        }
+    }
+
+    /// **`statement`'s text and its signature by `signer`**, the text naming
+    /// `signer`'s key: the two files a release publishes.
+    pub(crate) fn signed_statement(statement: &Statement, signer: Signer) -> (Vec<u8>, Vec<u8>) {
+        let mut named = statement.clone();
+        named.key = key_of(signer);
+        let text = named.statement_text().into_bytes();
+        let signature = pair_of(signer).sk.sign(&text, None).to_vec();
+        (text, signature)
     }
 }
 
@@ -784,5 +1124,297 @@ mod tests {
         .unwrap();
         assert_eq!(landed, Some(("v0.4.9".to_owned(), true)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+    // ── the release statement (0.4.10 plan row 102, part 1b) ─────────────────
+
+    use bt_winres::release_statement::{RELEASE_KEYS, Statement, TEST_KEYS, WINDOWS_X64};
+    use test_statements::{Signer, key_of, pair_of, signed_statement, statement_of};
+
+    /// The archive name every statement here lists.
+    const ARCHIVE: &str = "folio-0.4.7-windows-x64.zip";
+
+    /// **A release, as a stand-in transport**: each file it serves, by name,
+    /// and every name it was asked for, in order.
+    struct Served {
+        files: Vec<(String, Vec<u8>)>,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Served {
+        /// `statement` signed by `signer`, and `asset` under the archive's name.
+        fn of(statement: &Statement, signer: Signer, asset: &[u8]) -> Self {
+            let (text, signature) = signed_statement(statement, signer);
+            Self {
+                files: vec![
+                    (STATEMENT_FILE.to_owned(), text),
+                    (SIGNATURE_FILE.to_owned(), signature),
+                    (ARCHIVE.to_owned(), asset.to_vec()),
+                ],
+                asked: std::sync::Mutex::default(),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl Transport for Served {
+        fn fetch(
+            &self,
+            request: &crate::update_job::Request,
+            into: &Path,
+            _: &Fetching,
+        ) -> Result<PathBuf, String> {
+            self.asked.lock().unwrap().push(request.file_name.clone());
+            let (name, bytes) = self
+                .files
+                .iter()
+                .find(|(name, _)| *name == request.file_name)
+                .ok_or_else(|| "the stand-in server has no such file".to_owned())?;
+            let target = into.join(name);
+            std::fs::write(&target, bytes).map_err(|error| error.to_string())?;
+            Ok(target)
+        }
+    }
+
+    /// **A folder of the test's own**: `download\` and the data folder whose
+    /// `release-keys.json` the test keys are remembered against.
+    struct Fold {
+        root: PathBuf,
+    }
+
+    impl Fold {
+        fn new(tag: &str) -> Self {
+            let root = bt_testpath::temp_path(&format!("bt-update-vouch-{tag}"));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("download")).unwrap();
+            std::fs::create_dir_all(root.join("data")).unwrap();
+            Self { root }
+        }
+
+        fn download(&self) -> PathBuf {
+            self.root.join("download")
+        }
+
+        fn memory(&self) -> PathBuf {
+            self.root.join("data").join(RELEASE_KEYS_FILE_NAME)
+        }
+
+        fn vouching(&self) -> Vouching {
+            Vouching::under_test_keys(self.memory())
+        }
+    }
+
+    impl Drop for Fold {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The offer every test here presses: `v0.4.7`, for Windows.
+    fn the_offer() -> Offer {
+        Offer::mint(TxnId::new([0x5a; 16]), "v0.4.7", HostPlatform::Windows).unwrap()
+    }
+
+    /// A statement of `v0.4.7` listing `asset` as the Windows archive.
+    fn statement_for(asset: &[u8]) -> Statement {
+        statement_of("v0.4.7", (WINDOWS_X64, ARCHIVE, asset), Vec::new())
+    }
+
+    /// [`vouched`], then [`fetch_vouched_asset`], over `served`, for the
+    /// offer of `v0.4.7`.
+    fn through(fold: &Fold, served: &Served) -> Result<PathBuf, Stop> {
+        through_for(fold, served, &the_offer())
+    }
+
+    /// [`through`], for `offer`.
+    fn through_for(fold: &Fold, served: &Served, offer: &Offer) -> Result<PathBuf, Stop> {
+        let post = Poster::of_a_test(offer.txn());
+        let vouching = fold.vouching();
+        let (statement, _) = vouched(served, offer, &post, &fold.download(), &vouching)?;
+        fetch_vouched_asset(served, offer, &post, &fold.download(), &statement)
+    }
+
+    /// PIN (0.4.10 plan row 102, part 1b) — **the test seeds are the test
+    /// keys' private halves, and the foreign seed is no key a build embeds**:
+    /// every signature a test makes is the one its claim says.
+    #[test]
+    fn the_test_seeds_are_the_test_keys() {
+        assert_eq!(*pair_of(Signer::Live).pk, TEST_KEYS[0].public);
+        assert_eq!(*pair_of(Signer::Spare).pk, TEST_KEYS[1].public);
+        let foreign = *pair_of(Signer::Foreign).pk;
+        assert!(
+            TEST_KEYS
+                .iter()
+                .chain(RELEASE_KEYS.iter())
+                .all(|key| key.public != foreign)
+        );
+    }
+
+    /// RED (0.4.10 plan row 102, part 1b) — **a statement the live key signed
+    /// admits the file it lists, fetched by the name it gives**: the
+    /// statement, its signature, then that file — and nothing is remembered
+    /// when nothing is retired.
+    ///
+    /// MUTATION: fetch the archive by a composed name in `fetch_vouched_asset`
+    /// (`plant-102-1b-composed-name.py`).
+    #[test]
+    fn a_vouched_statement_admits_the_file_it_names() {
+        let fold = Fold::new("admits");
+        let asset = b"the archive".to_vec();
+        let mut statement = statement_for(&asset);
+        statement.assets[0].name = "folio-0.4.7-windows-x64-unsigned.zip".to_owned();
+        let mut served = Served::of(&statement, Signer::Live, &asset);
+        served.files[2].0.clone_from(&statement.assets[0].name);
+        let file = through(&fold, &served).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), asset);
+        assert_eq!(
+            served.asked(),
+            [
+                STATEMENT_FILE,
+                SIGNATURE_FILE,
+                "folio-0.4.7-windows-x64-unsigned.zip"
+            ]
+        );
+        assert!(!fold.memory().exists(), "nothing retired, nothing written");
+    }
+
+    /// RED (0.4.10 plan row 102, part 1b) — **a statement signed by a key this
+    /// build does not embed is refused before the large download**:
+    /// `StatementRefused`, and the archive is never asked for.
+    ///
+    /// MUTATION: report a refused statement as a failed download in
+    /// `Vouching::verified` (`plant-102-1b-unverified-as-download.py`).
+    #[test]
+    fn a_statement_by_a_key_this_build_does_not_embed_is_refused() {
+        let fold = Fold::new("foreign");
+        let asset = b"the archive".to_vec();
+        let served = Served::of(&statement_for(&asset), Signer::Foreign, &asset);
+        assert_eq!(through(&fold, &served), Err(Stop::StatementRefused));
+        assert_eq!(served.asked(), [STATEMENT_FILE, SIGNATURE_FILE]);
+    }
+
+    /// RED (0.4.10 plan row 102, part 1b) — **a release whose `min_from` is
+    /// newer than this build is too old to update to, before the large
+    /// download**: `TooOld`, the archive never asked for.
+    ///
+    /// MUTATION: drop the `TooOld` arm of `statement_refused`
+    /// (`plant-102-1b-too-old-unnamed.py`).
+    #[test]
+    fn a_statement_that_needs_a_newer_build_is_too_old_before_the_download() {
+        let fold = Fold::new("too-old");
+        let asset = b"the archive".to_vec();
+        let mut statement = statement_of("v9.9.9", (WINDOWS_X64, ARCHIVE, &asset), Vec::new());
+        statement.min_from = "9.9.9".to_owned();
+        let served = Served::of(&statement, Signer::Live, &asset);
+        let offer = Offer::mint(TxnId::new([0x5b; 16]), "v9.9.9", HostPlatform::Windows).unwrap();
+        assert_eq!(through_for(&fold, &served, &offer), Err(Stop::TooOld));
+        assert_eq!(served.asked(), [STATEMENT_FILE, SIGNATURE_FILE]);
+    }
+
+    /// RED (0.4.10 plan row 102, part 1b) — **a statement for another release
+    /// than the offer's is refused**: the next release's statement, served
+    /// under this offer's tag, vouches for nothing here.
+    ///
+    /// MUTATION: skip `vouches_for` in `vouched`
+    /// (`plant-102-1b-any-release.py`).
+    #[test]
+    fn a_statement_for_another_release_is_refused() {
+        let fold = Fold::new("another");
+        let asset = b"the archive".to_vec();
+        let statement = statement_of("v0.4.8", (WINDOWS_X64, ARCHIVE, &asset), Vec::new());
+        let served = Served::of(&statement, Signer::Live, &asset);
+        assert_eq!(through(&fold, &served), Err(Stop::StatementRefused));
+        assert_eq!(served.asked(), [STATEMENT_FILE, SIGNATURE_FILE]);
+    }
+
+    /// RED (0.4.10 plan row 102, part 1b) — **a file that is not the one the
+    /// statement lists is refused as `Sums`**: other bytes of the same length.
+    ///
+    /// MUTATION: skip `asset_matches` in `fetch_vouched_asset`
+    /// (`plant-102-1b-asset-unchecked.py`).
+    #[test]
+    fn a_file_the_statement_does_not_list_is_refused() {
+        let fold = Fold::new("sums");
+        let statement = statement_for(b"the archive");
+        let served = Served::of(&statement, Signer::Live, b"an archive!");
+        assert_eq!(through(&fold, &served), Err(Stop::Sums));
+    }
+
+    /// RED (0.4.10 plan row 102, part 1b) — **the retire lines are remembered
+    /// after a verified statement**: the spare key's statement retiring the
+    /// live key leaves `release-keys.json` listing it.
+    ///
+    /// MUTATION: return before the write in `Vouching::remember`
+    /// (`plant-102-1b-retire-forgotten.py`).
+    #[test]
+    fn the_retire_lines_are_remembered_after_a_verified_statement() {
+        let fold = Fold::new("retires");
+        let asset = b"the archive".to_vec();
+        let mut statement = statement_for(&asset);
+        statement.retires = vec![key_of(Signer::Live)];
+        through(&fold, &Served::of(&statement, Signer::Spare, &asset)).unwrap();
+        let (remembered, _) = bt_persist::read_release_keys(&fold.memory());
+        assert_eq!(remembered.retired, [key_of(Signer::Live).to_string()]);
+    }
+
+    /// RED (0.4.10 plan row 102, part 1b) — **a key remembered as retired is
+    /// refused**: once `release-keys.json` lists the live key, its statement
+    /// is `StatementRefused`, and the spare's still passes.
+    ///
+    /// MUTATION: verify with no retired ids in `Vouching::verified`
+    /// (`plant-102-1b-retired-ignored.py`).
+    #[test]
+    fn a_remembered_retired_key_is_refused() {
+        let fold = Fold::new("retired");
+        let mut keys = bt_persist::ReleaseKeysV1::default();
+        keys.remember_retired([key_of(Signer::Live).to_string()]);
+        bt_persist::write_release_keys_atomic(&fold.memory(), &keys).unwrap();
+        let asset = b"the archive".to_vec();
+        let statement = statement_for(&asset);
+        assert_eq!(
+            through(&fold, &Served::of(&statement, Signer::Live, &asset)),
+            Err(Stop::StatementRefused)
+        );
+        assert!(through(&fold, &Served::of(&statement, Signer::Spare, &asset)).is_ok());
+    }
+
+    /// RED (0.4.10 plan row 102, part 1b) — **a newer build's
+    /// `release-keys.json` is never written over**: a retire this build reads
+    /// leaves the file byte for byte as it was, and what it retired still
+    /// holds.
+    ///
+    /// MUTATION: write whatever the read reported in `Vouching::remember`
+    /// (`plant-102-1b-newer-overwritten.py`).
+    #[test]
+    fn a_newer_release_keys_file_is_never_written_over() {
+        let fold = Fold::new("newer");
+        let newer = format!(
+            "{{\"schema_version\": 2, \"retired\": [\"{}\"], \"trusted\": []}}",
+            key_of(Signer::Foreign)
+        );
+        std::fs::write(fold.memory(), &newer).unwrap();
+        let asset = b"the archive".to_vec();
+        let mut statement = statement_for(&asset);
+        statement.retires = vec![key_of(Signer::Live)];
+        through(&fold, &Served::of(&statement, Signer::Spare, &asset)).unwrap();
+        assert_eq!(std::fs::read_to_string(fold.memory()).unwrap(), newer);
+    }
+
+    /// RED (0.4.10 plan row 102, part 1b) — **a statement file longer than any
+    /// statement is refused on its size**, before it is read.
+    ///
+    /// MUTATION: drop the size check in `statement_file_bytes`
+    /// (`plant-102-1b-unbounded.py`).
+    #[test]
+    fn an_oversized_statement_file_is_refused_on_its_size() {
+        let fold = Fold::new("oversized");
+        let statement = fold.download().join(STATEMENT_FILE);
+        std::fs::write(&statement, vec![b'a'; STATEMENT_MAX_BYTES + 1]).unwrap();
+        assert_eq!(
+            statement_file_bytes(&statement, STATEMENT_MAX_BYTES as u64),
+            Err(Stop::StatementRefused)
+        );
     }
 }

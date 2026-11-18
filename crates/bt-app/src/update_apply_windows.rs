@@ -19,9 +19,12 @@
 //! 2. **Revalidate** (U-20's decision 1, taken here):
 //!    `update_prepare_windows::staged_as_verified` — the channel of the
 //!    installed copy, the installed `folio.exe` still the recorded old image,
-//!    the staged set at its recorded digests and its identity at the staged
-//!    `folio.exe`'s own version, the rescue copy still the old image. Refused
-//!    → `Unverified`, `Abandoned`. Nothing has been armed.
+//!    the release statement kept beside the set verified again with this
+//!    build's embedded keys (the applier is O's rescue copy, so they are O's)
+//!    and none the data folder remembers as retired, the staged set at its
+//!    recorded digests and the statement's member lines, the rescue copy
+//!    still the old image (0.4.10 plan row 102). Refused → `Unverified`,
+//!    `Abandoned`. Nothing has been armed.
 //! 3. **Arm** (W3 → W4 → W5): the `Run` value `FolioUpdate-<txn8>` =
 //!    `"<rescue>" --update-recover` (`bt_platform::logon_hook::arm`: written,
 //!    flushed, read back, and only then the `Armed` proof) → `Armed`, durable.
@@ -180,7 +183,6 @@ use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_flip::{self, Running};
 use bt_platform::install_txn::{self, Armed, Held, Hold};
-use bt_platform::trust::Policy;
 
 use crate::cli;
 use crate::install_channel::Channel;
@@ -560,8 +562,10 @@ pub(crate) struct Road {
     /// The data directory whose claim O held (the storage rule O ran under:
     /// the applier inherits O's environment).
     pub(crate) data: PathBuf,
-    /// Which roots a signature may end in: the system's in the product.
-    pub(crate) policy: Policy,
+    /// What the kept release statement is verified with: the embedded keys,
+    /// and the retires remembered in [`Self::data`]'s `release-keys.json`
+    /// (`update_prepare::Vouching`).
+    pub(crate) vouching: crate::update_prepare::Vouching,
     /// How the installed copy was installed, derived now.
     pub(crate) channel: Option<Channel>,
     pub(crate) limits: Limits,
@@ -615,12 +619,13 @@ impl Road {
     /// runs it.
     pub(crate) fn of_this_copy(home: Home, installed: PathBuf, rescue: PathBuf) -> Self {
         let channel = Some(crate::install_channel::channel_of(&installed));
+        let data = crate::persist::storage_dir_unmoved();
         Self {
             home,
             installed,
             rescue,
-            data: crate::persist::storage_dir_unmoved(),
-            policy: Policy::System,
+            vouching: crate::update_prepare::Vouching::in_data_folder(&data),
+            data,
             channel,
             limits: Limits::PRODUCT,
             trial_clock: Arc::new(WallClock),
@@ -1433,7 +1438,7 @@ impl<'a> Txn<'a> {
         let resume = Resume {
             exe: &self.road.installed,
             channel: self.road.channel,
-            policy: &self.road.policy,
+            vouching: &self.road.vouching,
         };
         if let Err(stop) = staged_as_verified(&self.road.home, &self.j.journal, &resume) {
             world.say(&format!(

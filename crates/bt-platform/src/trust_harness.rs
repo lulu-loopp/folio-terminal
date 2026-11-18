@@ -72,6 +72,34 @@ pub fn program(path: &Path, version: FileVersion, behaviour: Behaviour) -> io::R
     }
 }
 
+/// **Write an unsigned program at `path` carrying `resources`**, which must not exist:
+/// [`program`]'s code and `VERSIONINFO`, with each of `resources` as an `RCDATA` resource of
+/// that name — a release's `folio.exe` with its manifest, as a release built without the signing
+/// service ships it (0.4.10 plan row 102: the updater no longer asks for a signature).
+///
+/// # Errors
+/// `Unsupported` off Windows.
+pub fn program_carrying(
+    path: &Path,
+    version: FileVersion,
+    resources: &[(&str, &[u8])],
+    behaviour: Behaviour,
+) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        world::program_doing(path, version, resources, behaviour);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, version, resources, behaviour);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the harness writes Windows programs only",
+        ))
+    }
+}
+
 /// **Open `path` for reading the way a scanner, an indexer or a backup tool
 /// may: sharing reading and writing, but not deletion** (0.4.6 ticket U-34).
 /// While the handle lives, a rename that replaces `path` is refused with

@@ -498,7 +498,7 @@ fn reason(failure: &Failure) -> String {
         Failure::Stopped(Stop::Sums) => Text::UpdateFailedSums,
         Failure::Stopped(Stop::Mount) => Text::UpdateFailedMount,
         Failure::Stopped(Stop::Identity) => Text::UpdateFailedIdentity,
-        Failure::Stopped(Stop::Offline) => Text::UpdateFailedOffline,
+        Failure::Stopped(Stop::StatementRefused) => Text::UpdateFailedUnvouched,
         Failure::Stopped(Stop::Copy) => Text::UpdateFailedCopy,
         Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
         Failure::Stopped(Stop::TooOld) => Text::UpdateFailedTooOld,
@@ -2164,21 +2164,18 @@ mod tests {
         );
     }
 
-    /// RED (0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD) — **an identity check that
-    /// could not reach revocation says the network was the reason; every
-    /// other identity refusal still says the update is not verified; both
-    /// then say nothing changed.**
+    /// RED (0.4.10 plan row 102 part 1b) — **a release statement that does not
+    /// vouch for the offer says the update is not vouched for; a staged set
+    /// that is not the statement's still says the update is not verified;
+    /// both then say nothing changed.**
     ///
-    /// MUTATION: map `Stop::Offline` to `Text::UpdateFailedIdentity` in
-    /// `reason` and the card cannot tell a missing network from a bad
-    /// signature.
+    /// MUTATION: map `Stop::StatementRefused` to `Text::UpdateFailedIdentity`
+    /// in `reason` (`plant-102-1b-unvouched-card.py`) and the card cannot tell
+    /// an unvouched release from a changed set.
     #[test]
-    fn an_offline_identity_check_says_the_network_was_the_reason() {
+    fn an_unvouched_release_says_so_on_the_card() {
         for (stop, says) in [
-            (
-                Stop::Offline,
-                "The update could not be verified without a network.",
-            ),
+            (Stop::StatementRefused, "The update is not vouched for."),
             (Stop::Identity, "The update is not verified."),
         ] {
             let drawn = paint(&State::Failed(None, Failure::Stopped(stop))).expect("a failed card");

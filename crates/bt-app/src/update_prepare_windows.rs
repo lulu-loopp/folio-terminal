@@ -10,12 +10,13 @@
 //! 1. **The road** ([`eligible`]): how this copy was installed (only
 //!    `Channel::Ours`, which on Windows already says the install folder may be
 //!    written, C2) and the installation home `H` beside the running
-//!    executable (`<install>\.folio-update\`). Then **the running build**: its
-//!    signature and identity under the policy (the capability's second half,
-//!    owner ruling 2026-09-25 1 — an unsigned build is not an updater:
-//!    [`Stop::NotOurs`]), the digest of its image, and the list of files it
-//!    shipped, read out of its own release manifest (F-4, F-8). Nothing is
-//!    written before this.
+//!    executable (`<install>\.folio-update\`). Then **the running build**: the
+//!    digest of its image, and the list of files it shipped, read out of its
+//!    own release manifest (F-4, F-8) — a build without one is not an updater
+//!    ([`Stop::NotOurs`]). Its signature decides nothing (0.4.10 plan row 102,
+//!    R3: the capability is the release build's flag, `update::eligible`, and
+//!    the manifest; the owner's 2026-09-25 "signed and flagged" became
+//!    "flagged"). Nothing is written before this.
 //! 2. **Allocate**: `H` is made if it is not there, its transaction lock taken
 //!    (held → [`Stop::Busy`]), a journal still standing is somebody else's
 //!    transaction ([`Stop::Busy`]), then the journal is written at `Allocated`
@@ -26,9 +27,15 @@
 //!    installation's own volume by construction** (R-6, C6): `H` is inside the
 //!    install folder, and nothing is written anywhere else — not the roaming
 //!    profile, not the system's temporary folder.
-//! 3. **Download** the offer's two files by its own tag into `download\` (the
-//!    transport; C11), and hash the archive against `SHA256SUMS.txt`
-//!    ([`Stop::Download`], [`Stop::Sums`]).
+//! 3. **The release statement** (0.4.10 plan row 102): `RELEASE-STATEMENT.txt`
+//!    and its signature fetched by the offer's own tag into `download\` and
+//!    verified with this copy's embedded keys, none it remembers as retired —
+//!    its tag and version the offer's, its `min_from` no newer than this build
+//!    ([`Stop::StatementRefused`]; [`Stop::TooOld`] before the large download;
+//!    `update_prepare::vouched`) — and kept in `H\<txn>\` beside `set\`
+//!    (`update_prepare::kept_statement`). Then **the archive**, by the name
+//!    the statement gives it, held to the statement's SHA-256 and size
+//!    ([`Stop::Download`], [`Stop::Sums`]; `update_prepare::fetch_vouched_asset`).
 //! 4. **Reserve**: the archive's directory declares what its members add up to
 //!    (`update_archive::declared_bytes`); the volume must still have room for
 //!    that twice (the expansion and the staged copy) and for the rescue copy of
@@ -37,26 +44,26 @@
 //!    on the same volume (C4, F-7).
 //! 5. **Expand** into `expand\` (`update_archive::expand`: the grammar, the
 //!    bounds, the new `folio.exe`'s manifest against the offer and this build,
-//!    every other member against the manifest — F-4, F-12), then **verify
-//!    identity, not merely validity** (§E, U-15): the new `folio.exe` against
-//!    the running build's subject and identity OID at the offer's version and
-//!    this machine ([`trust::verify_release_file_under`]), `folio.msix` when
-//!    the release carries one ([`trust::verify_release_package_under`]), and
-//!    the two Microsoft sidecars' signatures ([`trust::signature`]). Any
-//!    refusal is [`Stop::Identity`] — a release whose archive and checksum
-//!    document were both replaced consistently still fails here — except a
-//!    revocation that could not be reached, [`Stop::Offline`]; every refusal
-//!    of `trust` writes its line ([`trust_refused`]).
+//!    every other member against the manifest — F-4, F-12), then **every
+//!    member, `folio.exe` and `folio.msix` included, held to the statement's
+//!    member lines** ([`held_to_the_statement`]): the names the same set, each
+//!    SHA-256 and size the same. Any difference is [`Stop::Identity`]. No
+//!    `trust` call decides anything (R4, R9: the sidecars' Microsoft
+//!    signatures are checked when the release is packaged, and their bytes are
+//!    bound here twice, by the manifest and by the statement).
 //! 6. **Stage**: every member copied into `set\` (`install_txn::durable_copy`:
 //!    named only once flushed, the folder flushed after), `expand\` and
-//!    `download\` removed, and **`set\` verified again as it lies** — every
-//!    member's digest the one measured in `expand\`, and the identity checks of
-//!    step 5 once more — because what gets installed must be what was checked
-//!    ([`Stop::Copy`], [`Stop::Identity`]).
+//!    `download\` removed, and **`set\` verified again as it lies** — the kept
+//!    statement verified again and every member held to it ([`still_staged`])
+//!    — because what gets installed must be what was checked ([`Stop::Copy`],
+//!    [`Stop::Identity`]). Then the one reading of a signature the Prepare
+//!    makes: whether the staged `folio.exe` carries our signing service's
+//!    signature ([`service_signature`]), which decides no step — only whether
+//!    the Ready card says the version is not signed by it (R4, R5).
 //! 7. **Rescue** (C5 as F-8 replaced it): the running executable copied to
 //!    `rescue\<name>`, the copy the applier and recovery run from and no step
-//!    ever moves; its digest must be the running image's and its identity the
-//!    running build's ([`Stop::Clone`]).
+//!    ever moves; its digest and length must be the running image's — equal
+//!    bytes are the same build ([`Stop::Clone`]).
 //! 8. **`Prepared`**, durably, with the inventories O measured under the lock
 //!    (F-8): the old shipped list, what is present at every name of it or of
 //!    the new set (name, digest, size), and the new set; `deferred_launches:
@@ -73,12 +80,13 @@
 //! **A later launch** is `update_prepare::at_launch`, shared with macOS (W1's
 //! sweep, W2's count and its discard at the second launch). **Before any
 //! resume, and before the apply** ([`staged_as_verified`]): the channel and
-//! the home, the installed image still the one the journal recorded, every
-//! staged member still its recorded digest, the staged executable's identity again at
-//! its own version, and the rescue copy still the old image. The applier runs
-//! it after O has let go and before the entrance is written (U-23); O's resume
-//! at a later launch is [`resume`] ([`revalidate`], which discards on a
-//! failure, then the staged `folio.exe`'s own version), which the update job
+//! the home, the installed image still the one the journal recorded, the kept
+//! release statement verified again and every staged member held to it and
+//! to its recorded digest, and the rescue copy still the old image; a
+//! transaction folder with no statement — one an older build prepared — is
+//! refused. The applier runs it after O has let go and before the entrance is
+//! written (U-23); O's resume at a later launch is [`resume`] ([`revalidate`],
+//! which discards on a failure; the version is the statement's), which the update job
 //! runs on its worker at every launch that finds a `Prepared` transaction
 //! (`update_prepare::settle_at_launch`, U-33).
 
@@ -91,8 +99,9 @@ use bt_platform::admission::WorkerCtx;
 use bt_platform::exclusive_create::Directory;
 use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_txn::{self, Hold};
-use bt_platform::trust::{self, Expectation, FileVersion, Policy, Refusal};
+use bt_platform::trust::{self, Policy};
 use bt_winres::release_manifest::{self, Manifest};
+use bt_winres::release_statement::{VerifiedStatement, WINDOWS_X64};
 
 use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
@@ -107,8 +116,8 @@ use crate::update_job::{
     Unsupported,
 };
 use crate::update_prepare::{
-    WORKER, abandon_on, digest_of, discard, fetching, finish, journal_failed, journal_stop,
-    matches_its_sum, note,
+    Vouching, WORKER, abandon_on, digest_of, discard, fetch_vouched_asset, finish, journal_failed,
+    journal_stop, kept_statement, note, statement_refused, vouched,
 };
 use crate::update_txn::{
     Adapter, Digest, Event, Home, Inventories, Journal, Layout, Member, Place, TxnId,
@@ -117,13 +126,26 @@ use crate::update_txn::{
 /// The new release's executable, which carries its manifest.
 const EXECUTABLE: &str = update_archive::EXECUTABLE;
 
-/// The new release's package, verified by its own signature (F-5).
+/// The new release's package, which the manifest cannot list (F-5): the
+/// statement does.
 const PACKAGE: &str = update_archive::PACKAGE;
 
-/// **The two Microsoft sidecars** every release carries (C4): their bytes are
-/// the manifest's (F-4) and their signatures are checked as `package.ps1
-/// -Sign` checks them (U-15 decision 6).
-const SIDECARS: [&str; 2] = ["conpty.dll", "OpenConsole.exe"];
+/// **Whose signature on a staged `folio.exe` is our signing service's**
+/// (0.4.10 plan row 102 §1.8, R4): the subject the package is published under
+/// (`msix::PACKAGE_PUBLISHER`) and the identity-validation OID of our profile,
+/// two constants recorded in code rather than read from the statement — so a
+/// statement's `authenticode true` cannot stand in for the signature.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ServiceSigner {
+    pub(crate) subject: &'static str,
+    pub(crate) identity_oid: &'static str,
+}
+
+/// **Our signing service**, as the signature on every signed release names it.
+pub(crate) const OUR_SERVICE: ServiceSigner = ServiceSigner {
+    subject: bt_platform::msix::PACKAGE_PUBLISHER,
+    identity_oid: "1.3.6.1.4.1.311.97.921771326.840678362.737210289.98417136",
+};
 
 /// **How long the expansion may take** once it has begun: 200 MB at most is
 /// expanded ([`update_archive::ARCHIVE_MAX_BYTES`]), which a disk writes in
@@ -176,7 +198,11 @@ pub(crate) struct WinPrepare {
     exe: PathBuf,
     /// How this copy was installed, as the start read it.
     channel: Option<Channel>,
-    /// Which roots a signature may end in: the system's, in the product.
+    /// What the release statement is verified with, and where its retires
+    /// are remembered (`update_prepare::Vouching`).
+    vouching: Vouching,
+    /// Which roots a signature may end in, for the one reading that decides
+    /// no step ([`service_signature`]): the system's, in the product.
     policy: Policy,
     tools: Arc<dyn Tools>,
     /// The layouts this road's Prepare is called through, by the adapter
@@ -190,14 +216,16 @@ pub(crate) struct WinPrepare {
 
 impl WinPrepare {
     /// **The driver of the running copy**: this process's executable, the
-    /// channel the start read (`install_channel::channel`), the system's trust
-    /// and effects. A process that cannot name its own executable has no road
-    /// to take: [`Unsupported`].
+    /// channel the start read (`install_channel::channel`), the embedded
+    /// release keys and this copy's data folder, the system's trust and
+    /// effects. A process that cannot name its own executable has no road to
+    /// take: [`Unsupported`].
     pub(crate) fn of_this_copy() -> Box<dyn Driver> {
         match std::env::current_exe() {
             Ok(exe) => Box::new(Self {
                 exe,
                 channel: crate::install_channel::channel(),
+                vouching: Vouching::of_this_copy(),
                 policy: Policy::System,
                 tools: Arc::new(System),
                 layouts: Layouts::of(Arc::new(Ours)),
@@ -207,18 +235,20 @@ impl WinPrepare {
         }
     }
 
-    /// A driver for the running executable `exe`, with `channel`, `policy` and
-    /// `tools` — a test's.
+    /// A driver for the running executable `exe`, with `channel`, `vouching`,
+    /// `policy` and `tools` — a test's.
     #[cfg(test)]
     pub(crate) fn with(
         exe: PathBuf,
         channel: Option<Channel>,
+        vouching: Vouching,
         policy: Policy,
         tools: Arc<dyn Tools>,
     ) -> Self {
         Self {
             exe,
             channel,
+            vouching,
             policy,
             tools,
             layouts: Layouts::of(Arc::new(Ours)),
@@ -234,8 +264,9 @@ impl Driver for WinPrepare {
         transport: &SharedTransport,
         post: &Poster,
     ) -> Result<(), Refused> {
-        let (exe, policy, tools, transport, layouts, clock) = (
+        let (exe, vouching, policy, tools, transport, layouts, clock) = (
             self.exe.clone(),
+            self.vouching.clone(),
             self.policy.clone(),
             Arc::clone(&self.tools),
             Arc::clone(transport),
@@ -254,6 +285,7 @@ impl Driver for WinPrepare {
                     post: &post,
                     tools: tools.as_ref(),
                     channel,
+                    vouching: &vouching,
                     policy: &policy,
                     layouts: &layouts,
                     clock: clock.as_ref(),
@@ -274,6 +306,7 @@ pub(crate) struct Road<'a> {
     post: &'a Poster,
     tools: &'a dyn Tools,
     channel: Option<Channel>,
+    vouching: &'a Vouching,
     policy: &'a Policy,
     layouts: &'a Layouts<dyn PreparePoint>,
     /// The clock a held journal write is asked again on.
@@ -378,33 +411,23 @@ fn stop_for(why: &NotEligible) -> Stop {
     }
 }
 
-/// **The running build, as a Prepare needs it**: whom its signature names (the
-/// expectation a new file is held to, at the offer's version), its image's
-/// digest and length (the rescue copy is held to them), and the names it
-/// shipped (F-8's old shipped list).
+/// **The running build, as a Prepare needs it**: its image's digest and
+/// length (the rescue copy is held to them), and the names it shipped (F-8's
+/// old shipped list).
 pub(crate) struct Running {
-    identity: Expectation,
     digest: String,
     size: u64,
     shipped: Vec<String>,
 }
 
-/// **Read the running build at `exe`.**
+/// **Read the running build at `exe`.** Its signature is not read: it decides
+/// nothing (R3).
 ///
 /// # Errors
-/// [`Stop::NotOurs`] for an unsigned build or one that carries no release
-/// manifest — neither is an updater build; [`Stop::Offline`] when its
-/// signature's revocation could not be reached, [`Stop::Identity`] for any
-/// other signature that does not pass (revocation unknown included: the next
-/// press asks again) — each through [`trust_refused`].
-fn running(exe: &Path, policy: &Policy) -> Result<Running, Stop> {
-    let identity = trust::identity_of(exe, policy).map_err(|refusal| {
-        let otherwise = match refusal {
-            Refusal::Unsigned => Stop::NotOurs,
-            _ => Stop::Identity,
-        };
-        trust_refused("the running build", &refusal, otherwise)
-    })?;
+/// [`Stop::NotOurs`] for a build that carries no release manifest — it is not
+/// an updater build; [`Stop::Clone`] when its image cannot be read (the
+/// rescue copy is held to it).
+fn running(exe: &Path) -> Result<Running, Stop> {
     let manifest = EmbeddedManifest
         .manifest_text(exe)
         .ok()
@@ -412,19 +435,12 @@ fn running(exe: &Path, policy: &Policy) -> Result<Running, Stop> {
         .ok_or(Stop::NotOurs)?;
     let mut shipped = vec![EXECUTABLE.to_owned(), PACKAGE.to_owned()];
     shipped.extend(manifest.members.into_iter().map(|member| member.name));
-    let (digest, size) = digest_of(exe).map_err(|_| Stop::Identity)?;
+    let (digest, size) = digest_of(exe).map_err(|_| Stop::Clone)?;
     Ok(Running {
-        identity,
         digest,
         size,
         shipped,
     })
-}
-
-/// The offer's version as `VERSIONINFO` spells it: `0.4.7` → `0.4.7.0`
-/// (`package.ps1` writes the fourth part as 0).
-fn file_version(version: &str) -> Option<FileVersion> {
-    FileVersion::parse_four(&format!("{version}.0"))
 }
 
 // ── steps 2–8 ───────────────────────────────────────────────────────────────
@@ -434,7 +450,7 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     let (home, adapter) = eligible(road.exe, road.channel).map_err(|why| stop_for(&why))?;
     let layout = road.layouts.named(adapter).map_err(|_| Stop::NotOurs)?;
     road.go_on()?;
-    let running = running(road.exe, road.policy)?;
+    let running = running(road.exe)?;
     let name = road.exe.file_name().ok_or(Stop::NotWritable)?;
 
     // Step 2: the home, the lock, the journal at `Allocated`.
@@ -578,8 +594,29 @@ fn acquire(
     }
     road.go_on()?;
 
-    // Step 3: the two files, and the hash.
-    let archive = fetch(road, &folders.download)?;
+    // Step 3: the statement, kept beside `set\`; then the archive it names.
+    let txn = road.offer.txn();
+    let (statement, fetched) = vouched(
+        road.transport,
+        road.offer,
+        road.post,
+        &folders.download,
+        road.vouching,
+    )?;
+    let kept = kept_statement(home, txn);
+    for (from, to) in fetched.iter().zip(&kept) {
+        road.tools.copy(from, to).map_err(|why| {
+            note(&format!("the release statement was not kept: {why}"));
+            Stop::Copy
+        })?;
+    }
+    let archive = fetch_vouched_asset(
+        road.transport,
+        road.offer,
+        road.post,
+        &folders.download,
+        &statement,
+    )?;
     road.post.post(Step::Staged);
 
     // Step 4: the space the rest needs.
@@ -597,35 +634,39 @@ fn acquire(
     }
     road.go_on()?;
 
-    // Step 5: expand, and verify identity.
-    let expectation = file_version(version)
-        .map(|offered| running.identity.clone().for_offer(offered))
-        .ok_or(Stop::Identity)?;
+    // Step 5: expand, and hold every member to the statement.
     let members = expand_release(&archive, version, &folders.expand)?;
     let _ = install_txn::durable_remove(&folders.download);
-    verify_set(&folders.expand, &members, &expectation, road.policy)?;
-    road.go_on()?;
-
-    // Step 6: the set, copied, flushed, and verified again where it lies.
     let mut new = Vec::with_capacity(members.len());
     for member in &members {
         let (digest, size) = digest_of(&folders.expand.join(member)).map_err(|_| Stop::Copy)?;
-        road.tools
-            .copy(&folders.expand.join(member), &folders.set.join(member))
-            .map_err(|_| Stop::Copy)?;
         new.push(Member {
             name: member.clone(),
             digest: Digest::parse(&digest).map_err(|_| Stop::Copy)?,
             size,
         });
     }
+    held_to_the_statement(&statement, &new)?;
+    road.go_on()?;
+
+    // Step 6: the set, copied, flushed, and verified again where it lies.
+    for member in &new {
+        road.tools
+            .copy(
+                &folders.expand.join(&member.name),
+                &folders.set.join(&member.name),
+            )
+            .map_err(|_| Stop::Copy)?;
+    }
     let _ = install_txn::durable_remove(&folders.expand);
-    still_staged(&folders.set, &new, &expectation, road.policy)?;
+    still_staged(&folders.set, &new, &kept, road.vouching)?;
+    let signed = service_signature(&folders.set.join(EXECUTABLE), road.policy, &OUR_SERVICE);
+    note(&format!("the staged {EXECUTABLE} is {}", signed.as_said()));
     road.go_on()?;
 
     // Step 7: the rescue copy of the running executable.
     road.tools.copy(road.exe, rescue).map_err(|_| Stop::Clone)?;
-    rescue_is_the_running_build(rescue, running, road.policy)?;
+    rescue_is_the_running_build(rescue, running)?;
     road.go_on()?;
 
     // Step 8's inventories, measured under the lock.
@@ -637,23 +678,6 @@ fn acquire(
         old_present: present(install, &running.shipped, &new)?,
         new,
     })
-}
-
-/// **Step 3**: the offer's two files into `download`, and the archive held to
-/// its line in the checksum document. Answers where the archive is.
-fn fetch(road: &Road<'_>, download: &Path) -> Result<PathBuf, Stop> {
-    let [asset, sums] = road.offer.requests();
-    let fetching = fetching(road.post);
-    let fetched = |request| {
-        road.transport
-            .fetch(request, download, &fetching)
-            .map_err(|_| road.go_on().err().unwrap_or(Stop::Download))
-    };
-    let archive = fetched(&asset)?;
-    let sums_file = fetched(&sums)?;
-    road.go_on()?;
-    matches_its_sum(&archive, &sums_file, road.offer.asset())?;
-    Ok(archive)
 }
 
 /// **Step 5's expansion** into the empty folder `into`, held open: the
@@ -684,26 +708,6 @@ fn archive_refused(refusal: update_archive::Refusal) -> Stop {
     stop_for_archive(&refusal.reason)
 }
 
-/// **The stop a trust refusal is reported as, and its one line** (0.4.9
-/// T-UPDATE-OFFLINE-IDENTITY-CARD): every refusal of `trust` in this Prepare
-/// comes here, so `diagnostics.log` names the check that refused and Windows'
-/// code; a revocation that could not be reached is [`Stop::Offline`] — the
-/// card says the network was the reason — and every other refusal the step's
-/// own stop, `otherwise`. `file` names what was checked, never its path.
-fn trust_refused(file: &str, refusal: &Refusal, otherwise: Stop) -> Stop {
-    crate::diagnostics::note(&trust_refused_line(file, refusal));
-    match refusal {
-        Refusal::RevocationOffline { .. } => Stop::Offline,
-        _ => otherwise,
-    }
-}
-
-/// [`trust_refused`]'s line: what was checked, the refusal's name and
-/// Windows' code.
-fn trust_refused_line(file: &str, refusal: &Refusal) -> String {
-    format!("Folio: update job — the identity check of {file} refused: {refusal}")
-}
-
 /// The stop an archive [`Reason`] is reported as — see [`archive_refused`].
 fn stop_for_archive(reason: &Reason) -> Stop {
     match reason {
@@ -713,78 +717,120 @@ fn stop_for_archive(reason: &Reason) -> Stop {
     }
 }
 
-/// **The signed files of a release in `folder` are this publisher's, at the
-/// offer's version, for this machine** (§E, U-15): `folio.exe` held to
-/// `expectation`, `folio.msix` too when the release has one, and the two
-/// sidecars' signatures, each of which must be there (C4).
+/// **The members of a Windows release are the ones its statement lists**
+/// (0.4.10 plan row 102): their names the same set — `folio.exe` and
+/// `folio.msix` among them, the two the F-4 manifest cannot list — and each
+/// SHA-256 and length the same (`VerifiedStatement::members_match`).
 ///
 /// # Errors
-/// [`Stop::Identity`], whichever refused; [`Stop::Offline`] for a refusal of
-/// `trust` that could not reach revocation ([`trust_refused`]).
-fn verify_set(
-    folder: &Path,
-    members: &[String],
-    expectation: &Expectation,
-    policy: &Policy,
-) -> Result<(), Stop> {
-    let has = |name: &str| members.iter().any(|member| member == name);
-    if !has(EXECUTABLE) || !SIDECARS.iter().all(|sidecar| has(sidecar)) {
-        return Err(Stop::Identity);
-    }
-    trust::verify_release_file_under(&folder.join(EXECUTABLE), expectation, policy)
-        .map_err(|refusal| trust_refused(EXECUTABLE, &refusal, Stop::Identity))?;
-    if has(PACKAGE) {
-        trust::verify_release_package_under(&folder.join(PACKAGE), expectation, policy)
-            .map_err(|refusal| trust_refused(PACKAGE, &refusal, Stop::Identity))?;
-    }
-    for sidecar in SIDECARS {
-        trust::signature(&folder.join(sidecar), policy)
-            .map_err(|refusal| trust_refused(sidecar, &refusal, Stop::Identity))?;
-    }
-    Ok(())
+/// [`Stop::Identity`], after its line naming the first difference.
+fn held_to_the_statement(statement: &VerifiedStatement, set: &[Member]) -> Result<(), Stop> {
+    let found: Vec<release_manifest::Member> = set
+        .iter()
+        .map(|member| release_manifest::Member {
+            name: member.name.clone(),
+            sha256: member.digest.to_string(),
+            size: member.size,
+        })
+        .collect();
+    statement
+        .members_match(WINDOWS_X64, &found)
+        .map_err(|refusal| statement_refused(&refusal))
 }
 
-/// **`set\` is what was verified**: every member's digest and length the ones
-/// recorded, and the identity checks again, as the files lie there.
+/// **`set\` is what was verified**: the statement kept beside it (`kept`, its
+/// text and its signature) verified again with `vouching`, every member's
+/// digest and length the ones recorded, and the members held to the kept
+/// statement — as the files lie there. Answers the kept statement.
 ///
 /// # Errors
-/// [`Stop::Identity`].
+/// [`Stop::StatementRefused`] for a kept statement that is missing or no
+/// longer verifies; [`Stop::Identity`] for a member that is not the one
+/// recorded or listed.
 fn still_staged(
     set: &Path,
     new: &[Member],
-    expectation: &Expectation,
-    policy: &Policy,
-) -> Result<(), Stop> {
+    kept: &[PathBuf; 2],
+    vouching: &Vouching,
+) -> Result<VerifiedStatement, Stop> {
+    let statement = vouching.verified(&kept[0], &kept[1])?;
     for member in new {
         let (digest, size) = digest_of(&set.join(&member.name)).map_err(|_| Stop::Identity)?;
         if Digest::parse(&digest).ok() != Some(member.digest) || size != member.size {
             return Err(Stop::Identity);
         }
     }
-    let names: Vec<String> = new.iter().map(|member| member.name.clone()).collect();
-    verify_set(set, &names, expectation, policy)
+    held_to_the_statement(&statement, new)?;
+    Ok(statement)
+}
+
+/// **Whether a staged `folio.exe` carries our signing service's signature**
+/// (0.4.10 plan row 102 §1.8, R4) — the updater's own reading, which decides
+/// no step of the Prepare: part 3 of the row gives the Ready card its one
+/// sentence from it. Windows' answer under `policy` must be a valid
+/// signature whose subject is `signer`'s and whose leaf carries `signer`'s
+/// identity OID; any refusal — unsigned, revoked, revocation offline or
+/// unknown — reads as not signed by it.
+#[must_use]
+pub(crate) fn service_signature(
+    exe: &Path,
+    policy: &Policy,
+    signer: &ServiceSigner,
+) -> ServiceSignature {
+    match trust::signature(exe, policy) {
+        Ok(signed) => {
+            let subject =
+                bt_platform::msix::publisher_matches_subject(signer.subject, &signed.subject);
+            let profile =
+                trust::identity_oid(&signed.key_usages).is_ok_and(|oid| oid == signer.identity_oid);
+            if subject && profile {
+                ServiceSignature::Ours
+            } else {
+                ServiceSignature::Another
+            }
+        }
+        Err(trust::Refusal::Unsigned) => ServiceSignature::Unsigned,
+        Err(refusal) => ServiceSignature::Refused(refusal.to_string()),
+    }
+}
+
+/// **What [`service_signature`] read** — one of four answers; only
+/// [`Self::Ours`] is our signing service's signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ServiceSignature {
+    /// A valid signature by our service: our subject and our profile.
+    Ours,
+    /// A valid signature by another signer or profile.
+    Another,
+    /// No signature at all.
+    Unsigned,
+    /// A signature Windows refused, by the refusal's words.
+    Refused(String),
+}
+
+impl ServiceSignature {
+    /// The answer, as a diagnostics line says it.
+    fn as_said(&self) -> String {
+        match self {
+            Self::Ours => "signed by our signing service".to_owned(),
+            Self::Another => "signed, by another signer than our signing service".to_owned(),
+            Self::Unsigned => "not signed".to_owned(),
+            Self::Refused(refusal) => format!("not signed by our signing service ({refusal})"),
+        }
+    }
 }
 
 /// **The rescue copy is the running build**: the running image's digest and
-/// length, and the running build's identity as its own signature names it.
+/// length. Equal bytes are the same build; its signature is not read (R3).
 ///
 /// # Errors
-/// [`Stop::Clone`]; [`Stop::Offline`] when its signature's revocation could
-/// not be reached ([`trust_refused`]).
-fn rescue_is_the_running_build(
-    rescue: &Path,
-    running: &Running,
-    policy: &Policy,
-) -> Result<(), Stop> {
+/// [`Stop::Clone`].
+fn rescue_is_the_running_build(rescue: &Path, running: &Running) -> Result<(), Stop> {
     let (digest, size) = digest_of(rescue).map_err(|_| Stop::Clone)?;
     if digest != running.digest || size != running.size {
         return Err(Stop::Clone);
     }
-    match trust::identity_of(rescue, policy) {
-        Ok(identity) if identity == running.identity => Ok(()),
-        Ok(_) => Err(Stop::Clone),
-        Err(refusal) => Err(trust_refused("the rescue copy", &refusal, Stop::Clone)),
-    }
+    Ok(())
 }
 
 /// **What is in the install folder now at every name the old build shipped or
@@ -827,22 +873,21 @@ fn present(install: &Path, shipped: &[String], new: &[Member]) -> Result<Vec<Mem
 
 /// **What a staged transaction is checked against**: the installed executable
 /// (the running one, for a resume in O; `<install>\folio.exe`, for the
-/// applier), how that copy was installed, and the trust policy. The version
-/// the staged set is held to is read from the staged `folio.exe`'s own
-/// `VERSIONINFO` (U-23's decision on U-20's decision 1): the journal records
-/// no tag and no `to_version`, and needs neither — every staged member's
-/// digest was recorded when it had just been verified at the offer's version,
-/// and it is those digests that bind the set to that offer now.
+/// applier), how that copy was installed, and what a release statement is
+/// verified with. The version the staged set installs is the kept
+/// statement's (0.4.10 plan row 102): the journal records no tag and no
+/// `to_version`, and needs neither — the statement kept beside `set\` names
+/// the version and every member, and it is verified again each time.
 pub(crate) struct Resume<'a> {
     pub(crate) exe: &'a Path,
     pub(crate) channel: Option<Channel>,
-    pub(crate) policy: &'a Policy,
+    pub(crate) vouching: &'a Vouching,
 }
 
 /// **Revalidate a staged transaction before O resumes it** ((b).1 F-17: hash,
 /// signature, manifest, classification) — [`staged_as_verified`]; a failure
 /// discards the transaction (`Discarded`, then `update_prepare::clear`) and
-/// says why.
+/// says why. Answers the transaction and the version its set installs.
 ///
 /// # Errors
 /// The [`Stop`] that failed; the transaction is gone.
@@ -850,9 +895,9 @@ pub(crate) fn revalidate(
     worker: &WorkerCtx,
     staged: Staged,
     resume: &Resume<'_>,
-) -> Result<Staged, Stop> {
+) -> Result<(Staged, String), Stop> {
     match staged_as_verified(&staged.home, &staged.journal, resume) {
-        Ok(()) => Ok(staged),
+        Ok(version) => Ok((staged, version)),
         Err(stop) => {
             let _ = discard(worker, staged, &Event::Discarded);
             Err(stop)
@@ -861,11 +906,8 @@ pub(crate) fn revalidate(
 }
 
 /// **O's resume at a later launch** (U-33; `update_prepare::Resumer`):
-/// [`revalidate`], then the version the staged set installs, read from the
-/// staged `folio.exe`'s own release manifest (F-4: the manifest the archive's
-/// expansion held to the offer) — the offer is rebuilt from it, never from a
-/// download. A set whose manifest cannot be read is discarded like any other
-/// that fails revalidation.
+/// [`revalidate`], whose version — the kept statement's — the offer is
+/// rebuilt from, never from a download.
 ///
 /// # Errors
 /// The [`Stop`] that failed; the transaction is gone.
@@ -874,27 +916,14 @@ pub(crate) fn resume(
     staged: Staged,
     resume: &Resume<'_>,
 ) -> Result<(Staged, String), Stop> {
-    let staged = revalidate(worker, staged, resume)?;
-    let version = staged
-        .home
-        .members_folder(staged.journal.txn, Place::Set)
-        .and_then(|set| EmbeddedManifest.manifest_text(&set.join(EXECUTABLE)).ok())
-        .and_then(|text| Manifest::parse(&text).ok())
-        .map(|manifest| manifest.version);
-    match version {
-        Some(version) => Ok((staged, version)),
-        None => {
-            let _ = discard(worker, staged, &Event::Discarded);
-            Err(Stop::Identity)
-        }
-    }
+    revalidate(worker, staged, resume)
 }
 
 /// **The resumer of the running copy** (`update_job::resumer_for_this_copy`):
-/// [`resume`] for the executable at `exe` under `policy`, for the channel
-/// the job hands it.
+/// [`resume`] for the executable at `exe`, verifying with `vouching`, for the
+/// channel the job hands it.
 #[must_use]
-pub(crate) fn resumer(exe: PathBuf, policy: Policy) -> crate::update_prepare::Resumer {
+pub(crate) fn resumer(exe: PathBuf, vouching: Vouching) -> crate::update_prepare::Resumer {
     Box::new(move |worker, staged, channel| {
         resume(
             worker,
@@ -902,7 +931,7 @@ pub(crate) fn resumer(exe: PathBuf, policy: Policy) -> crate::update_prepare::Re
             &Resume {
                 exe: &exe,
                 channel,
-                policy: &policy,
+                vouching: &vouching,
             },
         )
     })
@@ -912,10 +941,12 @@ pub(crate) fn resumer(exe: PathBuf, policy: Policy) -> crate::update_prepare::Re
 /// — the check a resume in O and the applier both run, the applier under the
 /// transaction lock after O has let go and before it writes the entrance
 /// (U-23): this copy's channel and home ([`eligible`]); the installed image
-/// still the `folio.exe` the journal recorded as present; every staged member of `set\`
-/// still its recorded digest and length, and the staged set's identity checks
-/// again at the staged `folio.exe`'s own version; the rescue copy still the
-/// old image.
+/// still the `folio.exe` the journal recorded as present; the release
+/// statement kept in `H\<txn>\` verified again, and every staged member of
+/// `set\` still its recorded digest and length and the one the statement
+/// lists ([`still_staged`]); the rescue copy still the old image. Answers the
+/// version the statement names. A transaction folder with no statement —
+/// one an older build prepared — fails here and is refused.
 ///
 /// # Errors
 /// The [`Stop`] that failed. Nothing is written.
@@ -923,7 +954,7 @@ pub(crate) fn staged_as_verified(
     home: &Home,
     journal: &Journal,
     resume: &Resume<'_>,
-) -> Result<(), Stop> {
+) -> Result<String, Stop> {
     let Layout::Members(inventories) = &journal.body.layout else {
         return Err(journal_stop(
             "the staged journal's layout is not Folio's own",
@@ -947,21 +978,16 @@ pub(crate) fn staged_as_verified(
     if !is(resume.exe, old) {
         return Err(Stop::Identity);
     }
-    let running = trust::identity_of(resume.exe, resume.policy)
-        .map_err(|refusal| trust_refused("the running build", &refusal, Stop::Identity))?;
     let Some(set) = home.members_folder(journal.txn, Place::Set) else {
         return Err(journal_stop(
             "the staged transaction's set folder has no name",
         ));
     };
-    let staged_version = trust::identity_of(&set.join(EXECUTABLE), resume.policy)
-        .map_err(|refusal| trust_refused(EXECUTABLE, &refusal, Stop::Identity))?
-        .version;
-    still_staged(
+    let statement = still_staged(
         &set,
         &inventories.new,
-        &running.for_offer(staged_version),
-        resume.policy,
+        &kept_statement(home, journal.txn),
+        resume.vouching,
     )?;
     let Some(rescue) = home.rescue_copy(journal.txn, name) else {
         return Err(journal_stop("the staged rescue copy has no name"));
@@ -969,7 +995,7 @@ pub(crate) fn staged_as_verified(
     if !is(&rescue, old) {
         return Err(Stop::Clone);
     }
-    Ok(())
+    Ok(statement.what_it_says().version.clone())
 }
 
 #[cfg(test)]

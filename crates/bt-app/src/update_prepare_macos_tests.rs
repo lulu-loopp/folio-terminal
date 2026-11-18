@@ -33,7 +33,6 @@ use crate::update_txn::{Actor, Effect, PhaseKind, may};
 #[cfg(target_os = "macos")]
 use crate::update_txn::{HeaderOutcome, Phase};
 
-use crate::update_prepare::sum_for;
 #[cfg(target_os = "macos")]
 use crate::update_prepare::{AtLaunch, at_launch};
 
@@ -41,9 +40,13 @@ use crate::update_prepare::{AtLaunch, at_launch};
 /// tests that press one).
 #[cfg(target_os = "macos")]
 impl MacPrepare {
-    /// A driver for `bundle`, with `tools` and `channel` — a test's.
+    /// A driver for `bundle`, with `tools` and `channel` — a test's: the
+    /// release statement verified with the test keys
+    /// (`Vouching::under_test_keys`), what it retires remembered beside the
+    /// bundle.
     pub(crate) fn with(bundle: PathBuf, tools: Arc<dyn Tools>, channel: Option<Channel>) -> Self {
         Self {
+            vouching: Vouching::under_test_keys(bundle.with_extension("release-keys.json")),
             bundle,
             tools,
             channel,
@@ -629,12 +632,13 @@ impl Tools for TestTools {
     }
 }
 
-/// **The release, as a stand-in transport**: the image's bytes and the
-/// checksum document, written under the name each request asks for.
+/// **The release, as a stand-in transport**: the image's bytes, and the
+/// release statement and its signature (0.4.10 plan row 102), written under
+/// the name each request asks for.
 #[cfg(target_os = "macos")]
 struct Release {
     image: PathBuf,
-    sums: String,
+    statement: (Vec<u8>, Vec<u8>),
     /// The file name whose fetch fails.
     refuse: Option<String>,
     fetched: Mutex<Vec<String>>,
@@ -661,28 +665,41 @@ impl Transport for Release {
                 received: length,
                 total: Some(length),
             });
+        } else if request.file_name == bt_winres::release_statement::SIGNATURE_FILE {
+            std::fs::write(&target, &self.statement.1).map_err(|e| e.to_string())?;
         } else {
-            std::fs::write(&target, &self.sums).map_err(|e| e.to_string())?;
+            std::fs::write(&target, &self.statement.0).map_err(|e| e.to_string())?;
         }
         Ok(target)
     }
 }
 
-/// `shasum`'s line for `image` under the offer's asset name, beside another
-/// file's.
+/// The image's name on the release page, as the statement lists it.
 #[cfg(target_os = "macos")]
-fn sums_for(image: &Path) -> String {
-    let digest = bt_winres::digest::hex(&bt_winres::digest::sha256(&std::fs::read(image).unwrap()));
-    format!(
-        "{}  folio-0.4.7-windows-x64.zip\n{digest}  {}\n",
-        "0".repeat(64),
-        offer(0).asset()
-    )
+const IMAGE: &str = "Folio-0.4.7-macos-arm64.dmg";
+
+/// **The release statement of `v0.4.7` listing `bytes` as the macOS image**,
+/// and its signature by the live test key.
+#[cfg(target_os = "macos")]
+fn statement_listing(bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    use crate::update_prepare::test_statements::{Signer, signed_statement, statement_of};
+    let statement = statement_of(
+        "v0.4.7",
+        (bt_winres::release_statement::MACOS_ARM64, IMAGE, bytes),
+        Vec::new(),
+    );
+    signed_statement(&statement, Signer::Live)
+}
+
+/// [`statement_listing`] the image at `image`.
+#[cfg(target_os = "macos")]
+fn statement_for(image: &Path) -> (Vec<u8>, Vec<u8>) {
+    statement_listing(&std::fs::read(image).unwrap())
 }
 
 /// **A running bundle and a release**: `<scratch>/apps/<running>` at 0.4.6,
 /// and an image whose `Folio.app` is 0.4.7 (`dress` may change it, re-signed
-/// after), with its checksum document.
+/// after), with its release statement.
 #[cfg(target_os = "macos")]
 struct Scene {
     scratch: Scratch,
@@ -714,7 +731,7 @@ impl Scene {
     fn release(&self) -> Arc<Release> {
         Arc::new(Release {
             image: self.image.clone(),
-            sums: sums_for(&self.image),
+            statement: statement_for(&self.image),
             refuse: None,
             fetched: Mutex::new(Vec::new()),
         })
@@ -803,31 +820,6 @@ fn journal_on_disk(home: &Home) -> Journal {
 }
 
 // ── the pure parts ──────────────────────────────────────────────────────────
-
-/// RED (U-27) — **the checksum document's line for the offer's own asset is
-/// the one the image is held to**: `shasum`'s two spellings, another file's
-/// line ignored, no line or two disagreeing lines no answer.
-///
-/// MUTATION: in `sum_for`, take the first well-formed line whatever it names
-/// (drop `name != asset`).
-#[test]
-fn the_checksum_line_is_the_offers_own_asset() {
-    let asset = "Folio-0.4.7-macos-arm64.dmg";
-    let ours = "ab".repeat(32);
-    let theirs = "cd".repeat(32);
-    let document = format!("{theirs}  Folio-0.4.6-macos-arm64.dmg\n{ours}  {asset}\n");
-    assert_eq!(sum_for(&document, asset), Some(ours.clone()));
-    let binary = format!("{} *{asset}\r\n", ours.to_uppercase());
-    assert_eq!(sum_for(&binary, asset), Some(ours.clone()));
-    assert_eq!(sum_for(&format!("{theirs}  other.dmg\n"), asset), None);
-    let twice = format!("{ours}  {asset}\n{theirs}  {asset}\n");
-    assert_eq!(sum_for(&twice, asset), None, "two answers are none");
-    assert_eq!(
-        sum_for(&format!("abc  {asset}\n"), asset),
-        None,
-        "not a sum"
-    );
-}
 
 /// RED (U-27) — **O clears a transaction it gave up — the image detached
 /// first — and an ordinary start detaches before it deletes** (the
@@ -973,7 +965,7 @@ fn a_translocated_bundle_is_not_writable() {
     let tools = Arc::new(TestTools::new(&scratch));
     let release = Arc::new(Release {
         image: image.clone(),
-        sums: sums_for(&image),
+        statement: statement_for(&image),
         refuse: None,
         fetched: Mutex::new(Vec::new()),
     });
@@ -1273,9 +1265,12 @@ fn a_staged_bundle_that_cannot_be_flushed_whole_is_refused() {
 }
 
 /// RED (U-27) — **every refusal after the journal exists detaches the image
-/// and removes the transaction**: a download, a checksum, an attach, an
-/// identity, a copy and a clone that fail each leave no mount, no `H/<txn>`,
-/// no journal and no download.
+/// and removes the transaction**: a download, an image that is not the one
+/// the release statement lists, an attach, an identity, a copy and a clone
+/// that fail each leave no mount, no `H/<txn>`, no journal and no download.
+/// The identity road is a bundle the statement vouches for that codesign
+/// still refuses: the statement is checked in addition, never instead
+/// (0.4.10 plan row 102).
 ///
 /// The brief's M1 row, taken by O at once: "detach any mount under `H`,
 /// delete `H/<txn>` and the journal". The identity and the copy fail with the
@@ -1300,18 +1295,18 @@ fn every_failure_road_detaches_and_removes_the_txn() {
     for (stop, txn) in roads {
         let mut release = Release {
             image: scene.image.clone(),
-            sums: sums_for(&scene.image),
+            statement: statement_for(&scene.image),
             refuse: None,
             fetched: Mutex::new(Vec::new()),
         };
         let mut tools = TestTools::new(&scene.scratch);
         tools.downloads = scene.scratch.root.join(format!("downloads-{txn}"));
         match stop {
-            Stop::Download => release.refuse = Some(offer(txn).asset().to_owned()),
-            Stop::Sums => release.sums = format!("{}  {}\n", "e".repeat(64), offer(txn).asset()),
+            Stop::Download => release.refuse = Some(IMAGE.to_owned()),
+            Stop::Sums => release.statement = statement_listing(b"another image"),
             Stop::Mount => {
                 release.image = garbage.clone();
-                release.sums = sums_for(&garbage);
+                release.statement = statement_for(&garbage);
             }
             Stop::Identity => tools.requirement = "identifier \"another.publisher\"".to_owned(),
             Stop::Copy => tools.fail_copy = true,

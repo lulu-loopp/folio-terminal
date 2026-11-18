@@ -1,15 +1,16 @@
-//! **The Windows Prepare, over real folders, real archives and real signed
-//! files** (Windows), and what it does elsewhere.
+//! **The Windows Prepare, over real folders, real archives and real release
+//! statements** (Windows), and what it does elsewhere.
 //!
 //! Every file is made here, under the test's own temporary folder: an install
 //! folder holding the running build — a small x64 program carrying its own
 //! release manifest, signed and time-stamped by U-15's test root
-//! (`bt_platform::trust_harness`) — and a release archive in `package.ps1`'s
-//! layout (`update_archive`'s own test writer) whose `folio.exe` and sidecars
-//! the same root signed, with its checksum document. The product's trust
-//! checks run for real under that root's exclusive-root policy; the download
-//! is a stand-in transport that writes the file it is asked for ([`Release`]);
-//! nothing leaves this machine, and nothing is installed anywhere.
+//! (`bt_platform::trust_harness`), a signature nothing decides on now — and a
+//! release archive in `package.ps1`'s layout (`update_archive`'s own test
+//! writer) with its release statement, signed by the throwaway test key
+//! (`update_prepare::test_statements`; 0.4.10 plan row 102). The statement is
+//! verified for real with the test keys; the download is a stand-in transport
+//! that writes the file it is asked for ([`Release`]); nothing leaves this
+//! machine, and nothing is installed anywhere.
 
 use super::*;
 
@@ -20,10 +21,13 @@ use std::sync::mpsc;
 use bt_persist::UpdateCheckV1;
 use bt_platform::HostPlatform;
 #[cfg(windows)]
+use bt_platform::trust::FileVersion;
+#[cfg(windows)]
 use bt_platform::trust_harness::{Behaviour, IDENTITY, OTHER_IDENTITY, SUBJECT, TestCa};
 use bt_winres::digest::{hex, sha256};
+use bt_winres::release_manifest::archive_root;
 #[cfg(windows)]
-use bt_winres::release_manifest::{PROTOCOL, RESOURCE_NAME, archive_root};
+use bt_winres::release_manifest::{PROTOCOL, RESOURCE_NAME};
 
 #[cfg(windows)]
 use crate::i18n::Text;
@@ -36,8 +40,9 @@ use crate::update_job::{Applied, Progress};
 use crate::update_job::{
     Bytes, Failure, Fetching, Gathered, Job, Presenters, Request, State, Verb,
 };
+use crate::update_prepare::test_statements::{Signer, signed_statement, statement_of};
 #[cfg(windows)]
-use crate::update_prepare::{AtLaunch, at_launch, sum_for};
+use crate::update_prepare::{AtLaunch, RELEASE_KEYS_FILE_NAME, at_launch};
 #[cfg(windows)]
 use crate::update_txn::{Class, Header, HeaderOutcome, Phase, PhaseKind};
 
@@ -53,6 +58,14 @@ const TO: &str = "0.4.7";
 /// The text members of a test release, after the two sidecars.
 #[cfg(windows)]
 const TEXT_MEMBERS: [&str; 3] = ["folio-here.cmd", "uninstall.cmd", "LICENSE-MIT"];
+
+/// **The two Microsoft sidecars** every release carries (C4), here small
+/// programs the test root signed.
+#[cfg(windows)]
+const SIDECARS: [&str; 2] = ["conpty.dll", "OpenConsole.exe"];
+
+/// The archive's name on the release page, as every test statement lists it.
+const ARCHIVE: &str = "folio-0.4.7-windows-x64.zip";
 
 /// The offer every test presses: `v0.4.7`, for Windows.
 fn offer(txn: u8) -> Offer {
@@ -176,6 +189,58 @@ fn build_needing(
     files
 }
 
+/// **One build's files, none of them signed** (0.4.10 plan row 102): the
+/// two sidecars as plain programs, the text members saying `says`, and
+/// `folio.exe` — an unsigned program at `version` carrying the release
+/// manifest of the others, as a release built without the signing service
+/// ships it. Answers every file with its bytes, `folio.exe` first.
+#[cfg(windows)]
+fn unsigned_build(
+    folder: &Path,
+    (version, spelled): (FileVersion, &str),
+    says: &str,
+) -> Vec<(String, Vec<u8>)> {
+    let mut members = Vec::new();
+    for sidecar in SIDECARS {
+        let path = folder.join(sidecar);
+        bt_platform::trust_harness::program(&path, FileVersion([1, 0, 0, 0]), Behaviour::Returns)
+            .unwrap();
+        members.push((sidecar.to_owned(), std::fs::read(&path).unwrap()));
+    }
+    for name in TEXT_MEMBERS {
+        let bytes = format!("@rem {name}: {says}\r\n").repeat(20).into_bytes();
+        std::fs::write(folder.join(name), &bytes).unwrap();
+        members.push((name.to_owned(), bytes));
+    }
+    let manifest = Manifest {
+        product: release_manifest::PRODUCT.to_owned(),
+        version: spelled.to_owned(),
+        arch: release_manifest::archive_arch(std::env::consts::ARCH).to_owned(),
+        archive_root: archive_root(spelled),
+        protocol: PROTOCOL,
+        min_updater: crate::version::VERSION.to_owned(),
+        members: members
+            .iter()
+            .map(|(name, bytes)| release_manifest::Member {
+                name: name.clone(),
+                sha256: hex(&sha256(bytes)),
+                size: bytes.len() as u64,
+            })
+            .collect(),
+    };
+    let exe = folder.join(EXECUTABLE);
+    bt_platform::trust_harness::program_carrying(
+        &exe,
+        version,
+        &[(RESOURCE_NAME, manifest.encode().as_bytes())],
+        Behaviour::Returns,
+    )
+    .unwrap();
+    let mut files = vec![(EXECUTABLE.to_owned(), std::fs::read(&exe).unwrap())];
+    files.extend(members);
+    files
+}
+
 /// **The release archive of `files`** under the offer's root, in the layout
 /// `package.ps1` writes.
 #[cfg(windows)]
@@ -188,15 +253,23 @@ fn archive_of(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     zip_of(&items)
 }
 
-/// `SHA256SUMS.txt` for `archive` under the offer's asset name, beside another
-/// file's line.
-fn sums_for(archive: &[u8]) -> String {
-    format!(
-        "{}  Folio-0.4.7-macos-arm64.dmg\n{}  {}\n",
-        "0".repeat(64),
-        hex(&sha256(archive)),
-        offer(0).asset()
-    )
+/// **The release statement of `archive`** — `v0.4.7`, the archive under
+/// [`ARCHIVE`] and every member it holds (none for bytes that are not an
+/// archive) — and its signature by `signer`.
+fn statement_by(archive: &[u8], signer: Signer) -> (Vec<u8>, Vec<u8>) {
+    let members = bt_winres::release_statement::archive_members(archive, &archive_root(TO))
+        .unwrap_or_default();
+    let statement = statement_of(
+        TAG,
+        (bt_winres::release_statement::WINDOWS_X64, ARCHIVE, archive),
+        members,
+    );
+    signed_statement(&statement, signer)
+}
+
+/// [`statement_by`] the live test key.
+fn statement_for(archive: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    statement_by(archive, Signer::Live)
 }
 
 /// A folder of the test's own under the temporary directory, removed when
@@ -225,16 +298,6 @@ impl Scene {
     /// The scene: an install and a release one test root signed.
     fn new(tag: &str) -> Self {
         Self::under(tag, TestCa::new().expect("Windows has a test root"))
-    }
-
-    /// [`Scene::new`], **every leaf naming where its revocation list is
-    /// published** (`TestCa::naming_its_crls`): under a policy holding no
-    /// list, its revocation is offline, as on a machine with no network.
-    fn naming_its_crls(tag: &str) -> Self {
-        Self::under(
-            tag,
-            TestCa::naming_its_crls().expect("Windows has a test root"),
-        )
     }
 
     fn under(tag: &str, ca: TestCa) -> Self {
@@ -290,9 +353,16 @@ impl Scene {
         WinPrepare::with(
             self.exe.clone(),
             Some(Channel::Ours),
+            self.vouching(),
             policy,
             Arc::new(tools),
         )
+    }
+
+    /// What the scene's release statements are verified with: the test keys,
+    /// remembered in a data folder of the scene's own.
+    fn vouching(&self) -> Vouching {
+        Vouching::under_test_keys(self.scratch.0.join("data").join(RELEASE_KEYS_FILE_NAME))
     }
 
     /// Every file of the install folder but the installation home, with its
@@ -333,11 +403,12 @@ impl Scene {
 
 // ── the stand-ins ───────────────────────────────────────────────────────────
 
-/// **The release, as a stand-in transport**: the archive's bytes and its
-/// checksum document, written under the name each request asks for.
+/// **The release, as a stand-in transport**: the archive's bytes, and the
+/// release statement and its signature, written under the name each request
+/// asks for.
 struct Release {
     archive: Vec<u8>,
-    sums: String,
+    statement: (Vec<u8>, Vec<u8>),
     /// The file name whose fetch fails.
     refuse: Option<String>,
     /// Where each file was asked to go.
@@ -351,7 +422,7 @@ struct Release {
 impl Release {
     fn of(archive: Vec<u8>) -> Self {
         Self {
-            sums: sums_for(&archive),
+            statement: statement_for(&archive),
             archive,
             refuse: None,
             into: Mutex::new(Vec::new()),
@@ -382,8 +453,10 @@ impl Transport for Release {
                 received: length,
                 total: Some(length),
             });
+        } else if request.file_name == bt_winres::release_statement::SIGNATURE_FILE {
+            std::fs::write(&target, &self.statement.1).map_err(|e| e.to_string())?;
         } else {
-            std::fs::write(&target, &self.sums).map_err(|e| e.to_string())?;
+            std::fs::write(&target, &self.statement.0).map_err(|e| e.to_string())?;
         }
         Ok(target)
     }
@@ -579,23 +652,30 @@ fn failed_with(job: &Job<u32>, txn: u8, stop: Stop) {
 }
 
 /// PIN — off Windows **the Windows Prepare refuses before it writes
-/// anything**: the running build's identity cannot be read there (`trust`
-/// refuses by name), so the press fails at `Identity` and no home is made.
-/// Everything else this file's Prepare tests pin happens after that check,
-/// over files a Windows test root signed, so they are `#[cfg(windows)]`.
+/// anything**: the running build's release manifest cannot be read there
+/// (`EmbeddedManifest` reads a Windows resource), so the press fails at
+/// `NotOurs` and no home is made. Everything else this file's Prepare tests
+/// pin happens after that read, over programs a Windows test root built, so
+/// they are `#[cfg(windows)]`.
 #[cfg(not(windows))]
 #[test]
-fn off_windows_the_windows_prepare_refuses_at_identity_and_writes_nothing() {
+fn off_windows_the_windows_prepare_refuses_without_a_manifest_and_writes_nothing() {
     let root = bt_testpath::temp_path("bt-u20-elsewhere");
     let _scratch = Scratch(root.clone());
     std::fs::create_dir_all(&root).unwrap();
     let exe = root.join(EXECUTABLE);
     std::fs::write(&exe, b"not a program").unwrap();
-    let driver = WinPrepare::with(exe, Some(Channel::Ours), Policy::System, Arc::new(System));
+    let driver = WinPrepare::with(
+        exe,
+        Some(Channel::Ours),
+        Vouching::under_test_keys(root.join(crate::update_prepare::RELEASE_KEYS_FILE_NAME)),
+        Policy::System,
+        Arc::new(System),
+    );
     let job = press(&driver, Arc::new(Release::of(Vec::new())), 1);
     assert_eq!(
         job.state(),
-        &State::Failed(Some(offer(1)), Failure::Stopped(Stop::Identity))
+        &State::Failed(Some(offer(1)), Failure::Stopped(Stop::NotOurs))
     );
     assert!(
         !root.join(crate::update_txn::WINDOWS_HOME).exists(),
@@ -605,70 +685,52 @@ fn off_windows_the_windows_prepare_refuses_at_identity_and_writes_nothing() {
 
 // ── the tests ───────────────────────────────────────────────────────────────
 
-/// RED (U-20) — **an archive and a checksum document replaced together,
-/// consistently, still do not pass: hash agreement alone never admits a
-/// release; the identity of the running build's signer does.**
+/// RED (U-20; 0.4.10 plan row 102 part 1b) — **an archive replaced under a
+/// genuine statement, or with a statement of its own that no embedded key
+/// signed, does not pass: only the statement a release key signed admits a
+/// release.**
 ///
-/// The review's counterexample (F-4, F-16): `SHA256SUMS.txt` is unsigned, so
-/// whoever can replace the archive can replace its line too. Here the attacker
-/// ships a `folio.exe` validly signed under the same trusted root — a valid
-/// signature, a trusted chain, a time stamp — but for another identity, and it
-/// carries a manifest that lists a changed `uninstall.cmd`, so the archive
-/// reader's own checks all agree with it. The Prepare stops at the identity
-/// check with *Nothing changed*, and before any file of the install is
-/// touched. Beside it, the genuine `folio.exe` with that changed `.cmd` is
-/// refused by the manifest it signs (F-4), and the genuine release passes —
-/// the fixture is not refused for a reason of its own.
+/// The review's counterexample (F-4, F-16), as the statement answers it:
+/// whoever can replace the archive cannot sign its statement. Here the
+/// attacker ships a `folio.exe` validly signed under the same trusted root —
+/// a valid signature, a trusted chain, a time stamp — for another identity,
+/// whose manifest lists a changed `uninstall.cmd`, so the archive reader's
+/// own checks all agree with it. Under the genuine statement it is refused
+/// at `Sums`; with a statement for it signed by a key no build embeds, at
+/// `StatementRefused`; both with *Nothing changed* and before any installed
+/// file is touched. Beside them the genuine release passes — the fixture is
+/// not refused for a reason of its own.
 ///
-/// MUTATION: in `verify_set`, skip `trust::verify_release_file_under` for
-/// `folio.exe` — the attacker's release is `Verified`.
+/// MUTATION: skip `asset_matches` in `update_prepare::fetch_vouched_asset`
+/// (`plant-102-1b-asset-unchecked.py`) — the attacker's archive under the
+/// genuine statement is refused later, at `Identity`, not at `Sums`.
 #[cfg(windows)]
 #[test]
-fn mutated_asset_hash_pair_refuses_before_swap() {
+fn a_replaced_archive_is_refused_by_the_statement() {
     let scene = Scene::new("mutated");
     let before = scene.installed();
 
-    let attacker = scene.another_release("attacker", OTHER_IDENTITY, "the attacker's command");
-    let replaced = Release::of(archive_of(&attacker));
-    assert_eq!(
-        sum_for(&replaced.sums, offer(0).asset()),
-        Some(hex(&sha256(&replaced.archive))),
-        "the pair agrees: the checksum line is the replaced archive's"
+    let attacker =
+        archive_of(&scene.another_release("attacker", OTHER_IDENTITY, "the attacker's command"));
+    let under_the_genuine = Release {
+        archive: attacker.clone(),
+        ..Release::of(scene.archive.clone())
+    };
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(under_the_genuine),
+        1,
     );
-    let job = press(&scene.driver(TestTools::real()), Arc::new(replaced), 1);
-    failed_with(&job, 1, Stop::Identity);
+    failed_with(&job, 1, Stop::Sums);
     scene.left_nothing(1);
     assert_eq!(scene.installed(), before, "nothing installed was changed");
 
-    // The genuine executable, with the attacker's `.cmd`: its own manifest
-    // refuses the member.
-    let mut genuine = std::fs::read_dir(scene.scratch.0.join("release"))
-        .unwrap()
-        .map(|entry| {
-            let path = entry.unwrap().path();
-            (
-                path.file_name().unwrap().to_string_lossy().into_owned(),
-                std::fs::read(&path).unwrap(),
-            )
-        })
-        .collect::<Vec<_>>();
-    genuine.sort_by_key(|(name, _)| name != EXECUTABLE);
-    let cmd = attacker
-        .iter()
-        .find(|(name, _)| name == "uninstall.cmd")
-        .unwrap()
-        .clone();
-    for file in &mut genuine {
-        if file.0 == cmd.0 {
-            file.1.clone_from(&cmd.1);
-        }
-    }
-    let job = press(
-        &scene.driver(TestTools::real()),
-        Arc::new(Release::of(archive_of(&genuine))),
-        2,
-    );
-    failed_with(&job, 2, Stop::Identity);
+    let forged = Release {
+        statement: statement_by(&attacker, Signer::Foreign),
+        ..Release::of(attacker)
+    };
+    let job = press(&scene.driver(TestTools::real()), Arc::new(forged), 2);
+    failed_with(&job, 2, Stop::StatementRefused);
     scene.left_nothing(2);
     assert_eq!(scene.installed(), before);
 
@@ -689,107 +751,174 @@ fn mutated_asset_hash_pair_refuses_before_swap() {
     );
 }
 
-/// RED (0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD) — **when the identity check
-/// cannot reach revocation, the card says the network was the reason; a
-/// revoked signature still says "not verified"; a reachable one passes — and
-/// nothing changes in either refusal.**
+/// RED (0.4.10 plan row 102 part 1b) — **every member of the archive is held
+/// to the statement's member lines, `folio.exe` included**: an archive the
+/// statement lists byte for byte, whose own members are not the ones its
+/// member lines name, is refused as `Identity` with *Nothing changed*.
 ///
-/// Found on the clean machine `folio-win10`, which has no network adapter
-/// (0.4.8 G3 `happy`, `W1`): the running build's own signature is read first,
-/// its chain said revocation offline, and the card said only *The update is
-/// not verified. / Nothing changed.* — a bad signature and a missing network
-/// read the same. Here every leaf names its revocation list and the engine
-/// retrieves nothing, so a policy holding no list is that machine.
+/// The archive and its asset line agree (a statement signed over a mistaken
+/// member list, say); the archive reader's checks all pass — the F-4
+/// manifest cannot list `folio.exe` — so only the member lines tell.
 ///
-/// MUTATION: in `trust_refused`, drop the `RevocationOffline` arm — the
-/// offline press fails with `Stop::Identity` and *The update is not
-/// verified.*
+/// MUTATION: make `held_to_the_statement` answer `Ok` without comparing
+/// (`plant-102-1b-members-unheld.py`).
 #[cfg(windows)]
 #[test]
-fn an_unreachable_revocation_says_the_network_was_the_reason() {
-    let scene = Scene::naming_its_crls("offline");
+fn an_archive_whose_members_are_not_the_statement_s_is_refused() {
+    let scene = Scene::new("members");
     let before = scene.installed();
-    let release = || Arc::new(Release::of(scene.archive.clone()));
-    let heading = |job: &Job<u32>| {
-        crate::update_card::paint(job.state())
-            .expect("a failed card")
-            .heading
+    let mut members =
+        bt_winres::release_statement::archive_members(&scene.archive, &archive_root(TO)).unwrap();
+    let exe = members
+        .iter_mut()
+        .find(|member| member.name == EXECUTABLE)
+        .unwrap();
+    exe.sha256 = "e".repeat(64);
+    let statement = statement_of(
+        TAG,
+        (
+            bt_winres::release_statement::WINDOWS_X64,
+            ARCHIVE,
+            &scene.archive,
+        ),
+        members,
+    );
+    let release = Release {
+        statement: signed_statement(&statement, Signer::Live),
+        ..Release::of(scene.archive.clone())
     };
-
-    let offline = scene.driver_under(
-        scene.ca.policy_without_revocation_lists(),
-        TestTools::real(),
-    );
-    let job = press(&offline, release(), 1);
-    failed_with(&job, 1, Stop::Offline);
-    assert_eq!(
-        heading(&job).as_deref(),
-        Some(Text::UpdateFailedOffline.text())
-    );
-    let home = scene.install.join(crate::update_txn::WINDOWS_HOME);
-    assert!(
-        !home.exists(),
-        "the running build is read before anything is written"
-    );
-
-    let revoked = scene.driver_under(scene.ca.policy_revoking_every_leaf(), TestTools::real());
-    let job = press(&revoked, release(), 2);
-    failed_with(&job, 2, Stop::Identity);
-    assert_eq!(
-        heading(&job).as_deref(),
-        Some(Text::UpdateFailedIdentity.text())
-    );
-    assert!(!home.exists(), "nothing was written");
-
-    let job = press(&scene.driver(TestTools::real()), release(), 3);
-    assert!(
-        matches!(job.state(), State::Verified(_)),
-        "a reachable revocation passes: {:?}",
-        job.state()
-    );
+    let job = press(&scene.driver(TestTools::real()), Arc::new(release), 1);
+    failed_with(&job, 1, Stop::Identity);
+    scene.left_nothing(1);
     assert_eq!(scene.installed(), before, "nothing installed was changed");
 }
 
-/// PIN (0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD) — **every refusal of `trust`
-/// in the Prepare is one line naming what was checked, the refusal and
-/// Windows' code, and only an unreachable revocation is `Stop::Offline`.**
+/// RED (0.4.10 plan row 102 part 1b) — **an unsigned `folio.exe` the
+/// statement lists is staged**: a release whose programs carry no
+/// signature at all reaches `Verified`, and the one reading of a signature
+/// the Prepare makes says it is not signed by our service.
 ///
-/// The diagnostics line said nothing before: every trust call threw its
-/// refusal away for `Stop::Identity`.
+/// R4: no `trust` call is a gate. On BASE the identity check refused it.
+///
+/// MUTATION: in `acquire`, refuse an expanded `folio.exe` that
+/// `trust::signature` refuses — the old gate, put back
+/// (`plant-102-1b-authenticode-gate.py`).
+#[cfg(windows)]
 #[test]
-fn a_trust_refusal_is_named_with_its_code_and_only_offline_is_offline() {
-    let offline = Refusal::RevocationOffline { code: 0x0100_0040 };
-    assert_eq!(
-        trust_refused_line("the running build", &offline),
-        "Folio: update job — the identity check of the running build refused: revocation-offline: 0x01000040"
+fn an_unsigned_exe_listed_by_the_statement_is_staged() {
+    let scene = Scene::new("unsigned");
+    let folder = scene.scratch.0.join("unsigned-release");
+    std::fs::create_dir_all(&folder).unwrap();
+    let release = unsigned_build(&folder, (OFFERED, TO), "an unsigned build");
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(Release::of(archive_of(&release))),
+        1,
     );
-    assert_eq!(
-        trust_refused("folio.exe", &offline, Stop::Identity),
-        Stop::Offline
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "an unsigned release the statement lists is staged: {:?}",
+        job.state()
     );
+    let set = scene
+        .home()
+        .members_folder(TxnId::new([1; 16]), Place::Set)
+        .unwrap();
     assert_eq!(
-        trust_refused("the rescue copy", &offline, Stop::Clone),
-        Stop::Offline
-    );
-    for refusal in [
-        Refusal::RevocationUnknown { code: 0x40 },
-        Refusal::Revoked,
-        Refusal::Untrusted {
-            code: 0x800B_0109_u32.cast_signed(),
-        },
-    ] {
-        assert_eq!(
-            trust_refused("folio.exe", &refusal, Stop::Identity),
-            Stop::Identity,
-            "{refusal}"
-        );
-    }
-    assert_eq!(
-        trust_refused("the running build", &Refusal::Unsigned, Stop::NotOurs),
-        Stop::NotOurs
+        service_signature(&set.join(EXECUTABLE), &scene.ca.policy(), &OUR_SERVICE),
+        ServiceSignature::Unsigned
     );
 }
 
+/// RED (0.4.10 plan row 102 part 1b) — **a release whose signatures are all
+/// revoked is staged when the statement lists it**: under a policy that
+/// revokes every leaf the test root issued — the running build's, the new
+/// `folio.exe`'s and the sidecars' — the Prepare reaches `Verified`, and the
+/// reading of the staged `folio.exe` names the refusal.
+///
+/// R4: a revoked certificate stopped every 0.4.8 copy's updates; no
+/// signature of the operating system's decides one now.
+///
+/// MUTATION: in `acquire`, refuse an expanded `folio.exe` that
+/// `trust::signature` refuses — the old gate, put back
+/// (`plant-102-1b-authenticode-gate.py`).
+#[cfg(windows)]
+#[test]
+fn a_revoked_signature_listed_by_the_statement_is_staged() {
+    let scene = Scene::new("revoked");
+    let revoked = scene.ca.policy_revoking_every_leaf();
+    let job = press(
+        &scene.driver_under(revoked.clone(), TestTools::real()),
+        Arc::new(Release::of(scene.archive.clone())),
+        1,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "a revoked release the statement lists is staged: {:?}",
+        job.state()
+    );
+    let set = scene
+        .home()
+        .members_folder(TxnId::new([1; 16]), Place::Set)
+        .unwrap();
+    let service = ServiceSigner {
+        subject: SUBJECT,
+        identity_oid: IDENTITY,
+    };
+    assert!(matches!(
+        service_signature(&set.join(EXECUTABLE), &revoked, &service),
+        ServiceSignature::Refused(_)
+    ));
+}
+
+/// RED (0.4.10 plan row 102 part 1b) — **the reading of a staged
+/// `folio.exe`'s signature tells our service's signature from every other**:
+/// a valid signature by the service's subject and profile is ours; the same
+/// subject under another profile, another subject, or no signature is not —
+/// and none of the answers refuses anything.
+///
+/// MUTATION: compare only the subject in `service_signature`
+/// (`plant-102-1b-service-subject-only.py`).
+#[cfg(windows)]
+#[test]
+fn the_service_signature_reading_tells_ours_from_every_other() {
+    let scene = Scene::new("service");
+    let service = ServiceSigner {
+        subject: SUBJECT,
+        identity_oid: IDENTITY,
+    };
+    let folder = scene.scratch.0.join("signers");
+    std::fs::create_dir_all(&folder).unwrap();
+    let ours = folder.join("ours.exe");
+    scene
+        .ca
+        .signed_program(&ours, OFFERED, SUBJECT, IDENTITY, &[]);
+    let profile = folder.join("profile.exe");
+    scene
+        .ca
+        .signed_program(&profile, OFFERED, SUBJECT, OTHER_IDENTITY, &[]);
+    let unsigned = folder.join("unsigned.exe");
+    bt_platform::trust_harness::program_carrying(&unsigned, OFFERED, &[], Behaviour::Returns)
+        .unwrap();
+    let policy = scene.ca.policy();
+    assert_eq!(
+        service_signature(&ours, &policy, &service),
+        ServiceSignature::Ours
+    );
+    assert_eq!(
+        service_signature(&profile, &policy, &service),
+        ServiceSignature::Another
+    );
+    assert_eq!(
+        service_signature(&ours, &policy, &OUR_SERVICE),
+        ServiceSignature::Another,
+        "the test publisher is not our service"
+    );
+    assert_eq!(
+        service_signature(&unsigned, &policy, &service),
+        ServiceSignature::Unsigned
+    );
+}
 /// RED (U-42c) — **a release that needs a newer updater than this build
 /// fails as "too old to update itself", not as "not verified"; nothing
 /// changes.**
@@ -910,8 +1039,13 @@ fn staging_is_always_on_the_destination_volume() {
     left.sort();
     assert_eq!(
         left,
-        ["rescue", "set"],
-        "the download and expansion are gone"
+        [
+            bt_winres::release_statement::STATEMENT_FILE,
+            bt_winres::release_statement::SIGNATURE_FILE,
+            "rescue",
+            "set"
+        ],
+        "the download and expansion are gone; the statement is kept"
     );
 
     let volume = |path: &Path| {
@@ -1143,7 +1277,7 @@ fn revalidation_before_resume_refuses_a_changed_set() {
         .members_folder(TxnId::new([1; 16]), Place::Set)
         .unwrap();
     let (unchanged, kept, changed) = {
-        let (home, exe, policy) = (home.clone(), scene.exe.clone(), scene.ca.policy());
+        let (home, exe, vouching) = (home.clone(), scene.exe.clone(), scene.vouching());
         on_a_worker(move |worker| {
             let AtLaunch::Kept(staged) =
                 at_launch(worker, &home, crate::update_txn::PreviousRun::Orderly).unwrap()
@@ -1153,10 +1287,13 @@ fn revalidation_before_resume_refuses_a_changed_set() {
             let resume = Resume {
                 exe: &exe,
                 channel: Some(Channel::Ours),
-                policy: &policy,
+                vouching: &vouching,
             };
             let staged = revalidate(worker, *staged, &resume);
-            let unchanged = staged.as_ref().map(drop).map_err(|stop| *stop);
+            let unchanged = staged
+                .as_ref()
+                .map(|(_, version)| version.clone())
+                .map_err(|stop| *stop);
             let kept = home.journal().exists();
             std::fs::write(
                 set.join("uninstall.cmd"),
@@ -1164,22 +1301,83 @@ fn revalidation_before_resume_refuses_a_changed_set() {
             )
             .unwrap();
             let changed = match staged {
-                Ok(staged) => revalidate(worker, staged, &resume).map(drop),
+                Ok((staged, _)) => revalidate(worker, staged, &resume).map(drop),
                 Err(stop) => Err(stop),
             };
             (unchanged, kept, changed)
         })
     };
-    assert_eq!(unchanged, Ok(()), "an unchanged set passes");
+    assert_eq!(
+        unchanged,
+        Ok(TO.to_owned()),
+        "an unchanged set passes, at the kept statement's version"
+    );
     assert!(kept, "and is kept");
     assert_eq!(changed, Err(Stop::Identity), "a changed one is refused");
     scene.left_nothing(1);
 }
 
+/// RED (0.4.10 plan row 102 part 1b) — **the statement a set was prepared
+/// from is kept beside it**: once the Prepare is `Verified`,
+/// `H\<txn>\RELEASE-STATEMENT.txt` and its signature are the bytes the release
+/// published, and `download\` is gone.
+///
+/// MUTATION: skip the copy of the statement in `acquire`
+/// (`plant-102-1b-statement-not-kept.py`).
+#[cfg(windows)]
+#[test]
+fn the_statement_is_kept_beside_the_staged_set() {
+    let scene = Scene::new("kept");
+    let release = Release::of(scene.archive.clone());
+    let published = release.statement.clone();
+    let job = press(&scene.driver(TestTools::real()), Arc::new(release), 1);
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    let txn = TxnId::new([1; 16]);
+    let [statement, signature] = crate::update_prepare::kept_statement(&scene.home(), txn);
+    assert_eq!(
+        (
+            std::fs::read(&statement).unwrap(),
+            std::fs::read(&signature).unwrap()
+        ),
+        published
+    );
+    assert!(!scene.home().transaction(txn).join("download").exists());
+}
+
+/// RED (0.4.10 plan row 102 part 1b) — **a staged set without a kept
+/// statement is discarded**: a transaction folder an older build prepared,
+/// with nothing beside `set\` to verify it by, is refused at the next
+/// launch's resume and nothing of it is left — the launch checks as usual.
+///
+/// MUTATION: in `staged_as_verified`, pass a set whose statement is not there
+/// (`plant-102-1b-no-statement-passes.py`).
+#[cfg(windows)]
+#[test]
+fn a_staged_set_without_a_kept_statement_is_discarded() {
+    let scene = Scene::new("no-statement");
+    let before = scene.installed();
+    prepared_and_closed(&scene);
+    for kept in crate::update_prepare::kept_statement(&scene.home(), TxnId::new([1; 16])) {
+        std::fs::remove_file(kept).unwrap();
+    }
+    let launched = launch(&scene.exe, resumer_of(&scene), &at_launch_gathered(false));
+    assert!(launched.job.staged().is_none(), "nothing is resumed");
+    assert!(
+        launched.checked.load(std::sync::atomic::Ordering::SeqCst),
+        "a launch that discarded checks as usual"
+    );
+    scene.left_nothing(1);
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
+}
+
 /// RED (U-20) — **every road a Prepare can fail by removes its transaction,
 /// lets the lock go, leaves the install as it was, and has the card say which
-/// reason and that nothing changed** — a refused download, a checksum
-/// mismatch, too little space (the card naming the shortfall), an archive
+/// reason and that nothing changed** — a refused download, an archive that
+/// is not the one the statement lists, too little space (the card naming the shortfall), an archive
 /// that is not a release, a refused copy and a refused rescue copy.
 ///
 /// §C.2's last paragraph and W1: "Every failure here deletes the transaction
@@ -1198,7 +1396,7 @@ fn every_failure_road_removes_the_transaction_and_says_nothing_changed() {
         (
             1,
             Release {
-                refuse: Some(offer(0).asset().to_owned()),
+                refuse: Some(ARCHIVE.to_owned()),
                 ..genuine()
             },
             TestTools::real(),
@@ -1207,7 +1405,7 @@ fn every_failure_road_removes_the_transaction_and_says_nothing_changed() {
         (
             2,
             Release {
-                sums: sums_for(b"another archive"),
+                statement: statement_for(b"another archive"),
                 ..genuine()
             },
             TestTools::real(),
@@ -1290,8 +1488,8 @@ fn declared(archive: &[u8]) -> u64 {
 /// home and the installed program from it (F-2); the flip's moves are between
 /// the install folder, `backup\` and `set\`, never `rescue\`.
 ///
-/// MUTATION: make `rescue_is_the_running_build` answer `Ok(())` — the altered
-/// copy is `Verified`.
+/// MUTATION: make `rescue_is_the_running_build` answer `Ok(())`
+/// (`plant-102-1b-rescue-unchecked.py`) — the altered copy is `Verified`.
 #[cfg(windows)]
 #[test]
 fn the_applier_copy_is_verified_and_never_moved() {
@@ -1403,41 +1601,48 @@ fn url_of(path: &Path) -> String {
     crate::webnav::file_url_of_local_path(&path.to_string_lossy()).expect("an absolute path")
 }
 
-/// **A release feed in `folder`**: `archive` under the offer's asset name and
-/// `sums` as `SHA256SUMS.txt`, beside a `releases.json` in the GitHub
-/// releases list's shape naming them as release [`TAG`] by their `file:`
-/// URLs; answers the feed the folder's URL names, as the command line gives
-/// it.
-fn feed_of(folder: &Path, archive: &[u8], sums: &str) -> crate::update::Feed {
+/// **A release feed in `folder`**: `archive` under [`ARCHIVE`], and the
+/// release statement and its signature (`statement`), beside a
+/// `releases.json` in the GitHub releases list's shape naming them as release
+/// [`TAG`] by their `file:` URLs; answers the feed the folder's URL names, as
+/// the command line gives it.
+fn feed_of(
+    folder: &Path,
+    archive: &[u8],
+    (statement, signature): &(Vec<u8>, Vec<u8>),
+) -> crate::update::Feed {
+    use bt_winres::release_statement::{SIGNATURE_FILE, STATEMENT_FILE};
     std::fs::create_dir_all(folder).unwrap();
-    let asset = offer(0).asset().to_owned();
-    std::fs::write(folder.join(&asset), archive).unwrap();
-    std::fs::write(folder.join("SHA256SUMS.txt"), sums).unwrap();
+    let files: [(&str, &[u8]); 3] = [
+        (ARCHIVE, archive),
+        (STATEMENT_FILE, statement),
+        (SIGNATURE_FILE, signature),
+    ];
+    let assets: Vec<serde_json::Value> = files
+        .iter()
+        .map(|(name, bytes)| {
+            std::fs::write(folder.join(name), bytes).unwrap();
+            serde_json::json!({
+                "name": name,
+                "browser_download_url": url_of(&folder.join(name)),
+                "size": bytes.len(),
+            })
+        })
+        .collect();
     let list = serde_json::json!([{
         "tag_name": TAG,
         "name": format!("Folio {TO}"),
         "draft": false,
         "prerelease": false,
-        "assets": [
-            {
-                "name": asset,
-                "browser_download_url": url_of(&folder.join(&asset)),
-                "size": archive.len(),
-            },
-            {
-                "name": "SHA256SUMS.txt",
-                "browser_download_url": url_of(&folder.join("SHA256SUMS.txt")),
-                "size": sums.len(),
-            },
-        ],
+        "assets": assets,
     }]);
     std::fs::write(folder.join(crate::update::FEED_LIST), list.to_string()).unwrap();
     crate::update::Feed::at(&format!("{}/", url_of(folder)))
 }
 
 /// RED (U-30b) — **with a release feed, a press copies the feed's asset and
-/// its checksum document instead of downloading them** (the Prepare's hold of
-/// the copy to its sum is
+/// its release statement instead of downloading them** (the Prepare's hold
+/// of the copy to the statement is
 /// `the_feed_s_genuine_release_passes_and_a_wrong_sum_is_refused`).
 ///
 /// The copy alone, on every platform: the asset lands in the download folder
@@ -1451,7 +1656,7 @@ fn the_download_copies_the_feed_asset_without_asking_the_page() {
     let root = bt_testpath::temp_path("bt-u30b-copy");
     let _scratch = Scratch(root.clone());
     let archive = b"a release archive, by the feed".repeat(5_000);
-    let feed = feed_of(&root.join("feed"), &archive, &sums_for(&archive));
+    let feed = feed_of(&root.join("feed"), &archive, &statement_for(&archive));
     let page = Arc::new(Page::default());
     let transport = crate::update_job::transport_for(Some(&feed), page.clone());
     let into = root.join("download");
@@ -1464,11 +1669,11 @@ fn the_download_copies_the_feed_asset_without_asking_the_page() {
         }),
         cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
-    let [asset, _] = offer(0).requests();
+    let asset = offer(0).asset_request(ARCHIVE);
     let copied = transport
         .fetch(&asset, &into, &fetching)
         .expect("the feed's asset is copied");
-    assert_eq!(copied, into.join(offer(0).asset()));
+    assert_eq!(copied, into.join(ARCHIVE));
     assert_eq!(std::fs::read(&copied).unwrap(), archive);
     let length = archive.len() as u64;
     assert_eq!(
@@ -1481,15 +1686,14 @@ fn the_download_copies_the_feed_asset_without_asking_the_page() {
     assert_eq!(page.calls(), 0, "github.com was contacted");
 }
 
-/// RED (U-30b) — **the Prepare holds a feed's copy to its sum exactly as it
-/// holds a download**: the whole Windows Prepare over a feed of the genuine
-/// release reaches `Verified`, and over the same archive with a checksum line
-/// that is not its own stops at `Sums` with *Nothing changed*. The page's
-/// stand-in is never asked.
+/// RED (U-30b; 0.4.10 plan row 102 part 1b) — **the Prepare holds a feed's
+/// copy to its statement exactly as it holds a download**: the whole Windows
+/// Prepare over a feed of the genuine release reaches `Verified`, and over the
+/// same archive with a statement that lists another stops at `Sums` with
+/// *Nothing changed*. The page's stand-in is never asked.
 ///
 /// MUTATION: make `transport_for` answer `page` whatever `feed` is (the page
-/// is asked and the press fails at `Download`); or skip `matches_its_sum` in
-/// the Windows `fetch` (the wrong sum is `Verified`).
+/// is asked and the press fails at `Download`).
 #[cfg(windows)]
 #[test]
 fn the_feed_s_genuine_release_passes_and_a_wrong_sum_is_refused() {
@@ -1499,7 +1703,7 @@ fn the_feed_s_genuine_release_passes_and_a_wrong_sum_is_refused() {
     let genuine = feed_of(
         &scene.scratch.0.join("feed"),
         &scene.archive,
-        &sums_for(&scene.archive),
+        &statement_for(&scene.archive),
     );
     let job = press_with(
         &scene.driver(TestTools::real()),
@@ -1527,7 +1731,7 @@ fn the_feed_s_genuine_release_passes_and_a_wrong_sum_is_refused() {
     let wrong = feed_of(
         &scene.scratch.0.join("wrong-sum"),
         &scene.archive,
-        &sums_for(b"another archive"),
+        &statement_for(b"another archive"),
     );
     let job = press_with(
         &scene.driver(TestTools::real()),
@@ -1540,39 +1744,40 @@ fn the_feed_s_genuine_release_passes_and_a_wrong_sum_is_refused() {
     assert_eq!(page.calls(), 0, "github.com was contacted");
 }
 
-/// RED (U-30b) — **a feed cannot deliver a build the running build's signer
-/// did not sign: an archive signed by another identity, with its own
-/// consistent checksum line, is refused as `Identity`.**
+/// RED (U-30b; 0.4.10 plan row 102 part 1b) — **a feed cannot deliver a
+/// release no embedded key vouches for: a statement signed by another key, for
+/// an archive of its own, is refused as `StatementRefused`.**
 ///
 /// The reason a visible flag is acceptable (the coordinator's ruling 2): the
-/// feed replaces only where the two files come from. U-20's counterexample,
-/// delivered through a feed — a `folio.exe` validly signed under the same
-/// trusted root for another identity, its sums agreeing — stops at the
-/// identity check with *Nothing changed*, before any installed file is
-/// touched; the page is never asked.
+/// feed replaces only where the files come from. A release whose statement no
+/// release key signed stops before its archive is fetched, with *Nothing
+/// changed*; the page is never asked.
 ///
-/// MUTATION: in `verify_set`, skip `trust::verify_release_file_under` for
-/// `folio.exe` — the feed's foreign build is `Verified`.
+/// MUTATION: report a refused statement as a failed download in
+/// `Vouching::verified` (`plant-102-1b-unverified-as-download.py`).
 #[cfg(windows)]
 #[test]
-fn a_feed_asset_signed_by_another_signer_is_refused_as_identity() {
+fn a_feed_cannot_deliver_a_release_no_embedded_key_vouches_for() {
     let scene = Scene::new("feed-identity");
     let before = scene.installed();
     let foreign =
         archive_of(&scene.another_release("foreign", OTHER_IDENTITY, "another signer's command"));
-    let feed = feed_of(&scene.scratch.0.join("feed"), &foreign, &sums_for(&foreign));
+    let feed = feed_of(
+        &scene.scratch.0.join("feed"),
+        &foreign,
+        &statement_by(&foreign, Signer::Foreign),
+    );
     let page = Arc::new(Page::default());
     let job = press_with(
         &scene.driver(TestTools::real()),
         crate::update_job::transport_for(Some(&feed), page.clone()),
         1,
     );
-    failed_with(&job, 1, Stop::Identity);
+    failed_with(&job, 1, Stop::StatementRefused);
     scene.left_nothing(1);
     assert_eq!(scene.installed(), before, "nothing installed was changed");
     assert_eq!(page.calls(), 0, "github.com was contacted");
 }
-
 // ── a later launch, through the product's road (U-33) ───────────────────────
 
 /// **The start's world for a later launch**: nothing is started, no entrance
@@ -1685,10 +1890,10 @@ fn at_launch_gathered(knows_the_release: bool) -> Gathered {
     }
 }
 
-/// The product's resumer for `scene`'s running build, under the scene's root.
+/// The product's resumer for `scene`'s running build, with the test keys.
 #[cfg(windows)]
 fn resumer_of(scene: &Scene) -> crate::update_prepare::Resumer {
-    resumer(scene.exe.clone(), scene.ca.policy())
+    resumer(scene.exe.clone(), scene.vouching())
 }
 
 /// **Download, Later, close**: the real Prepare of `v0.4.7` under
@@ -1738,18 +1943,14 @@ fn allocated_scene(tag: &str) -> (Scratch, PathBuf, Home, TxnId) {
     install_txn::durable_write(&home.journal(), &allocated.encode()).unwrap();
     let download = home.transaction(txn).join("download");
     std::fs::create_dir_all(&download).unwrap();
-    std::fs::write(
-        download.join(offer(0).asset()),
-        b"half of an archive".repeat(1_000),
-    )
-    .unwrap();
+    std::fs::write(download.join(ARCHIVE), b"half of an archive".repeat(1_000)).unwrap();
     (scratch, exe, home, txn)
 }
 
 /// RED (U-33) — **a launch after "download, Later, close" shows the verified
 /// card again, from the staged set and without any download: `Verified` with
-/// the staged version, in the last active window, the staged transaction held
-/// — and it does not start the day's check.**
+/// the kept statement's version, in the last active window, the staged
+/// transaction held — and it does not start the day's check.**
 ///
 /// W2 and F-17: the job owner "resumes (revalidating) or discards after 2
 /// launches". On the clean VM nothing ran the pass: the journal stayed at
@@ -1758,7 +1959,7 @@ fn allocated_scene(tag: &str) -> (Scratch, PathBuf, Home, TxnId) {
 /// release, the process ends, and a later launch goes down the product's road
 /// — the start's pass, `Job::after_start`, `Job::consider` — with no
 /// transport at all: the card can only come from the set on disk. The offer
-/// is the transaction's own and names the staged `folio.exe`'s version; the
+/// is the transaction's own and names the kept statement's version; the
 /// launch is counted; and the 24-hour rule holds: the launch that resumed does
 /// not check, so the same release is not offered twice.
 ///
@@ -2231,6 +2432,7 @@ impl Scene {
         WinPrepare::with(
             self.exe.clone(),
             Some(Channel::Ours),
+            self.vouching(),
             self.ca.policy(),
             Arc::new(ScansTheJournal {
                 journal: self.home().journal(),

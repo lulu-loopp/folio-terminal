@@ -25,10 +25,19 @@
 //!    (`Layout::BundleIntent`), header outcome `none` — **before** any
 //!    resource is taken (F-17), then `H/<txn>/` and its `stage/`, `rescue/`
 //!    and `mnt/` through `install_txn::durable_create_dir`.
-//! 3. **Download** the offer's two files by its own tag into a fresh
-//!    item-replacement folder on the bundle's volume (the transport; C11),
-//!    and hash the image against `SHA256SUMS-macos.txt`
-//!    ([`Stop::Download`], [`Stop::Sums`]).
+//! 3. **The release statement, then the image** (0.4.10 plan row 102), into
+//!    a fresh item-replacement folder on the bundle's volume (the transport;
+//!    C11): `RELEASE-STATEMENT.txt` and its signature fetched by the offer's
+//!    own tag and verified with this copy's embedded keys, none it remembers
+//!    as retired — its tag and version the offer's, its `min_from` no newer
+//!    than this build ([`Stop::StatementRefused`]; [`Stop::TooOld`] before the
+//!    large download; `update_prepare::vouched`) — then the image by the name
+//!    the statement gives it, held to its SHA-256 and size ([`Stop::Download`],
+//!    [`Stop::Sums`]; `update_prepare::fetch_vouched_asset`). The statement is
+//!    checked **in addition** to everything below: codesign, Gatekeeper, the
+//!    designated requirement and `FolioMinUpdater` are the operating system's
+//!    and stay as they are (§1.3 step 10). It is not kept: a staged bundle is
+//!    revalidated by its code signature.
 //! 4. **Attach** the image under `H/<txn>/mnt` with
 //!    `bt_platform::macos_update::with_image`, which detaches it on every
 //!    road ([`Stop::Mount`]). In its body: the mounted `Folio.app` is checked
@@ -71,8 +80,8 @@
 //! U-33), and a set that passes is [`resume`]d: the verified card again, for
 //! the version the journal recorded.
 //!
-//! The worker, the progress reports, the checksum, the abandonment and the
-//! launch pass are `update_prepare`'s: the same on both platforms.
+//! The worker, the progress reports, the release statement, the abandonment
+//! and the launch pass are `update_prepare`'s: the same on both platforms.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -90,7 +99,8 @@ use crate::update_job::{
     Transport, Unsupported,
 };
 use crate::update_prepare::{
-    WORKER, abandon, discard, fetching, finish, journal_failed, journal_stop, matches_its_sum,
+    Vouching, WORKER, abandon, discard, fetch_vouched_asset, finish, journal_failed, journal_stop,
+    vouched,
 };
 use crate::update_txn::{
     Adapter, BundleIdentity, Carried, Cdhash, Event, Home, Journal, Layout, TxnId,
@@ -188,6 +198,9 @@ pub(crate) struct MacPrepare {
     tools: Arc<dyn Tools>,
     /// How this copy was installed, as the start read it.
     channel: Option<Channel>,
+    /// What the release statement is verified with, and where its retires
+    /// are remembered (`update_prepare::Vouching`).
+    vouching: Vouching,
     /// The layouts this road's Prepare is called through, by the adapter
     /// the press names ([`PreparePoint`]).
     layouts: Layouts<dyn PreparePoint>,
@@ -200,9 +213,10 @@ pub(crate) struct MacPrepare {
 
 impl MacPrepare {
     /// **The driver of the running copy**: the bundle this process's
-    /// executable sits in, the system's tools, and the channel the start read
-    /// (`install_channel::channel`). A process that is not running from a
-    /// bundle has no road to take: [`Unsupported`].
+    /// executable sits in, the system's tools, the channel the start read
+    /// (`install_channel::channel`), and the embedded release keys with this
+    /// copy's data folder. A process that is not running from a bundle has
+    /// no road to take: [`Unsupported`].
     pub(crate) fn of_this_copy() -> Box<dyn Driver> {
         let bundle = std::env::current_exe()
             .ok()
@@ -212,6 +226,7 @@ impl MacPrepare {
                 bundle,
                 tools: Arc::new(System),
                 channel: crate::install_channel::channel(),
+                vouching: Vouching::of_this_copy(),
                 layouts: own_layouts(),
                 record: Some(crate::persist::storage_dir().join(crate::update_homes::HOMES_RECORD)),
             }),
@@ -233,9 +248,10 @@ impl Driver for MacPrepare {
         transport: &SharedTransport,
         post: &Poster,
     ) -> Result<(), Refused> {
-        let (bundle, tools, transport, layouts, record) = (
+        let (bundle, tools, vouching, transport, layouts, record) = (
             self.bundle.clone(),
             Arc::clone(&self.tools),
+            self.vouching.clone(),
             Arc::clone(transport),
             self.layouts.clone(),
             self.record.clone(),
@@ -252,6 +268,7 @@ impl Driver for MacPrepare {
                     post: &post,
                     tools: tools.as_ref(),
                     channel,
+                    vouching: &vouching,
                     layouts: &layouts,
                     record: record.as_deref(),
                 };
@@ -271,6 +288,7 @@ pub(crate) struct Road<'a> {
     post: &'a Poster,
     tools: &'a dyn Tools,
     channel: Option<Channel>,
+    vouching: &'a Vouching,
     layouts: &'a Layouts<dyn PreparePoint>,
     /// Where the home is recorded before it is made ([`MacPrepare`]'s `record`).
     record: Option<&'a Path>,
@@ -637,7 +655,7 @@ fn acquire(
     }
     road.go_on()?;
 
-    // Step 3: the two files, into a folder of their own, and the hash.
+    // Step 3: the statement and the image, into a folder of their own.
     let downloads = road
         .tools
         .download_folder(road.bundle)
@@ -655,7 +673,8 @@ fn acquire(
     Ok(new)
 }
 
-/// Steps 3 and 4: fetch, hash, attach, check, copy, check again.
+/// Steps 3 and 4: the statement verified, the image it names fetched and held
+/// to it, attached, checked, copied, checked again.
 fn fetch_and_attach(
     worker: &WorkerCtx,
     road: &Road<'_>,
@@ -663,17 +682,15 @@ fn fetch_and_attach(
     mount: &Path,
     stage: &Path,
 ) -> Result<BundleIdentity, Stop> {
-    let [asset, sums] = road.offer.requests();
-    let fetching = fetching(road.post);
-    let fetched = |request| {
-        road.transport
-            .fetch(request, downloads, &fetching)
-            .map_err(|_| road.go_on().err().unwrap_or(Stop::Download))
-    };
-    let image = fetched(&asset)?;
-    let sums_file = fetched(&sums)?;
+    let (statement, _) = vouched(
+        road.transport,
+        road.offer,
+        road.post,
+        downloads,
+        road.vouching,
+    )?;
+    let image = fetch_vouched_asset(road.transport, road.offer, road.post, downloads, &statement)?;
     road.go_on()?;
-    matches_its_sum(&image, &sums_file, road.offer.asset())?;
     road.post.post(Step::Staged);
 
     let used = macos_update::with_image(worker, &image, mount, |point| {
