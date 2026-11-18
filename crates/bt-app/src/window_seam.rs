@@ -552,7 +552,16 @@ impl WindowHost for Arc<Window> {
         ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         let native = crate::native_window_of(self).ok()?;
-        bt_platform::session_end::SessionEndWatch::install(native, hear, reason, ending).ok()
+        // The window's note door is `diagnostics::note` (`Self::note`), handed down as itself: the
+        // subclass says the outside quit's arrival through it (0.4.10 plan row 87, part 87a).
+        bt_platform::session_end::SessionEndWatch::install(
+            native,
+            hear,
+            Box::new(crate::diagnostics::note),
+            reason,
+            ending,
+        )
+        .ok()
     }
     fn page_address(
         &self,

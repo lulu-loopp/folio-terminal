@@ -415,7 +415,12 @@ fn the_outside_quit_writes_the_layout_and_leaves() {
     // A registered message's number, as the session gives one (0xC000 and above).
     let quit = 0xC123;
     assert_eq!(
-        bt_platform::session_end::answer_outside_quit(quit, quit, &crate::session_end::hear),
+        bt_platform::session_end::answer_outside_quit(
+            quit,
+            quit,
+            &crate::session_end::hear,
+            &|_| {}
+        ),
         Some(0),
         "the message is processed"
     );

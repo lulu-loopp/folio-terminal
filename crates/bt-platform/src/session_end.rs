@@ -198,14 +198,21 @@ pub fn outside_quit_message() -> u32 {
 /// Manager's close tells it — [`SessionEnd::Asked`], so the layout is written, then
 /// [`SessionEnd::Closed`], so the process leaves by itself — and the answer is 0, a processed
 /// message's. `None` for every other message. Pure.
+///
+/// [`OUTSIDE_QUIT_ARRIVAL_LINE`] is said through `note` first, the window's note door, before
+/// anything is done about it: a note reaches `diagnostics.log` whether or not the run's `stderr`
+/// was redirected, where a `stderr` line reaches only the redirected stream (the VM's M1 and M3,
+/// 2026-11-18).
 pub fn answer_outside_quit(
     message: u32,
     registered: u32,
     hear: &dyn Fn(SessionEnd),
+    note: &dyn Fn(&str),
 ) -> Option<isize> {
     if registered == 0 || message != registered {
         return None;
     }
+    note(OUTSIDE_QUIT_ARRIVAL_LINE);
     hear(SessionEnd::Asked);
     hear(SessionEnd::Closed);
     Some(0)
@@ -396,8 +403,8 @@ mod windows_session_end {
     use windows::core::HSTRING;
 
     use super::{
-        OUTSIDE_QUIT_ARRIVAL_LINE, SessionEnd, answer, answer_outside_quit, arrival_line, heard,
-        outside_quit_message, the_session_really_ends,
+        SessionEnd, answer, answer_outside_quit, arrival_line, heard, outside_quit_message,
+        the_session_really_ends,
     };
     use crate::NativeWindow;
 
@@ -416,6 +423,8 @@ mod windows_session_end {
     /// what holds the answer to `WM_ENDSESSION(TRUE)` back (plan row 201).
     pub(super) struct SessionEndHook {
         pub(super) hear: Box<dyn Fn(SessionEnd)>,
+        /// The window's note door: the line said in `diagnostics.log` on every channel.
+        pub(super) note: Box<dyn Fn(&str)>,
         pub(super) reason: Box<dyn Fn() -> String>,
         /// Says what became of the question's save and fences the log; it runs nothing of the
         /// loop's. Shared rather than boxed: the procedure calls its own count of it and reads
@@ -426,21 +435,24 @@ mod windows_session_end {
     impl SessionEndWatch {
         /// Subclass `window`. `hear` is told what the system said, on the window's own thread
         /// and inside the system's `SendMessage`, so it may only park the news and wake the loop;
-        /// `reason` is read when the question arrives, so the line is in the language in force
-        /// then; `ending` is called at `WM_ENDSESSION(TRUE)` with the session really ending, and
-        /// the answer waits for it (plan row 201).
+        /// `note` is the window's note door (Folio's quit from outside says its arrival through
+        /// it); `reason` is read when the question arrives, so the line is in the language in
+        /// force then; `ending` is called at `WM_ENDSESSION(TRUE)` with the session really
+        /// ending, and the answer waits for it (plan row 201).
         ///
         /// # Errors
         /// `SetWindowSubclass` refused, with the system's error number.
         pub fn install(
             window: NativeWindow,
             hear: Box<dyn Fn(SessionEnd)>,
+            note: Box<dyn Fn(&str)>,
             reason: Box<dyn Fn() -> String>,
             ending: Rc<dyn Fn()>,
         ) -> Result<Self, String> {
             let hwnd = window.as_hwnd();
             let hook = Box::new(SessionEndHook {
                 hear,
+                note,
                 reason,
                 ending,
             });
@@ -514,8 +526,9 @@ mod windows_session_end {
         }
         // **Folio's quit from outside** (0.4.10 plan row 87, part 87a; R9): heard on a put-away
         // window as on a shown one, and settled as the Restart Manager's close.
-        if let Some(answered) = answer_outside_quit(message, outside_quit_message(), &*hook.hear) {
-            crate::stderr_road::say(OUTSIDE_QUIT_ARRIVAL_LINE.to_owned());
+        if let Some(answered) =
+            answer_outside_quit(message, outside_quit_message(), &*hook.hear, &*hook.note)
+        {
             return LRESULT(answered);
         }
         // **The last word** (plan row 201): what became of the question's save is said and the
@@ -612,8 +625,11 @@ mod windows_session_end {
             let into = Rc::clone(&heard);
             let ended = Rc::new(std::cell::Cell::new(0_u32));
             let ends = Rc::clone(&ended);
+            let noted = Rc::new(RefCell::new(Vec::<String>::new()));
+            let notes = Rc::clone(&noted);
             let hook = SessionEndHook {
                 hear: Box::new(move |end| into.borrow_mut().push(end)),
+                note: Box::new(move |line| notes.borrow_mut().push(line.to_owned())),
                 reason: Box::new(|| "Saving your layout".to_owned()),
                 ending: Rc::new(move || ends.set(ends.get() + 1)),
             };
@@ -669,6 +685,19 @@ mod windows_session_end {
                 ended.get(),
                 1,
                 "the close is not the end: nobody ends the process"
+            );
+            assert_eq!(*noted.borrow(), Vec::<String>::new(), "nothing noted yet");
+            // Folio's quit from outside (0.4.10 plan row 87, part 87a): its arrival is said
+            // through the hook's note door, which the window hands down as its own.
+            assert_eq!(
+                ask(super::super::outside_quit_message(), 0, 0),
+                0,
+                "the quit from outside is processed"
+            );
+            assert_eq!(
+                *noted.borrow(),
+                vec![super::super::OUTSIDE_QUIT_ARRIVAL_LINE.to_owned()],
+                "and its arrival noted through the window's door"
             );
         }
 
@@ -750,10 +779,11 @@ impl SessionEndWatch {
     pub fn install(
         window: crate::NativeWindow,
         hear: Box<dyn Fn(SessionEnd)>,
+        note: Box<dyn Fn(&str)>,
         reason: Box<dyn Fn() -> String>,
         ending: std::rc::Rc<dyn Fn()>,
     ) -> Result<Self, String> {
-        let _ = (window, hear, reason, ending);
+        let _ = (window, hear, note, reason, ending);
         Ok(Self { _nothing: () })
     }
 
@@ -782,24 +812,56 @@ mod tests {
         use super::answer_outside_quit;
         let heard = std::cell::RefCell::new(Vec::new());
         let hear = |end| heard.borrow_mut().push(end);
+        let note = |_: &str| {};
         let registered = 0xC123;
-        assert_eq!(answer_outside_quit(registered, registered, &hear), Some(0));
+        assert_eq!(
+            answer_outside_quit(registered, registered, &hear, &note),
+            Some(0)
+        );
         assert_eq!(
             heard.take(),
             [SessionEnd::Asked, SessionEnd::Closed],
             "the question, then the close"
         );
         assert_eq!(
-            answer_outside_quit(0x0010, registered, &hear),
+            answer_outside_quit(0x0010, registered, &hear, &note),
             None,
             "WM_CLOSE"
         );
         assert_eq!(
-            answer_outside_quit(0, 0, &hear),
+            answer_outside_quit(0, 0, &hear, &note),
             None,
             "a refused registration"
         );
         assert_eq!(heard.take(), [], "neither tells anybody");
+    }
+
+    /// RED (0.4.10 plan row 87, part 87a; the VM's M1 and M3, 2026-11-18) — **the outside quit's
+    /// arrival is said through the window's note door, before it is heard**: a note reaches
+    /// `diagnostics.log` on every channel, where a `stderr` line missed it whenever the run's
+    /// `stderr` was redirected. Said once, for the registered message only.
+    ///
+    /// MUTATION (P16): drop the `note` call from `answer_outside_quit` (the line said by the
+    /// subclass to `stderr_road` alone, as before) — nothing is noted.
+    #[test]
+    fn the_outside_quits_arrival_is_said_through_the_note_door_before_it_is_heard() {
+        use super::{OUTSIDE_QUIT_ARRIVAL_LINE, answer_outside_quit};
+        let said = std::cell::RefCell::new(Vec::new());
+        let hear = |end: SessionEnd| said.borrow_mut().push(format!("heard {end:?}"));
+        let note = |line: &str| said.borrow_mut().push(line.to_owned());
+        let registered = 0xC123;
+        let _ = answer_outside_quit(0x0010, registered, &hear, &note);
+        assert_eq!(said.take(), Vec::<String>::new(), "WM_CLOSE says nothing");
+        let _ = answer_outside_quit(registered, registered, &hear, &note);
+        assert_eq!(
+            said.take(),
+            [
+                OUTSIDE_QUIT_ARRIVAL_LINE.to_owned(),
+                format!("heard {:?}", SessionEnd::Asked),
+                format!("heard {:?}", SessionEnd::Closed),
+            ],
+            "the line, once, before the question and the close"
+        );
     }
 
     /// PIN (0.4.10 plan row 87, part 87a; R9) — **the release smoke asks by the name Folio
