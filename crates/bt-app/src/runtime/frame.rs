@@ -319,7 +319,7 @@ impl<B: Backend> Runtime<'_, B> {
                 // question than the one the reader is holding the log for.
                 if let Some(project_us) = project_us {
                     crate::diagnostics::stderr_line(format!(
-                        "BT_PERF_TRACE projection source={:?} project_us={project_us} lines_measured={} projected_lines={} rebuilt={} band_moved={} scroll_offset_subpixels={} scroll_extent_subpixels={} bottom_relief_subpixels={}",
+                        "BT_PERF_TRACE projection source={:?} project_us={project_us} lines_measured={} projected_lines={} rebuilt={} band_moved={} scroll_offset_subpixels={} scroll_extent_subpixels={} bottom_relief_subpixels={} vendor_history_rows={}",
                         trigger.source,
                         leaf.view
                             .projection
@@ -337,6 +337,10 @@ impl<B: Backend> Runtime<'_, B> {
                         leaf.view.projection.scroll_offset_subpixels(),
                         leaf.view.projection.scroll_extent_subpixels(),
                         leaf.view.projection.bottom_relief_subpixels(),
+                        // The rows the vendored grid holds as its own history: 0 outside a
+                        // resize transaction, since the transcript is history's one owner
+                        // (0.4.10 plan row 107 — a release build once kept every row here).
+                        leaf.session.session.terminal().alacritty_history_size(),
                     ));
                 }
                 projected
