@@ -1429,6 +1429,19 @@ struct ProgressInbox {
     posters: AtomicUsize,
 }
 
+impl ProgressInbox {
+    /// **One more live poster** (N14), in a test; the product counts none
+    /// (the part 3 review's P2-9).
+    #[cfg(test)]
+    fn count_a_poster_in(&self) {
+        self.posters.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The product counts no poster (the part 3 review's P2-9).
+    #[cfg(not(test))]
+    const fn count_a_poster_in(&self) {}
+}
+
 /// **A driver's way back to the job**: reports carry the transaction they
 /// belong to, wait in the job's inbox, and wake the loop. A clone is
 /// another handle on the same transaction; in a test, counted
@@ -1480,8 +1493,7 @@ impl Poster {
         staged: StagedSlot,
         cancelled: Arc<AtomicBool>,
     ) -> Self {
-        #[cfg(test)]
-        inbox.posters.fetch_add(1, Ordering::SeqCst);
+        inbox.count_a_poster_in();
         Self {
             txn,
             inbox,
