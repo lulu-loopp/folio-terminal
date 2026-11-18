@@ -14663,7 +14663,8 @@ mod tests {
 
     /// **The trees a front eviction shortens keep their storage under twice what they hold**: the
     /// dropped heights are compacted away, not kept at zero forever (0.4.10 plan row 105, T4's
-    /// sibling). With compaction off the trees store all 4,400 lines ever projected.
+    /// sibling). With compaction off the trees keep every line ever projected: 840 heights stored
+    /// for 400 lines the first time this asks past twice.
     #[test]
     fn a_front_eviction_keeps_the_trees_within_twice_the_history() {
         let (mut store, mut document) = full_history(400);

@@ -567,7 +567,8 @@ mod tests {
     ///
     /// Deletion used to find a line's relocations with a `retain` over all of them — one per
     /// frozen physical row — so the work per evicted line grew with history: with
-    /// `staging_relocations.retain` back in `delete_transaction`, this reads 6 000 and 120 000.
+    /// `staging_relocations.retain` back in `delete_transaction`, the thousand-line history reads
+    /// 6 006: every relocation in it, the new line's six included.
     #[test]
     fn an_eviction_visits_only_its_own_rows() {
         for depth in [1_000, 20_000] {
