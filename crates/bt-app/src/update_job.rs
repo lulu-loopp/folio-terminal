@@ -73,7 +73,9 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use bt_persist::UpdateCheckV1;
@@ -1420,12 +1422,18 @@ struct ProgressInbox {
     /// N14): made or cloned, one more; dropped — a worker's that ended, or
     /// unwound — one fewer, said on `report_posted`. A drop takes `reports`'
     /// lock to count down, so a waiter that reads the count there misses no
-    /// drop.
+    /// drop. **Tests only** (the part 3 review's P2-9): its one reader is
+    /// `Job::await_reports`; the product counts nothing, and a poster's drop
+    /// takes no lock.
+    #[cfg(test)]
     posters: AtomicUsize,
 }
 
 /// **A driver's way back to the job**: reports carry the transaction they
-/// belong to, wait in the job's inbox, and wake the loop.
+/// belong to, wait in the job's inbox, and wake the loop. A clone is
+/// another handle on the same transaction; in a test, counted
+/// ([`ProgressInbox`]'s `posters`).
+#[cfg_attr(not(test), derive(Clone))]
 pub(crate) struct Poster {
     txn: TxnId,
     inbox: Arc<ProgressInbox>,
@@ -1435,6 +1443,7 @@ pub(crate) struct Poster {
     cancelled: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
 impl Clone for Poster {
     fn clone(&self) -> Self {
         Self::counted(
@@ -1446,6 +1455,7 @@ impl Clone for Poster {
     }
 }
 
+#[cfg(test)]
 impl Drop for Poster {
     fn drop(&mut self) {
         let reports = self
@@ -1460,16 +1470,17 @@ impl Drop for Poster {
 }
 
 impl Poster {
-    /// **A poster of `inbox`, counted among its live ones** (N14). The count
-    /// goes up without the inbox's lock: a poster is made by a press, on the
-    /// thread that would wait, or cloned from a live one, so the count is
-    /// never 0 while a waiter could see this one coming.
+    /// **A poster of `inbox`** — in a test, counted among its live ones
+    /// (N14). The count goes up without the inbox's lock: a poster is made by
+    /// a press, on the thread that would wait, or cloned from a live one, so
+    /// the count is never 0 while a waiter could see this one coming.
     fn counted(
         txn: TxnId,
         inbox: Arc<ProgressInbox>,
         staged: StagedSlot,
         cancelled: Arc<AtomicBool>,
     ) -> Self {
+        #[cfg(test)]
         inbox.posters.fetch_add(1, Ordering::SeqCst);
         Self {
             txn,
