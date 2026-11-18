@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1819. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1818. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_deref	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_str	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
@@ -7860,7 +7860,7 @@ crates/bt-detect/src/table.rs	bt-detect crate::table::split_row	Ambiguous	is_whi
 crates/bt-detect/src/table.rs	bt-detect crate::table::strip_edge_pipes	Ambiguous	strip_suffix	1	
 crates/bt-detect/src/table.rs	bt-detect crate::table::strip_edge_pipes	Ambiguous	unwrap_or	1	
 crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::delete_transaction	Ambiguous	and_then	1	
-crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::delete_transaction	Ambiguous	contains	2	
+crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::delete_transaction	Ambiguous	contains	1	
 crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::delete_transaction	Ambiguous	map_or	1	
 crates/bt-effects/src/admission.rs	bt-effects crate::admission::admitted	Ambiguous	contains	1	
 crates/bt-effects/src/admission.rs	bt-effects crate::admission::admitted	Ambiguous	with	1	
@@ -12209,7 +12209,6 @@ crates/bt-transcript/src/lib.rs	bt-transcript crate::CellText::push	Ambiguous	ex
 crates/bt-transcript/src/lib.rs	bt-transcript crate::CellText::push	Ambiguous	len	2	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::CellText::push_str	Ambiguous	expect	1	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::FrozenLine::resident_bytes	Dynamic	hyperlink_bytes	1	
-crates/bt-transcript/src/lib.rs	bt-transcript crate::TranscriptStore::clear_history	Ambiguous	iter	1	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::TranscriptStore::clear_history	Ambiguous	shrink_to_fit	1	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::TranscriptStore::commit_resize_staging	Ambiguous	collect	1	
 crates/bt-transcript/src/lib.rs	bt-transcript crate::TranscriptStore::commit_resize_staging	Ambiguous	into_iter	1	
@@ -12581,6 +12580,7 @@ crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::absolute_ro
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::absolute_subpixel_for_anchor	Ambiguous	saturating_mul	2	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::absolute_subpixel_for_anchor	Ambiguous	unwrap_or	2	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::anchor_y	Ambiguous	saturating_sub	1	
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::bridge_frozen_prefix_rows	Ambiguous	eq	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); the projected ids are a VecDeque, so the prefix is compared with Iterator::eq over a range instead of a slice compare (std); in memory, no door
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::bridge_frozen_prefix_rows	Ambiguous	ok	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::bridge_prefix_rows	Ambiguous	ok	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::continuous_frame	Ambiguous	and_then	2	
@@ -12613,8 +12613,14 @@ crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::continuous_
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::continuous_frame	Ambiguous	unwrap_or	9	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::continuous_frame	Ambiguous	unwrap_or_default	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::continuous_frame	Ambiguous	unwrap_or_else	1	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::continuous_frame	Ambiguous	zip	1	
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::continuous_frame	Ambiguous	zip	2	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); the window's rows walked from a range of the VecDeque of projected ids, zipped with their indexes, instead of enumerate().skip (std); in memory, no door
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::continuous_frame	Dynamic	row_top	2	
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::follow_the_ends	Ambiguous	any	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); a front eviction followed at the projection's two ends: Option::is_none_or/is_some_and/map, Iterator::any, HashMap::get over the projection's own maps and the `departed` closure over an id (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::follow_the_ends	Ambiguous	get	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); a front eviction followed at the projection's two ends: Option::is_none_or/is_some_and/map, Iterator::any, HashMap::get over the projection's own maps and the `departed` closure over an id (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::follow_the_ends	Ambiguous	is_none_or	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); a front eviction followed at the projection's two ends: Option::is_none_or/is_some_and/map, Iterator::any, HashMap::get over the projection's own maps and the `departed` closure over an id (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::follow_the_ends	Ambiguous	is_some_and	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); a front eviction followed at the projection's two ends: Option::is_none_or/is_some_and/map, Iterator::any, HashMap::get over the projection's own maps and the `departed` closure over an id (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::follow_the_ends	Ambiguous	map	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); a front eviction followed at the projection's two ends: Option::is_none_or/is_some_and/map, Iterator::any, HashMap::get over the projection's own maps and the `departed` closure over an id (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::follow_the_ends	Dynamic	departed	4	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); a front eviction followed at the projection's two ends: Option::is_none_or/is_some_and/map, Iterator::any, HashMap::get over the projection's own maps and the `departed` closure over an id (std); in memory, no door
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::history_row_heights	Ambiguous	div_euclid	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::history_row_heights	Ambiguous	extend	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::history_row_heights	Ambiguous	flatten	1	
@@ -12628,18 +12634,17 @@ crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::move_artifa
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::move_artifact_bands	Ambiguous	unwrap_or	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::new	Ambiguous	collect	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::new	Ambiguous	map	1	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::project	Ambiguous	div_euclid	1	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::project	Ambiguous	flatten	1	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::project	Ambiguous	fold	1	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::project	Ambiguous	is_some_and	2	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::project	Ambiguous	saturating_add	3	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::project	Ambiguous	skip	1	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::project	Ambiguous	unwrap_or	2	
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::projected_history_index	Ambiguous	checked_sub	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); the projected line holding an id found by a binary search (VecDeque::partition_point, usize::checked_sub, std) instead of a walk; in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::push_projected	Ambiguous	div_euclid	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); one line measured and pushed, the body project's loop had: Option::map_or/unwrap_or/flatten, i64::div_euclid/saturating_add, Iterator::fold (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::push_projected	Ambiguous	flatten	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); one line measured and pushed, the body project's loop had: Option::map_or/unwrap_or/flatten, i64::div_euclid/saturating_add, Iterator::fold (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::push_projected	Ambiguous	fold	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); one line measured and pushed, the body project's loop had: Option::map_or/unwrap_or/flatten, i64::div_euclid/saturating_add, Iterator::fold (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::push_projected	Ambiguous	saturating_add	3	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); one line measured and pushed, the body project's loop had: Option::map_or/unwrap_or/flatten, i64::div_euclid/saturating_add, Iterator::fold (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::push_projected	Ambiguous	unwrap_or	2	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); one line measured and pushed, the body project's loop had: Option::map_or/unwrap_or/flatten, i64::div_euclid/saturating_add, Iterator::fold (std); in memory, no door
+crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::rebuild_projection	Ambiguous	is_some_and	2	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105); the rebuild project always had, now its own function: Option::is_some_and (std); in memory, no door
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::scroll_offset_rows	Ambiguous	unwrap_or	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::scroll_y	Ambiguous	transpose	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::set_live_state	Ambiguous	collect	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::set_live_state	Ambiguous	map	1	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_inline_path_artifacts	Ambiguous	contains	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_inline_path_artifacts	Ambiguous	is_empty	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_live_math_artifacts	Ambiguous	collect	2	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_live_math_artifacts	Ambiguous	get	1	
@@ -12651,7 +12656,6 @@ crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_live_m
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_live_math_artifacts	Ambiguous	saturating_sub	4	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_live_math_artifacts	Ambiguous	unwrap_or	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_math_artifacts	Ambiguous	collect	2	
-crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_math_artifacts	Ambiguous	contains	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_math_artifacts	Ambiguous	get	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_math_artifacts	Ambiguous	is_empty	1	
 crates/bt-viewport/src/lib.rs	bt-viewport crate::ViewportProjection::sync_math_artifacts	Ambiguous	iter	1	
