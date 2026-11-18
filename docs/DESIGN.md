@@ -16965,6 +16965,8 @@ A transaction folder with no statement fails closed and is discarded. That cover
 
 **Unchanged.** `MIN_UPDATER` stays 0.4.6 (R7). `trust` keeps every door. `update_handoff`'s sidecar line stays a diagnostic.
 
+**A seam for the tests.** Each `Poster::post` also notifies a condition variable beside the job's inbox (`ProgressInbox`). The Windows Prepare tests wait on it (`Job::await_reports`, test-only) instead of polling the job against a deadline, so they read no clock: the new tests are not timing-bound, and `TIMING-BOUND-TESTS.tsv` loses the 15 older ones that waited only that way.
+
 **Proof.** The tests below; the plants `plant-102-1b-*.py` are listed in the row's report.
 
 - bt-app `update_prepare::tests::`
