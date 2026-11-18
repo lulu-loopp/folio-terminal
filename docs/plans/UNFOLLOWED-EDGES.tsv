@@ -7075,7 +7075,6 @@ crates/bt-app/src/update_homes.rs	bt-app crate::update_homes::what_the_home_hold
 crates/bt-app/src/update_homes.rs	bt-app crate::update_homes::what_the_home_holds	Ambiguous	is_file	1	2026-11-10: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE-68B (0.4.10 plan row 68e); a listed entry's own type and path (DirEntry::file_type, FileType::is_file, DirEntry::path), the listing's answers and no further read; on the carry pass's worker or the uninstall's thread
 crates/bt-app/src/update_homes.rs	bt-app crate::update_homes::what_the_home_holds	Ambiguous	path	1	2026-11-10: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE-68B (0.4.10 plan row 68e); a listed entry's own type and path (DirEntry::file_type, FileType::is_file, DirEntry::path), the listing's answers and no further read; on the carry pass's worker or the uninstall's thread
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::<FeedBytes as Read>::read	Dynamic	(value)	1	
-crates/bt-app/src/update_job.rs	bt-app crate::update_job::<Poster as Drop>::drop	Ambiguous	unwrap_or_else	1	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102, the 1b+2 review's N14); the inbox's lock taken to count a poster out, PoisonError::into_inner; in memory, no door
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::<ReleaseDownload as Transport>::fetch	Ambiguous	cancel	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::<ReleaseDownload as Transport>::fetch	Ambiguous	load	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::<ReleaseDownload as Transport>::fetch	Ambiguous	map_err	1	
@@ -7139,6 +7138,7 @@ crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambi
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambiguous	to_string	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::clear	Ambiguous	to_string	3	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	load	1	
+crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	post	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	saturating_add	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	store	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::settle_at_launch	Ambiguous	why	1	
