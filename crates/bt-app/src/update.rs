@@ -1691,9 +1691,11 @@ pub(crate) fn this_copy_note() -> SignatureNote {
 /// row 102 part 3, R4): the About page asks once per visit
 /// (`settings::SettingsPanel::take_about_open_edge`), a certificate revoked
 /// while Folio runs included. The running `folio.exe`'s
-/// `update_prepare_windows::service_signature` under the system's policy, on
-/// a worker in the background band — Windows may ask the network whether the
-/// certificate is revoked; its answer is published, said in `diagnostics.log`
+/// `update_prepare_windows::service_signature` under the cache-only policy
+/// (`Policy::SystemCacheOnly`: revocation from what this machine holds,
+/// nothing asked of the network; a revocation it does not hold says nothing,
+/// `ServiceSignature::version_line_note`), on a worker in the background
+/// band; its answer is published, said in `diagnostics.log`
 /// the first time and whenever it changes, and wakes the loop. A reading already out answers this
 /// visit as well. On `platform`s other than Windows no Authenticode reading
 /// exists, and nothing starts. Answers whether a reading was started.
@@ -1713,10 +1715,10 @@ pub(crate) fn read_this_copy_signature(platform: HostPlatform) -> bool {
                 Ok(exe) => {
                     let signed = crate::update_prepare_windows::service_signature(
                         &exe,
-                        &bt_platform::trust::Policy::System,
+                        &bt_platform::trust::Policy::SystemCacheOnly,
                         &crate::update_prepare_windows::OUR_SERVICE,
                     );
-                    (signed.note(), signed.as_said())
+                    (signed.version_line_note(), signed.as_said())
                 }
                 Err(error) => (
                     SignatureNote::NotOurService,

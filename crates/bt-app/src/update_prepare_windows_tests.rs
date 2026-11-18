@@ -2619,9 +2619,66 @@ fn only_our_services_signature_says_nothing() {
     for other in [
         ServiceSignature::Another,
         ServiceSignature::Unsigned,
+        ServiceSignature::RevocationUnread("revocation offline".to_owned()),
         ServiceSignature::Refused("revoked".to_owned()),
     ] {
         assert_eq!(other.note(), SignatureNote::NotOurService, "{other:?}");
+    }
+}
+
+/// RED (0.4.10 plan row 102, the part 3 review's P2-12) — **a signature
+/// whose revocation this machine cannot establish says nothing on About**:
+/// a program the test root signed for the signer the reading looks for,
+/// read under a policy that holds no revocation list — the reading of a
+/// copy we signed on a machine whose cache holds no answer and that asks
+/// the network nothing — is `RevocationUnread`, for a leaf naming its list
+/// (offline) and one naming none (unknown). About → Version says nothing of
+/// it and the Ready card still says Windows may warn; a cached list that
+/// revokes the leaf still has About say the sentence.
+///
+/// MUTATION: `ServiceSignature::version_line_note` answers `note()` for every
+/// reading (`plant-102-3-about-says-unread-revocation.py`); or
+/// `service_signature` folds an unread revocation into `Refused`
+/// (`plant-102-3-unread-revocation-refused.py`).
+#[cfg(windows)]
+#[test]
+fn a_revocation_this_machine_cannot_establish_says_nothing_on_about() {
+    let folder = bt_testpath::temp_path("bt-u20-unread-revocation");
+    let _scratch = Scratch(folder.clone());
+    std::fs::create_dir_all(&folder).unwrap();
+    let service = ServiceSigner {
+        subject: SUBJECT,
+        identity_oid: IDENTITY,
+    };
+    for (world, ca) in [
+        ("offline", TestCa::naming_its_crls()),
+        ("unknown", TestCa::new()),
+    ] {
+        let ca = ca.expect("Windows has a test root");
+        let exe = folder.join(format!("{world}-{EXECUTABLE}"));
+        ca.signed_program(&exe, OFFERED, SUBJECT, IDENTITY, &[]);
+        assert_eq!(
+            service_signature(&exe, &ca.policy(), &service),
+            ServiceSignature::Ours,
+            "{world}: known good"
+        );
+        let unread = service_signature(&exe, &ca.policy_without_revocation_lists(), &service);
+        assert!(
+            matches!(unread, ServiceSignature::RevocationUnread(_)),
+            "{world}: {unread:?}"
+        );
+        assert_eq!(
+            unread.version_line_note(),
+            SignatureNote::Nothing,
+            "{world}"
+        );
+        assert_eq!(unread.note(), SignatureNote::NotOurService, "{world}");
+        let revoked = service_signature(&exe, &ca.policy_revoking_every_leaf(), &service);
+        assert_eq!(
+            revoked.version_line_note(),
+            SignatureNote::NotOurService,
+            "{world}: {revoked:?}"
+        );
     }
 }
 

@@ -74,6 +74,10 @@
 //! # Policy, and the test engine
 //!
 //! [`Policy::System`] is the product's: Windows' own roots and revocation.
+//! [`Policy::SystemCacheOnly`] is the same, with revocation read only from
+//! what this machine already holds: the readings that decide nothing and
+//! start without a press take it (0.4.10 plan row 102, the part 3 review's
+//! P2-12 and N21).
 //! [`Policy::ExclusiveRoot`] exists for tests (E-13): a chain engine made by
 //! `CertCreateCertificateChainEngine` whose **only** trusted root is the one
 //! it is given, in a memory store, so a certificate made inside a test
@@ -249,6 +253,16 @@ impl Expectation {
 pub enum Policy {
     /// Windows' own trusted roots and revocation — the product's policy.
     System,
+    /// Windows' own trusted roots, **with nothing retrieved over the
+    /// network** (`WTD_CACHE_ONLY_URL_RETRIEVAL`, and
+    /// `CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL` for the time-stamp authority's
+    /// chain): revocation is what this machine's URL cache holds. A cached
+    /// list that revokes the signer still reads as [`Refusal::Revoked`]; one
+    /// the cache does not hold reads as [`Refusal::RevocationOffline`] or
+    /// [`Refusal::RevocationUnknown`]. For the readings that decide no step
+    /// and start without a press: About → Version's and a resumed set's
+    /// (0.4.10 plan row 102, the part 3 review's P2-12 and N21).
+    SystemCacheOnly,
     /// **Tests only (E-13)**: a chain engine whose only trusted root is
     /// `root` (DER), held in a memory store, which never reaches the network;
     /// `revocation_lists` (DER CRLs) are the only revocation it knows. Nothing

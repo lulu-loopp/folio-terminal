@@ -789,10 +789,13 @@ fn staged_signature_note(home: &Home, txn: TxnId, policy: &Policy) -> SignatureN
 /// **Whether a `folio.exe` carries our signing service's signature**
 /// (0.4.10 plan row 102 §1.8, R4) — the updater's own reading, which decides
 /// no step of the Prepare: the Ready card's sentence and About → Version's
-/// are said from it ([`ServiceSignature::note`]). Windows' answer under `policy` must be a valid
-/// signature whose subject is `signer`'s and whose leaf carries `signer`'s
-/// identity OID; any refusal — unsigned, revoked, revocation offline or
-/// unknown — reads as not signed by it.
+/// are said from it ([`ServiceSignature::note`],
+/// [`ServiceSignature::version_line_note`]). Windows' answer under `policy`
+/// must be a valid signature whose subject is `signer`'s and whose leaf
+/// carries `signer`'s identity OID; a revocation Windows could not establish
+/// (offline or unknown — under `Policy::SystemCacheOnly`, one this machine's
+/// cache does not hold) is [`ServiceSignature::RevocationUnread`]; any other
+/// refusal — unsigned, revoked, untrusted — reads as not signed by it.
 #[must_use]
 pub(crate) fn service_signature(
     exe: &Path,
@@ -812,11 +815,15 @@ pub(crate) fn service_signature(
             }
         }
         Err(trust::Refusal::Unsigned) => ServiceSignature::Unsigned,
+        Err(
+            refusal @ (trust::Refusal::RevocationOffline { .. }
+            | trust::Refusal::RevocationUnknown { .. }),
+        ) => ServiceSignature::RevocationUnread(refusal.to_string()),
         Err(refusal) => ServiceSignature::Refused(refusal.to_string()),
     }
 }
 
-/// **What [`service_signature`] read** — one of four answers; only
+/// **What [`service_signature`] read** — one of five answers; only
 /// [`Self::Ours`] is our signing service's signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ServiceSignature {
@@ -826,18 +833,37 @@ pub(crate) enum ServiceSignature {
     Another,
     /// No signature at all.
     Unsigned,
-    /// A signature Windows refused, by the refusal's words.
+    /// A signature whose revocation Windows could not establish — offline or
+    /// unknown, by the refusal's words: who signed it is not read.
+    RevocationUnread(String),
+    /// A signature Windows refused otherwise, by the refusal's words.
     Refused(String),
 }
 
 impl ServiceSignature {
-    /// **What a surface says of it** (row 102 part 3): nothing for our
-    /// service's signature, the sentence for every other answer.
+    /// **What the Ready card says of it** (row 102 part 3): nothing for our
+    /// service's signature, "Windows may warn" for every other answer — an
+    /// unread revocation included, since the sentence only says Windows may.
     #[must_use]
     pub(crate) const fn note(&self) -> SignatureNote {
         match self {
             Self::Ours => SignatureNote::Nothing,
-            Self::Another | Self::Unsigned | Self::Refused(_) => SignatureNote::NotOurService,
+            Self::Another | Self::Unsigned | Self::RevocationUnread(_) | Self::Refused(_) => {
+                SignatureNote::NotOurService
+            }
+        }
+    }
+
+    /// **What About → Version says of it** (row 102 part 3, the part 3
+    /// review's P2-12): its sentence states that this copy is not signed by
+    /// our service, so it is said only of an answer that knows — another
+    /// signer, none, or a refusal. A revocation the machine could not
+    /// establish says nothing: a copy we signed reads that way offline.
+    #[must_use]
+    pub(crate) const fn version_line_note(&self) -> SignatureNote {
+        match self {
+            Self::RevocationUnread(_) => SignatureNote::Nothing,
+            other => other.note(),
         }
     }
 
@@ -847,6 +873,9 @@ impl ServiceSignature {
             Self::Ours => "signed by our signing service".to_owned(),
             Self::Another => "signed, by another signer than our signing service".to_owned(),
             Self::Unsigned => "not signed".to_owned(),
+            Self::RevocationUnread(refusal) => {
+                format!("signed, its revocation not established ({refusal})")
+            }
             Self::Refused(refusal) => format!("not signed by our signing service ({refusal})"),
         }
     }
@@ -955,7 +984,9 @@ pub(crate) fn resume(
 /// [`resume`] for the executable at `exe`, verifying with `vouching`, for the
 /// channel the job hands it; then the staged `folio.exe`'s signature, read
 /// again under `policy` for the Ready card this launch shows
-/// ([`staged_signature_note`], row 102 part 3).
+/// ([`staged_signature_note`], row 102 part 3) — `Policy::SystemCacheOnly`
+/// in the product, since a launch starts it without a press (the part 3
+/// review's N21).
 #[must_use]
 pub(crate) fn resumer(
     exe: PathBuf,

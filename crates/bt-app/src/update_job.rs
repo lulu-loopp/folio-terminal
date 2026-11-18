@@ -1216,7 +1216,9 @@ pub(crate) fn resumer_for_this_copy() -> Resumer {
             Ok(exe) => crate::update_prepare_windows::resumer(
                 exe,
                 crate::update_prepare::Vouching::of_this_copy(),
-                bt_platform::trust::Policy::System,
+                // A launch reads the staged set's signature without a press:
+                // from this machine's cache only (the part 3 review's N21).
+                bt_platform::trust::Policy::SystemCacheOnly,
             ),
             Err(_) => crate::update_prepare::no_resume(),
         },
