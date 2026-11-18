@@ -24,6 +24,7 @@ use bt_platform::HostPlatform;
 use bt_platform::trust::FileVersion;
 #[cfg(windows)]
 use bt_platform::trust_harness::{Behaviour, IDENTITY, OTHER_IDENTITY, SUBJECT, TestCa};
+#[cfg(windows)]
 use bt_winres::digest::{hex, sha256};
 use bt_winres::release_manifest::archive_root;
 #[cfg(windows)]
