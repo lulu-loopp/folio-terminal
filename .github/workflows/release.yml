@@ -844,10 +844,15 @@ jobs:
           $at = [Array]::FindIndex($lines, [Predicate[string]] { param($line) $line -cmatch '^assets \d+$' })
           if ($at -lt 0) { throw 'the statement has no assets line' }
           $count = [int]($lines[$at] -split ' ')[1]
-          foreach ($line in $lines[($at + 1)..($at + $count)]) {
-            $name = ($line -split ' ')[3]
+          # One line after another, `count` of them: a range would count down
+          # over `assets 0` and read that line itself. The name goes to gh as a
+          # glob, so its glob characters are each put in a class of their own
+          # and match only themselves (the 1b+2 review's N15).
+          for ($i = 1; $i -le $count; $i++) {
+            $name = ($lines[$at + $i] -split ' ')[3]
+            $pattern = [regex]::Replace($name, '[\[*?]', { param($found) "[$($found.Value)]" })
             Write-Host "downloading $name"
-            gh release download $env:FOLIO_TAG --repo $env:GITHUB_REPOSITORY --dir $into --pattern $name
+            gh release download $env:FOLIO_TAG --repo $env:GITHUB_REPOSITORY --dir $into --pattern "$pattern"
             if ($LASTEXITCODE -ne 0) { throw "the statement lists $name and the page does not serve it" }
           }
 
