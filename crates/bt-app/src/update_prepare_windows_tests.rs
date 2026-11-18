@@ -551,7 +551,11 @@ fn press_with(driver: &WinPrepare, transport: SharedTransport, txn: u8) -> Job<u
     job.answer_verb(Verb::Press, driver, &transport)
         .expect("the press is taken");
     loop {
-        job.await_reports();
+        assert!(
+            job.await_reports(),
+            "the Prepare ended without a last word: {:?}",
+            job.state()
+        );
         job.drain_progress();
         if matches!(job.state(), State::Verified(_) | State::Failed(..)) {
             return job;

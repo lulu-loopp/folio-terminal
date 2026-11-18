@@ -73,7 +73,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use bt_persist::UpdateCheckV1;
@@ -1414,11 +1414,15 @@ pub(crate) enum SignatureNote {
 struct ProgressInbox {
     reports: Mutex<Vec<Progress>>,
     report_posted: Condvar,
+    /// **How many [`Poster`]s of this inbox are alive** (the 1b+2 review's
+    /// N14): made or cloned, one more; dropped — a worker's that ended, or
+    /// unwound — one fewer, said on `report_posted`. Changed under `reports`'
+    /// lock, so a waiter that reads it there misses no drop.
+    posters: AtomicUsize,
 }
 
 /// **A driver's way back to the job**: reports carry the transaction they
 /// belong to, wait in the job's inbox, and wake the loop.
-#[derive(Clone)]
 pub(crate) struct Poster {
     txn: TxnId,
     inbox: Arc<ProgressInbox>,
@@ -1428,7 +1432,53 @@ pub(crate) struct Poster {
     cancelled: Arc<AtomicBool>,
 }
 
+impl Clone for Poster {
+    fn clone(&self) -> Self {
+        Self::counted(
+            self.txn,
+            Arc::clone(&self.inbox),
+            Arc::clone(&self.staged),
+            Arc::clone(&self.cancelled),
+        )
+    }
+}
+
+impl Drop for Poster {
+    fn drop(&mut self) {
+        let reports = self
+            .inbox
+            .reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.inbox.posters.fetch_sub(1, Ordering::SeqCst);
+        drop(reports);
+        self.inbox.report_posted.notify_all();
+    }
+}
+
 impl Poster {
+    /// **A poster of `inbox`, counted among its live ones** (N14).
+    fn counted(
+        txn: TxnId,
+        inbox: Arc<ProgressInbox>,
+        staged: StagedSlot,
+        cancelled: Arc<AtomicBool>,
+    ) -> Self {
+        {
+            let _reports = inbox
+                .reports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inbox.posters.fetch_add(1, Ordering::SeqCst);
+        }
+        Self {
+            txn,
+            inbox,
+            staged,
+            cancelled,
+        }
+    }
+
     /// **Report `Verified`, handing the job what Prepare leaves behind** —
     /// the home, the journal at `Prepared` and the transaction lock (U-21's
     /// seam for U-20 / U-27): the quit's hand-over writes `Handoff` from it,
@@ -1458,12 +1508,12 @@ impl Poster {
     #[cfg(test)]
     #[must_use]
     pub(crate) fn of_a_test(txn: TxnId) -> Self {
-        Self {
+        Self::counted(
             txn,
-            inbox: Arc::default(),
-            staged: Arc::default(),
-            cancelled: Arc::new(AtomicBool::new(false)),
-        }
+            Arc::default(),
+            Arc::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     /// Whether the job has cancelled this poster's transaction.
@@ -2319,23 +2369,30 @@ impl<W: Copy + Eq> Job<W> {
     }
 
     /// **Wait until a driver has reported**, without applying it — a test's
-    /// way to drive a job with no loop to wake: it returns once the inbox
-    /// holds a report, at once if it already does, and reads no clock (the
-    /// test's watchdog bounds a driver that never reports).
+    /// way to drive a job with no loop to wake: `true` once the inbox holds a
+    /// report, at once if it already does; `false` once it holds none and no
+    /// poster of it is left to post one — a driver whose worker ended, or
+    /// unwound, without its last word (the 1b+2 review's N14). It reads no
+    /// clock.
     #[cfg(test)]
-    pub(crate) fn await_reports(&self) {
+    #[must_use]
+    pub(crate) fn await_reports(&self) -> bool {
         let mut reports = self
             .inbox
             .reports
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         while reports.is_empty() {
+            if self.inbox.posters.load(Ordering::SeqCst) == 0 {
+                return false;
+            }
             reports = self
                 .inbox
                 .report_posted
                 .wait(reports)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+        true
     }
 
     /// **Apply what the drivers reported**, in order — the handler of
@@ -2432,12 +2489,12 @@ impl<W: Copy + Eq> Job<W> {
             }
             (State::Available(offer), Verb::Press) => {
                 let cancelled = Arc::new(AtomicBool::new(false));
-                let post = Poster {
-                    txn: offer.txn,
-                    inbox: Arc::clone(&self.inbox),
-                    staged: Arc::clone(&self.staged_slot),
-                    cancelled: Arc::clone(&cancelled),
-                };
+                let post = Poster::counted(
+                    offer.txn,
+                    Arc::clone(&self.inbox),
+                    Arc::clone(&self.staged_slot),
+                    Arc::clone(&cancelled),
+                );
                 match driver.prepare(&offer, transport, &post) {
                     Ok(()) => {
                         self.last_failure = None;
@@ -4451,4 +4508,39 @@ mod tests {
         );
     }
 
+    /// RED (0.4.10 plan row 102, the 1b+2 review's N14) — **a driver whose
+    /// worker unwinds before its last word leaves no waiter waiting**: the
+    /// worker's poster is dropped by the unwind, no poster of the inbox is
+    /// left, and `await_reports` answers `false` — the test that waits turns
+    /// red instead of hanging until the suite's patience ends it.
+    ///
+    /// MUTATION: `await_reports` waits on an empty inbox whatever the posters
+    /// (`plant-102-n14-waits-for-ever.py`; the run is bounded by its timeout).
+    #[test]
+    fn a_driver_that_unwinds_without_a_last_word_ends_the_wait() {
+        struct Unwinding;
+        impl Driver for Unwinding {
+            fn prepare(
+                &self,
+                _offer: &Offer,
+                _transport: &SharedTransport,
+                post: &Poster,
+            ) -> Result<(), Refused> {
+                let post = post.clone();
+                std::thread::spawn(move || {
+                    let _post = post;
+                    panic!("a Prepare that unwinds before its last report");
+                });
+                Ok(())
+            }
+        }
+        let mut job = available("v0.4.7");
+        job.answer_verb(Verb::Press, &Unwinding, &Recording::default().shared())
+            .expect("the press is taken");
+        assert!(
+            !job.await_reports(),
+            "no report, and no poster left to post one"
+        );
+        assert!(matches!(job.state(), State::Downloading(..)));
+    }
 }
