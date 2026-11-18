@@ -11,8 +11,9 @@
 /// zero, behind a count of such items (`dead`), and every index this type takes or answers is
 /// counted from the first item still standing. Zero heights add nothing to any prefix, so the
 /// sums need no correction; once the dead part is more than half of what is stored, the tree is
-/// rebuilt from the living part, which keeps the storage under twice the items and costs O(1)
-/// amortized per dropped item.
+/// rebuilt from the living part, which keeps the storage under twice the items. A rebuild adds
+/// every living item again, O(n log n), spread over the n drops since the last one; with the
+/// drop's own O(log n) zeroing, a dropped item costs O(log n) amortized.
 #[derive(Clone, Debug, Default)]
 pub struct HeightTree {
     heights: Vec<i64>,

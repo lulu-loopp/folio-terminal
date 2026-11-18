@@ -4886,7 +4886,14 @@ impl ViewportProjection {
                 .get(id)
                 .is_some_and(|artifact| !departed(artifact.end))
         });
-        if returns_swallowed_lines {
+        // No document line is older than `first`, so none can swallow it: the first projected
+        // line to stay must be the document's first. Anything else is a projection that does not
+        // follow this document, and the walk from the front is the answer (review N2).
+        let follows_this_document = self
+            .ordered_ids
+            .get(leaving)
+            .is_none_or(|id| Some(*id) == first);
+        if returns_swallowed_lines || !follows_this_document {
             return false;
         }
 
@@ -4902,8 +4909,9 @@ impl ViewportProjection {
                 }
                 None => std::mem::take(&mut self.cache),
             };
-            // A projected line's slot is the measurement it was pushed with: a slot is only
-            // removed together with `projection_dirty`, and only rebuilt lines are pushed then.
+            // A projected line's slot holds the columns the line was pushed with (a block changing
+            // face moves the trees' heights, not the slot's columns): a slot is only removed
+            // together with `projection_dirty`, and only rebuilt lines are pushed then.
             for id in self.ordered_ids.range(..leaving) {
                 if let Some((_, measured)) = departed_slots.get(id) {
                     self.extent.remove(measured.columns);
@@ -14708,6 +14716,31 @@ mod tests {
 
         let mut fresh = eviction_projection(&store);
         fresh.sync_math_artifacts(block());
+        fresh.project(&document);
+        assert_same_projection(&projection, &fresh, &document);
+    }
+
+    /// **A line gone from the middle of history is a rebuild**, and the projection it leaves is
+    /// the one a fresh projection is (0.4.10 plan row 105, review P2-2): following the two ends
+    /// would keep projecting the deleted line, which is what the document's `interior_edits`
+    /// guard is there to refuse.
+    #[test]
+    fn a_line_gone_from_the_middle_is_a_rebuild() {
+        let (store, mut document) = full_history(400);
+        let ids = document.entries().keys().copied().collect::<Vec<_>>();
+        let mut projection = eviction_projection(&store);
+        projection.project(&document);
+        let rebuilds = projection.rebuilds();
+
+        document.delete_transaction(&[ids[200]], false, GridGeneration(1));
+        projection.project(&document);
+        assert_eq!(
+            projection.rebuilds(),
+            rebuilds + 1,
+            "a deletion from the middle is a rebuild"
+        );
+
+        let mut fresh = eviction_projection(&store);
         fresh.project(&document);
         assert_same_projection(&projection, &fresh, &document);
     }
