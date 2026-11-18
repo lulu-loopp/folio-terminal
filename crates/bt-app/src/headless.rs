@@ -93,6 +93,8 @@ pub(crate) enum WindowEffect {
     KeyboardFocusTaken,
     /// The window asked to close, as Folio's own request by this road (`WindowHost::request_close`).
     CloseRequested(bt_platform::close_road::OwnCloseRoad),
+    /// The close witness told the window is Folio's (`WindowHost::watch_closes`).
+    ClosesWatched,
     /// The close witness told the window has gone (`WindowHost::unwatch_closes`).
     ClosesUnwatched,
     /// The taskbar button flashed (`WindowHost::flash`).
@@ -574,6 +576,9 @@ impl WindowHost for HeadlessWindow {
                 pointer: bt_platform::close_road::ClosePointer::Unread,
             });
         Ok(())
+    }
+    fn watch_closes(&self) {
+        self.ledger.record(WindowEffect::ClosesWatched);
     }
     fn take_close_arrival(&self) -> Option<bt_platform::close_road::CloseArrival> {
         self.closes.borrow_mut().pop_front()
@@ -2372,6 +2377,7 @@ mod tests {
             .expect("recorded");
         assert!(window.take_foreground(), "the system lets it");
         window.take_keyboard_focus().expect("recorded");
+        window.watch_closes();
         window
             .request_close(bt_platform::close_road::OwnCloseRoad::FinalTab)
             .expect("recorded");
@@ -2560,6 +2566,7 @@ mod tests {
                 WindowEffect::ClassBackground(Some([1, 2, 3])),
                 WindowEffect::ForegroundTaken,
                 WindowEffect::KeyboardFocusTaken,
+                WindowEffect::ClosesWatched,
                 WindowEffect::CloseRequested(bt_platform::close_road::OwnCloseRoad::FinalTab),
                 WindowEffect::ClosesUnwatched,
                 WindowEffect::Flashed,

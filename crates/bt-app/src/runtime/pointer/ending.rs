@@ -132,8 +132,9 @@ pub(crate) trait CaptureEnding: Copy {
     /// one that cannot.
     type Done;
 
-    /// Whether this ending takes `owner` away, in a window whose tab in front is `active`.
-    fn takes(self, owner: &CaptureOwner, active: TabId) -> bool;
+    /// Whether this ending takes `owner` away, in a window whose tab in front is `active` —
+    /// `None` in a window its last tab has just left.
+    fn takes(self, owner: &CaptureOwner, active: Option<TabId>) -> bool;
 
     /// The ending's name, for the trace.
     fn name(self) -> &'static str;
@@ -148,7 +149,7 @@ pub(crate) trait CaptureEnding: Copy {
 impl CaptureEnding for Ending {
     type Done = Result<()>;
 
-    fn takes(self, owner: &CaptureOwner, active: TabId) -> bool {
+    fn takes(self, owner: &CaptureOwner, active: Option<TabId>) -> bool {
         match self {
             Self::Cancel => true,
             Self::ScaleChange => owner.holds_pixels_from_the_press(),
@@ -176,7 +177,7 @@ impl CaptureEnding for Ending {
 impl CaptureEnding for OwnerGone {
     type Done = ();
 
-    fn takes(self, owner: &CaptureOwner, active: TabId) -> bool {
+    fn takes(self, owner: &CaptureOwner, active: Option<TabId>) -> bool {
         owner.is_gone_with(self.0, active)
     }
 
@@ -351,15 +352,16 @@ impl CaptureOwner {
     /// surfaces — a tab of the strip, a floating window, the glance card, the settings sheet —
     /// which end when they are gone. A divider and a formula block are gestures on the tab in
     /// front that name no pane: a divider leaves with any pane, since a zoomed pane shows no
-    /// divider; a formula block, whose pane the route does not record, leaves with the tab.
-    fn leaves_the_glass(&self, glass: Leaving, active: TabId) -> bool {
+    /// divider; a formula block, whose pane the route does not record, leaves with the tab. A
+    /// window with no tab in front (`None`) holds no gesture on one.
+    fn leaves_the_glass(&self, glass: Leaving, active: Option<TabId>) -> bool {
         match self {
-            Self::Divider(_) => active == glass.tab,
+            Self::Divider(_) => active == Some(glass.tab),
             Self::PanePress(tab, press) => glass.takes(*tab, press.seat),
             Self::RowPress(RowPress { host, .. })
             | Self::RowMiddlePress(RowMiddlePress { host, .. }) => match host {
                 RowHost::Column(seat) | RowHost::Git(seat) | RowHost::Terminal(seat) => {
-                    glass.takes(active, *seat)
+                    active.is_some_and(|active| glass.takes(active, *seat))
                 }
                 RowHost::Float(_) => false,
             },
@@ -380,7 +382,7 @@ impl CaptureOwner {
                 glass.takes(selection.owner.tab, selection.owner.seat)
             }
             Self::Route(MouseRoute::Forward { owner, .. }) => glass.takes(owner.tab, owner.seat),
-            Self::Route(MouseRoute::MathBlock) => active == glass.tab && glass.kept.is_none(),
+            Self::Route(MouseRoute::MathBlock) => active == Some(glass.tab) && glass.kept.is_none(),
             // A field drawn on a pane leaves with its pane, and a graph's search with its
             // surface, as a selection on that surface does; a tab's name is the strip's, and the
             // dialog, the palette and a menu are the window's.
@@ -403,17 +405,19 @@ impl CaptureOwner {
 
     /// **Whether this gesture's owner went with `gone`** (R-9's *owner gone*), in a window whose
     /// tab in front is `active`. A gesture on the tab in front that names no tab of its own — a
-    /// divider, a files row, a formula block — goes with that tab.
-    fn is_gone_with(&self, gone: Gone, active: TabId) -> bool {
+    /// divider, a files row, a formula block — goes with that tab; a window with no tab in front
+    /// (`None`) holds none.
+    fn is_gone_with(&self, gone: Gone, active: Option<TabId>) -> bool {
         match self {
-            Self::Divider(_) | Self::Route(MouseRoute::MathBlock) => the_tab(gone, active),
+            Self::Divider(_) | Self::Route(MouseRoute::MathBlock) => {
+                active.is_some_and(|active| the_tab(gone, active))
+            }
             Self::TabPress(press) => the_tab(gone, press.tab),
             Self::PanePress(tab, press) => the_tab(gone, *tab) || pane_of(gone, *tab, press.seat),
             Self::RowPress(RowPress { host, .. })
             | Self::RowMiddlePress(RowMiddlePress { host, .. }) => match *host {
-                RowHost::Column(seat) | RowHost::Git(seat) | RowHost::Terminal(seat) => {
-                    the_tab(gone, active) || pane_of(gone, active, seat)
-                }
+                RowHost::Column(seat) | RowHost::Git(seat) | RowHost::Terminal(seat) => active
+                    .is_some_and(|active| the_tab(gone, active) || pane_of(gone, active, seat)),
                 RowHost::Float(id) => matches!(gone, Gone::Float(gone) if gone == id),
             },
             // The drag of a tab that is closed: its payload stopped existing. A pane or a row in
@@ -542,7 +546,15 @@ impl<B: Backend> Runtime<'_, B> {
     /// **End this window's capture with `ending`, if the ending takes it** (R-9) — the one call
     /// every lifecycle door makes, before it changes what the owner names.
     pub(crate) fn end_capture<E: CaptureEnding>(&mut self, ending: E) -> E::Done {
-        let (window, active) = (self.window.window.id(), self.id);
+        // **The tab in front, read off the list and not through the facade**: a window its last
+        // tab has just left (`FolioApp::transfer_tab` emptying its source) is shut through this
+        // door with no tab in front, and the facade's read of one would index an empty list.
+        let window = self.window.window.id();
+        let active = self
+            .window
+            .tabs
+            .get(self.window.active_tab)
+            .map(|tab| tab.id);
         let Some(capture) = self.app.take_capture_where(|capture| {
             capture.window == window && ending.takes(&capture.owner, active)
         }) else {

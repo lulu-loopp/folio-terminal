@@ -312,6 +312,9 @@ pub(crate) trait WindowHost {
     /// `bt_platform::request_window_close`, which carries the road in the message (0.4.10 plan
     /// row 103).
     fn request_close(&self, road: bt_platform::close_road::OwnCloseRoad) -> Result<(), String>;
+    /// **Folio's window from now on, to the close witness**: every close the window thread's hooks
+    /// see reach it is kept for its `CloseRequested` — `bt_platform::close_road::watch_closes`.
+    fn watch_closes(&self);
     /// **What the platform saw of the close request this window has just received**, taken —
     /// `bt_platform::close_road::take_close_arrival`; `None` when nothing was witnessed.
     fn take_close_arrival(&self) -> Option<bt_platform::close_road::CloseArrival>;
@@ -530,6 +533,11 @@ impl WindowHost for Arc<Window> {
     }
     fn request_close(&self, road: bt_platform::close_road::OwnCloseRoad) -> Result<(), String> {
         bt_platform::request_window_close(native_or_say(self)?, road)
+    }
+    fn watch_closes(&self) {
+        if let Ok(native) = crate::native_window_of(self) {
+            bt_platform::close_road::watch_closes(native);
+        }
     }
     fn take_close_arrival(&self) -> Option<bt_platform::close_road::CloseArrival> {
         crate::native_window_of(self)

@@ -659,14 +659,9 @@ mod tests {
                 "final-tab",
             ),
             (
-                close_asked_by(Some(CloseRoad::SystemClose(SystemCloseFrom::Accelerator))),
+                close_asked_by(Some(CloseRoad::SystemClose(SystemCloseFrom::Keyboard))),
                 "the system's close command",
-                "system-close (accelerator)",
-            ),
-            (
-                close_asked_by(Some(CloseRoad::SystemClose(SystemCloseFrom::Mnemonic))),
-                "the system's close command",
-                "system-close (mnemonic)",
+                "system-close (keyboard)",
             ),
             (
                 close_asked_by(Some(CloseRoad::SystemClose(SystemCloseFrom::Pointer))),

@@ -36102,11 +36102,6 @@ impl Runtime<'_, Native> {
                     // `bt_platform::clipboard_text`, `set_clipboard_text` and
                     // `cancel_composition` ask it rather than their callers.
                     bt_platform::register_clipboard_owner(native);
-                    // **And the close witness keeps this window's closes for it** (0.4.10
-                    // plan row 103): every close the thread's hooks see reach it is kept for
-                    // its `CloseRequested`, and one that reaches a window that is not Folio's
-                    // is said at once.
-                    bt_platform::close_road::watch_closes(native);
                     // The frame's own measurement travels with the install, from the crate
                     // that paints it (spike Q5 item 2): the title bar the pointer is tested
                     // against and the title bar the renderer draws are literally the same
@@ -38939,6 +38934,43 @@ mod launch_landing_tests {
     /// older window), or the one in `resumed` (the first window is unnamed
     /// until the turn's head); write the log line before `settle_update_card` or from
     /// `raised` alone (the line no longer says where the card is).
+    /// RED (0.4.10 plan row 103, review P2-3 and N9) — **a window is watched by the close
+    /// witness only once it is in the registry**: in both doors that open one, `watch_closes`
+    /// follows the insert, after the constructor's last fallible step, and no constructor
+    /// watches. A watched window outside the registry would keep closes the arm drops.
+    ///
+    /// MUTATION: watch in `Runtime::open_window` again, before `CustomWindowFrame::install` —
+    /// the constructor's assertion goes red.
+    #[test]
+    fn a_window_is_watched_for_its_closes_only_once_it_is_in_the_registry() {
+        for (name, door) in [
+            (
+                "open_pending_window",
+                method_body("FolioApp", "open_pending_window"),
+            ),
+            (
+                "resumed",
+                item_body(&ItemQuery::method("FolioApp", "resumed").of_trait("ApplicationHandler")),
+            ),
+        ] {
+            let insert = door.find("self.windows.insert(id, window);");
+            let watch = door.find("window.window.watch_closes();");
+            assert!(
+                matches!((insert, watch), (Some(i), Some(w)) if i < w),
+                "`FolioApp::{name}` watches a window before it is in the registry:\n{door}"
+            );
+        }
+        for constructor in [
+            method_body("Runtime", "create"),
+            method_body("Runtime", "open_window"),
+        ] {
+            assert!(
+                !constructor.contains("watch_closes"),
+                "a constructor watches its window before its last fallible step:\n{constructor}"
+            );
+        }
+    }
+
     #[test]
     fn a_window_is_in_the_directory_from_the_door_that_opens_it() {
         let door = method_body("FolioApp", "open_pending_window");
@@ -48505,6 +48537,13 @@ impl<B: Backend> FolioApp<B> {
             let (id, window) = B::open_window(event_loop, app, &plan, like)?;
             let door = opened_at.elapsed();
             self.windows.insert(id, window);
+            // **And the close witness keeps its closes for it from now on** (0.4.10 plan row 103,
+            // review P2-3 and N9): after the constructor's last fallible step and after the insert,
+            // so a window that never joined the registry is never watched, and no close is kept for
+            // a window whose `CloseRequested` the arm would drop as no window of Folio's.
+            if let Some(window) = self.windows.get_mut(id) {
+                window.window.watch_closes();
+            }
             // **The directory names the window from the moment it exists**: the
             // doors after this one in the same turn read it — the launch that
             // opened it seats the update card it carried there, and a second
@@ -50217,7 +50256,11 @@ impl<B: Backend> FolioApp<B> {
                 if let Some(mut runtime) = self.runtime(into) {
                     runtime.close_window(false)?;
                 }
-                self.windows.remove(into);
+                // The window has gone, so the close witness forgets it, as at the reap (0.4.10
+                // plan row 103, review P2-3).
+                if let Some(gone) = self.windows.remove(into) {
+                    gone.window.unwatch_closes();
+                }
                 if let Some(mut runtime) = self.runtime(errand.from) {
                     runtime.report_move_refusal(&refusal, errand.promoted)?;
                 }
@@ -52618,6 +52661,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 let id = window.window.id();
                 self.app = Some(app);
                 self.windows.insert(id, window);
+                // **And the close witness keeps its closes for it from now on** (0.4.10 plan row 103,
+                // review P2-3 and N9): after the constructor's last fallible step and after the insert,
+                // so a window that never joined the registry is never watched, and no close is kept for
+                // a window whose `CloseRequested` the arm would drop as no window of Folio's.
+                if let Some(window) = self.windows.get_mut(id) {
+                    window.window.watch_closes();
+                }
                 // Named in the directory from the moment it exists, as the
                 // window door names every later one.
                 self.publish_window_directory();
@@ -59318,9 +59368,12 @@ fn main() -> Result<()> {
     // self-report charged to `message pump` names the message that spent it:
     // the posted ones are timed by the message hook below, the sent ones (the
     // input method's, the compositor's) by two hooks of this thread's own that
-    // this installs. On this thread, before the loop, because the hooks are the
-    // calling thread's; nothing is installed where the pump offers no per-message
-    // door (see `bt_platform::pump`).
+    // this installs. **The same call starts the close witness** (0.4.10 plan row
+    // 103): those two hooks tell it of a sent close, and a third, `WH_GETMESSAGE`,
+    // hears every posted message the thread takes, so a refusal here (`message
+    // timing:`) is the witness's too. On this thread, before the loop, because the
+    // hooks are the calling thread's; nothing is installed where the pump offers
+    // no per-message door (see `bt_platform::pump`).
     if let Err(error) = bt_platform::pump::time_messages(bt_platform::pump::Timing {
         began: hang_watch::message_began,
         ended: hang_watch::message_ended,

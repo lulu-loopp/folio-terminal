@@ -2904,10 +2904,12 @@ fn two_open_windows(tag: &str) -> HeadlessApplication {
 }
 
 /// RED (mutation: `ChromeTarget::CloseWindow` asking as `OwnCloseRoad::FinalTab`) — **the
-/// caption `×` asks the window's close as the caption button, and that close says so, with the
-/// windows the run goes on with (R4)**.
+/// caption `×` asks the window's close as the caption button**: a real pointer press on the
+/// chrome's close target. What the close then says is
+/// `an_own_request_with_nothing_to_ask_ends_the_run_saying_its_road`'s claim, and the windows
+/// left are `a_close_that_does_not_end_the_run_says_the_windows_left`'s (review N10).
 #[test]
-fn the_caption_close_button_asks_as_itself_and_the_window_says_so() {
+fn the_caption_close_button_asks_as_itself() {
     use winit::event::{DeviceId, ElementState, MouseButton};
     let mut application = two_open_windows("close-road-caption");
     let at = chrome_point(&mut application.runtime(), |target| {
@@ -2931,16 +2933,6 @@ fn the_caption_close_button_asks_as_itself_and_the_window_says_so() {
         [bt_platform::close_road::OwnCloseRoad::CaptionButton],
         "the press asks the close by the caption road"
     );
-    event_to(&mut application, 1, WindowEvent::CloseRequested);
-    assert_eq!(
-        close_lines(&application),
-        [
-            "Folio: window closed — the person closed it; window=ordinary 1; road=caption-button; \
-          delivery=posted; foreground=yes; pointer=unread; tabs=1; panes=2; windows left=1"
-        ]
-    );
-    assert!(is_leaving(&mut application, WindowId::from(1)));
-    assert!(!is_leaving(&mut application, WindowId::from(2)));
 }
 
 /// RED (mutation: `close_tab` asking as `OwnCloseRoad::CaptionButton`) — **closing a window's
@@ -3124,7 +3116,7 @@ fn a_close_held_by_the_question_keeps_the_road_that_asked() {
         1,
         foreign_close(
             bt_platform::close_road::CloseRoad::SystemClose(
-                bt_platform::close_road::SystemCloseFrom::Accelerator,
+                bt_platform::close_road::SystemCloseFrom::Keyboard,
             ),
             bt_platform::close_road::CloseDelivery::SentHere,
             bt_platform::close_road::ClosePointer::Outside,
@@ -3146,7 +3138,7 @@ fn a_close_held_by_the_question_keeps_the_road_that_asked() {
         close_lines(&application),
         [
             "Folio: last window closed — the system's close command; window=ordinary 1; \
-          road=system-close (accelerator); delivery=sent here; foreground=no; pointer=outside; \
+          road=system-close (keyboard); delivery=sent here; foreground=no; pointer=outside; \
           tabs=1; panes=2"
         ]
     );
@@ -3432,4 +3424,66 @@ fn the_pointer_at_a_close_is_named_by_the_windows_chrome() {
             "{pointer:?}"
         );
     }
+}
+
+/// RED (mutation: drop `gone.window.unwatch_closes()` from `FolioApp::reap_leaving_windows`) —
+/// **a closed window leaves the close witness's book when it is reaped** (review P2-3): the
+/// witness forgets it, once, and the window is gone from the registry.
+#[test]
+fn a_reaped_window_leaves_the_close_witness() {
+    let mut application = two_open_windows("close-road-reaped");
+    event_to(&mut application, 2, WindowEvent::CloseRequested);
+    assert!(is_leaving(&mut application, WindowId::from(2)));
+    application.event_loop.ledger.take();
+    let after =
+        Instant::now() + crate::quit::PAGE_TEARDOWN_DEADLINE + std::time::Duration::from_secs(1);
+    application
+        .folio
+        .reap_leaving_windows(&application.event_loop, after)
+        .expect("the reap takes its turn");
+    assert!(
+        !application.folio.windows.contains(WindowId::from(2)),
+        "reaped"
+    );
+    assert_eq!(
+        application
+            .event_loop
+            .ledger
+            .take()
+            .into_iter()
+            .filter(|effect| *effect == WindowEffect::ClosesUnwatched)
+            .count(),
+        1,
+        "the witness forgets the reaped window, once"
+    );
+}
+
+/// RED (mutation: drop the `say_window_closed` call from `FolioApp::transfer_tab`) — **a window
+/// emptied by its last tab moving out says so on its close line** (R4, row 14; review P2-4), with
+/// the counts it held before the move took the tab and the window the run goes on with.
+#[test]
+fn a_window_whose_last_tab_moved_out_says_so() {
+    let mut application = two_open_windows("close-road-moved-out");
+    let tab = application
+        .folio
+        .windows
+        .get_mut(WindowId::from(2))
+        .map(|window| window.tabs[0].id)
+        .expect("window 2 holds a tab");
+    let moved = application
+        .folio
+        .transfer_tab(tab, WindowId::from(1))
+        .expect("the move is answered");
+    assert!(
+        matches!(moved, crate::TransferOutcome::Moved(_)),
+        "the tab moved"
+    );
+    assert_eq!(
+        close_lines(&application),
+        [
+            "Folio: window closed — the last tab moved to another window; window=ordinary 2; \
+          road=tab-moved-out; delivery=unread; foreground=unread; pointer=unread; tabs=0; \
+          panes=0; windows left=1"
+        ]
+    );
 }

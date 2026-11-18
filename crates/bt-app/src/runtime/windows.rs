@@ -162,9 +162,6 @@ impl Runtime<'_, Native> {
         // A second window is a second owner the clipboard may go through — see
         // the first constructor's note.
         bt_platform::register_clipboard_owner(native);
-        // And its closes are kept for it by the close witness — see the first constructor's note
-        // (0.4.10 plan row 103).
-        bt_platform::close_road::watch_closes(native);
         let custom_window_frame = bt_platform::CustomWindowFrame::install(
             native,
             bt_platform::CustomFrameGeometry {
