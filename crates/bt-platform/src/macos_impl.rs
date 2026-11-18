@@ -88,9 +88,11 @@
 //! M4-11 decides what a dying process may say to AppKit from a thread that is
 //! not the main one.
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
+
+use block2::RcBlock;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
@@ -101,15 +103,19 @@ use objc2::{
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
     NSApplication, NSApplicationDidChangeScreenParametersNotification, NSAutoresizingMaskOptions,
-    NSButton, NSColor, NSEvent, NSEventType, NSFloatingWindowLevel, NSNormalWindowLevel, NSScreen,
-    NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowDidBecomeKeyNotification,
+    NSButton, NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
+    NSFloatingWindowLevel, NSMainMenuWindowLevel, NSMenu, NSMenuItem, NSNormalWindowLevel,
+    NSScreen, NSView, NSWindow, NSWindowButton, NSWindowDelegate, NSWindowDidBecomeKeyNotification,
     NSWindowDidEnterFullScreenNotification, NSWindowDidExitFullScreenNotification,
     NSWindowDidResignKeyNotification, NSWindowDidResizeNotification, NSWindowDidUpdateNotification,
     NSWindowOcclusionState, NSWindowStyleMask, NSWindowTitleVisibility, NSWorkspace,
     NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, NSWorkspaceDidMountNotification,
     NSWorkspaceDidUnmountNotification,
 };
-use objc2_core_foundation::{CFRetained, CFUUID};
+use objc2_core_foundation::{
+    CFIndex, CFRetained, CFRunLoop, CFRunLoopActivity, CFRunLoopObserver, CFUUID,
+    kCFRunLoopDefaultMode,
+};
 use objc2_core_graphics::CGDirectDisplayID;
 use objc2_foundation::{
     NSArray, NSCurrentLocaleDidChangeNotification, NSDictionary, NSKeyValueObservingOptions,
@@ -809,18 +815,27 @@ pub fn take_keyboard_focus(window: NativeWindow) -> Result<(), String> {
 /// `CloseRequested`. A window with no delegate at all is a window winit is not
 /// driving, and there is nothing honest to do with it.
 ///
-/// **Folio's road is marked before the question is put** (0.4.10 plan row 103):
-/// winit queues the `CloseRequested` inside this call, so the mark
-/// (`close_road::mark_own_close`) is the one that event's taking reads, and no
-/// other close can come between.
+/// `performClose:` also beeps without asking when the close button is there but
+/// disabled, so that window is asked through the delegate too.
+///
+/// **Folio's road is marked right before the question is put, and only then**
+/// (0.4.10 plan row 103, review N4): winit queues the `CloseRequested` inside
+/// the call, so the mark (`close_road::mark_own_close`) is the one that event's
+/// taking reads, and no other close can come between. A refusal, or a
+/// `performClose:` that would only beep, leaves no mark behind for the window's
+/// next close from outside to be read as Folio's.
 pub fn request_window_close(
     window: NativeWindow,
     road: crate::close_road::OwnCloseRoad,
 ) -> Result<(), String> {
     let what = "asking a window to close";
     let (_, ns_window) = window_for(window, what)?;
-    crate::close_road::mark_own_close(window, road);
-    if ns_window.styleMask().contains(NSWindowStyleMask::Closable) {
+    let its_button_closes = ns_window.styleMask().contains(NSWindowStyleMask::Closable)
+        && ns_window
+            .standardWindowButton(NSWindowButton::CloseButton)
+            .is_some_and(|button| button.isEnabled());
+    if its_button_closes {
+        crate::close_road::mark_own_close(window, road);
         ns_window.performClose(None);
         return Ok(());
     }
@@ -832,23 +847,170 @@ pub fn request_window_close(
     }
     // The method is optional on the protocol, which is why it is asked for by
     // selector first; answered, it is the one `performClose:` would have sent.
+    crate::close_road::mark_own_close(window, road);
     let _ = delegate.windowShouldClose(&ns_window);
     Ok(())
 }
 
+thread_local! {
+    /// **The key or left-button event AppKit is dispatching now**, or `None` (0.4.10 plan row
+    /// 103, review P1-1): recorded by the local monitor as the event goes through
+    /// `-[NSApplication sendEvent:]`, and dropped when the main run loop next waits.
+    static DISPATCHED: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
+    /// The monitor and the observer, kept for the life of the process once installed.
+    static DISPATCH_WATCH: OnceCell<(Retained<AnyObject>, CFRetained<CFRunLoopObserver>)> =
+        const { OnceCell::new() };
+}
+
+/// **Start recording the event AppKit is dispatching**, once, on the main thread (0.4.10 plan
+/// row 103, review P1-1).
+///
+/// `NSApp.currentEvent` is the last event dequeued, and AppKit never clears it: an
+/// accessibility press or a script reaches `performClose:` through a run-loop source with the
+/// previous keystroke or click still there, and a close read off it was a menu that nobody
+/// chose. A local monitor sees exactly the events dispatched through `sendEvent:`. The red
+/// button, the menu's key and a menu pick all close inside the dispatch of the event that made
+/// them; a script or an accessibility press finds no record. The observer is in the default
+/// mode only: a button's or a menu's tracking loop runs in the event-tracking mode, so the press
+/// that began it stays recorded until its action has run, and the next wait in the default mode
+/// drops it.
+pub(crate) fn watch_dispatched_events() {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    DISPATCH_WATCH.with(|watch| {
+        if watch.get().is_some() {
+            return;
+        }
+        let record = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
+            // SAFETY: AppKit hands the handler a live event for the length of the call.
+            let held = unsafe { Retained::retain(event.as_ptr()) };
+            DISPATCHED.with(|dispatched| *dispatched.borrow_mut() = held);
+            event.as_ptr()
+        });
+        let mask = NSEventMask::KeyDown | NSEventMask::LeftMouseDown | NSEventMask::LeftMouseUp;
+        // SAFETY: the handler returns the event it was handed, unchanged, which is a valid
+        // pointer; the block lives as long as AppKit keeps it.
+        let Some(monitor) =
+            (unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &record) })
+        else {
+            return;
+        };
+        let clear = RcBlock::new(|_: *mut CFRunLoopObserver, _: CFRunLoopActivity| {
+            DISPATCHED.with(|dispatched| *dispatched.borrow_mut() = None);
+        });
+        // SAFETY: the default allocator and a live block; the observer repeats, and its order
+        // is the last of the run loop's waits.
+        let Some(observer) = (unsafe {
+            CFRunLoopObserver::with_handler(
+                None,
+                CFRunLoopActivity::BeforeWaiting.0,
+                true,
+                CFIndex::MAX,
+                Some(&clear),
+            )
+        }) else {
+            return;
+        };
+        if let Some(main) = CFRunLoop::main() {
+            // SAFETY: a read of an immutable constant CoreFoundation exports.
+            main.add_observer(Some(&observer), unsafe { kCFRunLoopDefaultMode });
+        }
+        let _ = watch.set((monitor, observer));
+    });
+}
+
+/// **The road the event being dispatched says a close of `ns_window` came by** — only when the
+/// event is the road: the Close Window item's own key equivalent, a click in this window with
+/// the pointer on its close button, or a click in the menu bar. Anything else is `outside`.
+fn road_of_the_dispatched_event(
+    event: &NSEvent,
+    ns_window: &NSWindow,
+    on_close_button: bool,
+    mtm: MainThreadMarker,
+) -> crate::close_road::CloseRoad {
+    use crate::close_road::{CloseRoad, MenuFrom};
+    let kind = event.r#type();
+    if kind == NSEventType::KeyDown {
+        return if is_the_close_window_key(event, mtm) {
+            CloseRoad::Menu(MenuFrom::Key)
+        } else {
+            CloseRoad::Outside
+        };
+    }
+    if kind != NSEventType::LeftMouseDown && kind != NSEventType::LeftMouseUp {
+        return CloseRoad::Outside;
+    }
+    if event.windowNumber() == ns_window.windowNumber() {
+        return if on_close_button {
+            CloseRoad::CloseButton
+        } else {
+            CloseRoad::Outside
+        };
+    }
+    let in_the_menu_bar = event
+        .window(mtm)
+        .is_none_or(|window| window.level() >= NSMainMenuWindowLevel);
+    if in_the_menu_bar {
+        CloseRoad::Menu(MenuFrom::Pointer)
+    } else {
+        CloseRoad::Outside
+    }
+}
+
+/// Whether a key press is the main menu's Close Window key equivalent: the same key and the
+/// same Command, Shift, Option and Control. Folio's own Close Window carries none (its `Cmd+W`
+/// is the pane's close), and then no key is.
+fn is_the_close_window_key(event: &NSEvent, mtm: MainThreadMarker) -> bool {
+    let Some(item) = NSApplication::sharedApplication(mtm)
+        .mainMenu()
+        .and_then(|menu| the_close_window_item(&menu))
+    else {
+        return false;
+    };
+    let key = item.keyEquivalent().to_string();
+    if key.is_empty() {
+        return false;
+    }
+    let chord = NSEventModifierFlags::Command
+        | NSEventModifierFlags::Shift
+        | NSEventModifierFlags::Option
+        | NSEventModifierFlags::Control;
+    let mut wanted = item.keyEquivalentModifierMask() & chord;
+    if key.chars().any(char::is_uppercase) {
+        wanted |= NSEventModifierFlags::Shift;
+    }
+    let typed = event
+        .charactersIgnoringModifiers()
+        .map(|typed| typed.to_string())
+        .unwrap_or_default();
+    typed.to_lowercase() == key.to_lowercase() && (event.modifierFlags() & chord) == wanted
+}
+
+/// The item of `menu`, or of a menu under it, whose action is `performClose:`.
+fn the_close_window_item(menu: &NSMenu) -> Option<Retained<NSMenuItem>> {
+    (0..menu.numberOfItems()).find_map(|index| {
+        let item = menu.itemAtIndex(index)?;
+        if item.action() == Some(sel!(performClose:)) {
+            return Some(item);
+        }
+        item.submenu()
+            .and_then(|submenu| the_close_window_item(&submenu))
+    })
+}
+
 /// **What the moment says about the close request `window` has just received**
 /// (0.4.10 plan row 103), read when its `CloseRequested` is taken: Folio's own
-/// road when `own` is its mark, else the road `NSApp.currentEvent` says — a
-/// mouse event in this window over its close button is the button, a mouse
-/// event in another window (a menu's) is the menu by the pointer, a key is the
-/// menu by its key, and anything else came from outside (an accessibility press,
-/// a script). Whether the window was in front, and where the pointer is, either
-/// way. `None` off the window thread or for a view in no window.
+/// road when `own` is its mark, else the road the event being dispatched says
+/// ([`road_of_the_dispatched_event`], review P1-1), and `outside` when no event
+/// is (an accessibility press, a script, another program). Whether the window
+/// was in front, and where the pointer is, either way. `None` off the window
+/// thread or for a view in no window.
 pub(crate) fn close_context(
     window: NativeWindow,
     own: Option<crate::close_road::OwnCloseRoad>,
 ) -> Option<crate::close_road::CloseArrival> {
-    use crate::close_road::{CloseArrival, ClosePointer, CloseRoad, MenuFrom};
+    use crate::close_road::{CloseArrival, ClosePointer, CloseRoad};
     let (mtm, ns_window) = window_for(window, "reading a close request").ok()?;
     let application = NSApplication::sharedApplication(mtm);
     let foreground = application.isActive() && ns_window.isKeyWindow();
@@ -892,22 +1054,11 @@ pub(crate) fn close_context(
     };
     let road = match own {
         Some(own) => CloseRoad::Own(own),
-        None => match application.currentEvent() {
-            Some(event) => {
-                let kind = event.r#type();
-                let mouse = kind == NSEventType::LeftMouseDown || kind == NSEventType::LeftMouseUp;
-                if mouse && event.windowNumber() == ns_window.windowNumber() && on_close_button {
-                    CloseRoad::CloseButton
-                } else if mouse && event.windowNumber() != ns_window.windowNumber() {
-                    CloseRoad::Menu(MenuFrom::Pointer)
-                } else if kind == NSEventType::KeyDown {
-                    CloseRoad::Menu(MenuFrom::Key)
-                } else {
-                    CloseRoad::Outside
-                }
-            }
-            None => CloseRoad::Outside,
-        },
+        None => DISPATCHED
+            .with(|dispatched| dispatched.borrow().clone())
+            .map_or(CloseRoad::Outside, |event| {
+                road_of_the_dispatched_event(&event, &ns_window, on_close_button, mtm)
+            }),
     };
     Some(CloseArrival {
         road,

@@ -434,10 +434,18 @@ impl CloseBook {
 
 /// **Folio's window `window` from now on**: its closes are kept for its `CloseRequested`
 /// ([`take_close_arrival`]). Called on the window thread when the window is built.
+///
+/// macOS: the first watch starts recording the event AppKit is dispatching, which is what a
+/// close's road is read off (review P1-1).
 pub fn watch_closes(window: crate::NativeWindow) {
     #[cfg(windows)]
     windows_close_road::with_book(|book| book.watch_window(window.as_handle().get()));
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = window;
+        crate::macos_impl::watch_dispatched_events();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     let _ = window;
 }
 
