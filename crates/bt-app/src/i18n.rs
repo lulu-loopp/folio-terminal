@@ -3254,10 +3254,6 @@ text_entries! {
     /// signing service (`update_job::SignatureNote::NotOurService`; 0.4.10 plan row 102 part 3,
     /// R5).
     UpdateCardMayWarn,
-    /// **Two sentences on one line**, in the language's own spacing: `{first}`, then `{second}` —
-    /// the Ready card's detail after a restart that did not happen, and its signature sentence
-    /// (row 102 part 3).
-    TwoSentences,
     /// Beside the determinate bar: received and total, in megabytes.
     UpdateCardProgress,
     /// After the reason, when the job stopped before anything installed moved.
@@ -6541,7 +6537,6 @@ impl Text {
                 "Windows may warn about this update.",
                 "Windows may warn about this update.",
             ),
-            Self::TwoSentences => pick(lang, "{first} {second}", "{first}{second}"),
             Self::UpdateCardProgress => pick(
                 lang,
                 "{received} / {total} MB",
@@ -7068,6 +7063,10 @@ impl Text {
         // — the Codex hook's refusal of a path Windows PowerShell cannot call, which
         //   `attention_codex::apply_resolved` raises only on Windows (row 69, re-review R1)
         Self::CodexHookPathBrackets,
+        // — the Ready card's sentence on a staged set not signed by our signing service, read
+        //   by `update_prepare_windows::staged_signature_note`: macOS's Prepare and resume hand
+        //   `SignatureNote::Nothing` always, so no Mac card says it (row 102 part 3)
+        Self::UpdateCardMayWarn,
     ];
 
     /// The entries whose Chinese is owed, by column: the English stands in both until the
@@ -7240,14 +7239,15 @@ pub fn version_verifying_in(lang: Lang, version: &str) -> String {
         .replace("{version}", version)
 }
 
-/// **Two sentences on one line** — `first`, then `second`, spaced as the language spaces them
-/// ([`Text::TwoSentences`]; 0.4.10 plan row 102 part 3).
+/// **Two sentences on one line** — `first`, then `second`, spaced as the language spaces them:
+/// English separates sentences with one space, and written Chinese does not
+/// ([`move_refusal_notice`]'s rule; 0.4.10 plan row 102 part 3).
 #[must_use]
 pub fn two_sentences(first: &str, second: &str) -> String {
-    Text::TwoSentences
-        .text()
-        .replace("{first}", first)
-        .replace("{second}", second)
+    match current() {
+        Lang::English => format!("{first} {second}"),
+        Lang::Chinese => format!("{first}{second}"),
+    }
 }
 
 #[must_use]
