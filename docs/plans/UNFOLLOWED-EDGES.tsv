@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1819. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1824. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_deref	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_str	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
@@ -1111,9 +1111,11 @@ crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_last_w
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_shell_exits	Dynamic	note	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_spawn_failure	Dynamic	note	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_spawn_fallback	Dynamic	note	1	
+crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_window_closed	Dynamic	note	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the window close line said through the note door the caller hands (a closure)
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::starts_absolute_path	Ambiguous	get	2	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::starts_absolute_path	Ambiguous	is_ascii_alphabetic	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::starts_absolute_path	Ambiguous	is_ascii_whitespace	1	
+crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::window_closed_line	Ambiguous	map_or	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the close arrival's road read through Option::map_or (std)
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::MenuFate::left	Dynamic	into	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::Start::this_process	Ambiguous	is_some_and	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::Start::this_process	Ambiguous	map	1	
@@ -2314,6 +2316,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::announce_recovered_edits	Ambig
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::announce_recovered_edits	Ambiguous	then_some	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::announce_recovered_edits	Dynamic	oldest_standing	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::answer_a_menu_row	Ambiguous	map	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::close	Ambiguous	then	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the ordinary windows left read through bool::then only when the close does not end the run (std)
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::deliver_the_quits_update_report	Ambiguous	why	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::drain_git_answers	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::drain_git_answers	Ambiguous	filter_map	1	
@@ -8398,6 +8401,32 @@ crates/bt-platform/src/clipboard_promise.rs	bt-platform crate::clipboard_promise
 crates/bt-platform/src/clipboard_promise.rs	bt-platform crate::clipboard_promise::render_into	Ambiguous	kind	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); each entry written into the paste's folder in the descriptor's order (iterator enumerate, Path components next, io::Error kind; the local closure `made`)
 crates/bt-platform/src/clipboard_promise.rs	bt-platform crate::clipboard_promise::render_into	Ambiguous	next	1	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); each entry written into the paste's folder in the descriptor's order (iterator enumerate, Path components next, io::Error kind; the local closure `made`)
 crates/bt-platform/src/clipboard_promise.rs	bt-platform crate::clipboard_promise::render_into	Dynamic	made	2	2026-11-09: T-PASTE-REFUSAL-SAYS-WHY (0.4.10 plan row 81); each entry written into the paste's folder in the descriptor's order (iterator enumerate, Path components next, io::Error kind; the local closure `made`)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::close_arrival_line	Ambiguous	collect	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); another window's class name made one bounded line (char iterator: map, is_control, take, collect; std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::close_arrival_line	Ambiguous	is_control	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); another window's class name made one bounded line (char iterator: map, is_control, take, collect; std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::close_arrival_line	Ambiguous	map	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); another window's class name made one bounded line (char iterator: map, is_control, take, collect; std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::close_arrival_line	Ambiguous	take	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); another window's class name made one bounded line (char iterator: map, is_control, take, collect; std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::forget_marks	Ambiguous	borrow_mut	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::forget_marks	Ambiguous	retain	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::forget_marks	Ambiguous	with	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::mark_close	Ambiguous	borrow_mut	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::mark_close	Ambiguous	push	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::mark_close	Ambiguous	retain	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::mark_close	Ambiguous	with	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::take_mark	Ambiguous	borrow_mut	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::take_mark	Ambiguous	iter	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::take_mark	Ambiguous	position	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::take_mark	Ambiguous	remove	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::mac_marks::take_mark	Ambiguous	with	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the macOS marks of Folio's own close requests, a thread-local RefCell<Vec> (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::class_of	Ambiguous	unwrap_or	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the length GetClassNameW answered, read through usize::try_from and unwrap_or (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::heard_close	Ambiguous	as_deref	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the class name handed to the line as &str (Option::as_deref, std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::pointer_over	Ambiguous	as_bool	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the Win32 answers of GetCursorPos and ScreenToClient (windows crate)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::pointer_over	Ambiguous	is_err	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the Win32 answers of GetCursorPos and ScreenToClient (windows crate)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::unowned_top_level	Ambiguous	cast_signed	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the Win32 answers of GetWindow and GetWindowLongPtrW (windows crate, std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::unowned_top_level	Ambiguous	is_invalid	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the Win32 answers of GetWindow and GetWindowLongPtrW (windows crate, std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::unowned_top_level	Ambiguous	is_ok_and	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the Win32 answers of GetWindow and GetWindowLongPtrW (windows crate, std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::with_book	Ambiguous	borrow_mut	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the window thread's close book, a thread-local RefCell (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::with_book	Ambiguous	with	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the window thread's close book, a thread-local RefCell (std)
+crates/bt-platform/src/close_road.rs	bt-platform crate::close_road::windows_close_road::with_book	Dynamic	read	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the window thread's close book, a thread-local RefCell (std)
 crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::contain	Ambiguous	replace	1	
 crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::contain	Ambiguous	set	1	
 crates/bt-platform/src/contained_panic.rs	bt-platform crate::contained_panic::contain	Dynamic	work	1	
@@ -9962,6 +9991,13 @@ crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::clear_surfac
 crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::clear_surface_layers	Ambiguous	setSublayers	1	
 crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::clear_surface_layers	Ambiguous	sublayers	1	
 crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::client_area_animation_enabled	Ambiguous	accessibilityDisplayShouldReduceMotion	1	
+crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::close_context	Ambiguous	convertPoint_fromView	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); AppKit's answers for the foreground, the pointer and the current event (objc2-app-kit, std)
+crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::close_context	Ambiguous	currentEvent	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); AppKit's answers for the foreground, the pointer and the current event (objc2-app-kit, std)
+crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::close_context	Ambiguous	isActive	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); AppKit's answers for the foreground, the pointer and the current event (objc2-app-kit, std)
+crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::close_context	Ambiguous	is_some_and	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); AppKit's answers for the foreground, the pointer and the current event (objc2-app-kit, std)
+crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::close_context	Ambiguous	r#type	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); AppKit's answers for the foreground, the pointer and the current event (objc2-app-kit, std)
+crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::close_context	Ambiguous	round	2	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); AppKit's answers for the foreground, the pointer and the current event (objc2-app-kit, std)
+crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::close_context	Ambiguous	windowNumber	2	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); AppKit's answers for the foreground, the pointer and the current event (objc2-app-kit, std)
 crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::display_number	Ambiguous	downcast_ref	1	
 crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::display_number	Ambiguous	map	1	
 crates/bt-platform/src/macos_impl.rs	bt-platform crate::macos_impl::display_number	Ambiguous	objectForKey	1	
@@ -10484,7 +10520,7 @@ crates/bt-platform/src/process_folder.rs	bt-platform crate::process_folder::path
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::registered_name	Ambiguous	ok	1	
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::after_sent	Dynamic	(value)	1	
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::before_sent	Dynamic	(value)	1	
-crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::install	Ambiguous	map_err	2	
+crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::install	Ambiguous	map_err	3	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); grown 2 -> 3: the WH_GETMESSAGE hook installed beside the two sent-message hooks, its refusal said like theirs
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_dispatch	Ambiguous	cast	1	
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_dispatch	Ambiguous	is_null	1	
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_dispatch	Dynamic	(value)	2	
