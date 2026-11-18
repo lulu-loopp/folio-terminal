@@ -14,6 +14,7 @@ use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
     num::{NonZeroU32, NonZeroUsize},
+    time::{Duration, Instant},
 };
 
 use bt_term::DualPlaneSession;
@@ -100,8 +101,12 @@ struct Pane {
 
 impl Pane {
     fn new() -> Self {
+        Self::opened_at_width(COLUMNS)
+    }
+
+    fn opened_at_width(columns: u32) -> Self {
         let session = DualPlaneSession::with_frozen_quota(
-            nz(COLUMNS),
+            nz(columns),
             nz(ROWS),
             NonZeroUsize::new(CAPACITY).expect("a positive capacity"),
         );
@@ -112,6 +117,28 @@ impl Pane {
             pending: Vec::new(),
             lines: 0,
         }
+    }
+
+    /// A pane opened wide with only its prompt on screen, narrowed to the VM run's 31 columns
+    /// and settled as the window settles a resize (0.4.10 plan row 107): the first layout resize
+    /// of a fresh pane, which pushes nothing off the top.
+    fn settled_at_vm_width() -> Self {
+        let mut pane = Self::opened_at_width(100);
+        pane.session.feed(b"PS> ").expect("a prompt is plain text");
+        let at = Instant::now();
+        pane.session
+            .resize_at(nz(31), nz(ROWS), at)
+            .expect("the resize reflows");
+        pane.session
+            .mark_pty_resize_requested_at(nz(31), nz(ROWS), at);
+        assert!(
+            pane.session
+                .finish_resize_if_quiescent(at + Duration::from_millis(200))
+                .expect("the transaction settles"),
+            "a quiet pane's resize settles once the child has been told"
+        );
+        pane.publish();
+        pane
     }
 
     /// Print until `lines` lines have been written, a drain's slice at a time, each drain
@@ -150,7 +177,17 @@ impl Pane {
 
 #[test]
 fn history_holds_still_once_the_scrollback_is_full() {
-    let mut pane = Pane::new();
+    holds_still(Pane::new());
+}
+
+/// **A pane whose resize has settled holds still too** (0.4.10 plan row 107, T-c): the same
+/// claim after the resize a split gives a fresh pane, at the width the VM run's pane wore.
+#[test]
+fn a_settled_pane_holds_still_past_the_cap() {
+    holds_still(Pane::settled_at_vm_width());
+}
+
+fn holds_still(mut pane: Pane) {
     pane.print_until(2 * CAPACITY);
     assert_eq!(
         pane.session.transcript().frozen().len(),
@@ -166,16 +203,17 @@ fn history_holds_still_once_the_scrollback_is_full() {
             held() - full,
             pane.session.document().entries().len(),
             pane.view.cache_len(),
+            pane.session.terminal().alacritty_history_size(),
         ));
     }
     let grown = held() - full;
     eprintln!(
-        "lines, bytes held beyond the full history, document entries, layout slots: {trail:?}"
+        "lines, bytes held beyond the full history, document entries, layout slots, vendor          history rows: {trail:?}"
     );
     assert!(
         grown.abs() < 48 * 1024,
         "{} more lines past a full {CAPACITY}-line history changed what the pane holds by {grown} \
-         bytes ({:.1} a line); lines, bytes, entries, layout slots: {trail:?}",
+         bytes ({:.1} a line); lines, bytes, entries, layout slots, vendor rows: {trail:?}",
         4 * CAPACITY,
         grown as f64 / (4 * CAPACITY) as f64,
     );

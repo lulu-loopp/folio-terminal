@@ -1602,7 +1602,16 @@ impl TerminalAdapter {
             self.term
                 .retain_resize_staging_candidate_rows(unfinished_rows);
         } else {
-            debug_assert!(self.term.finish_resize_transaction().is_empty());
+            // Called, and only its answer asserted. Inside the assertion it ran in test builds
+            // alone, and every release build left the grid's transaction open: the grid kept each
+            // row the pane printed from then on, about 800 bytes a row at 31 columns, beside the
+            // transcript's copy (0.4.10 plan row 107).
+            let unstaged = self.term.finish_resize_transaction();
+            debug_assert!(
+                unstaged.is_empty(),
+                "a transaction whose last stage moved nothing still had {} rows of history",
+                unstaged.len()
+            );
         }
     }
 

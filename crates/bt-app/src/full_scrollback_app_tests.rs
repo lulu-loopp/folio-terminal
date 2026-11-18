@@ -124,6 +124,20 @@ fn a_full_scrollback_holds_still_in_the_window() {
     }
     let grown = held_bytes() - full;
     eprintln!("lines, bytes held beyond the full history: {trail:?}");
+    // The window's layout resized this pane, and the resize settled before the flood (`new`), so
+    // the vendored grid holds no history of its own. A release build once kept every row there,
+    // and a count taken in a build that evaluates its assertions could not see it (0.4.10 plan
+    // row 107).
+    let vendor_rows = window.folio.window.tabs[0]
+        .shell_pane()
+        .session
+        .session
+        .terminal()
+        .alacritty_history_size();
+    assert_eq!(
+        vendor_rows, 0,
+        "the vendored grid kept {vendor_rows} rows of history after the pane's resize settled"
+    );
     assert!(
         grown.abs() < 64 * 1024,
         "{} more lines past a full {CAPACITY}-line history changed what the window holds by \
