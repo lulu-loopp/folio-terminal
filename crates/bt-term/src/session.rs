@@ -11496,14 +11496,8 @@ impl DualPlaneSession {
         // `decorations` was a walk of every frozen line's record on every frame: about 4 ms a
         // frame at a full 100 000-line history, for the two dozen lines on screen (0.4.10 plan
         // row 107, R9).
-        let frame_history = frame_history_ids(frame);
-        let on_frame = || {
-            frame_history
-                .clone()
-                .into_iter()
-                .flat_map(|ids| self.decorations.range(ids))
-        };
-        for (start, record) in on_frame() {
+        let on_frame = frame_history_ids(frame);
+        for (start, record) in self.decorations.range(on_frame) {
             if !record.show_source {
                 continue;
             }
@@ -11676,7 +11670,7 @@ impl DualPlaneSession {
             });
         }
 
-        for (start, record) in on_frame() {
+        for (start, record) in self.decorations.range(on_frame) {
             let Some(span) = record
                 .span
                 .as_ref()
@@ -11878,7 +11872,7 @@ impl DualPlaneSession {
             }
         }
 
-        for (start, record) in on_frame() {
+        for (start, record) in self.decorations.range(on_frame) {
             let Some(reason) = record.failure_reason.as_ref() else {
                 continue;
             };
@@ -16914,9 +16908,9 @@ fn frame_rows_width_cells_in(
 }
 
 /// The ids of the history lines `frame` draws, lowest to highest, read off every drawable cell's
-/// anchor: the only frozen lines a frame decoration can be placed on. `None` when the frame draws
-/// no history.
-fn frame_history_ids(frame: &ViewportFrame) -> Option<RangeInclusive<TranscriptId>> {
+/// anchor: the only frozen lines a frame decoration can be placed on. An empty range when the frame
+/// draws no history (`Included(x)..Excluded(x)`, which `BTreeMap::range` takes).
+fn frame_history_ids(frame: &ViewportFrame) -> (Bound<TranscriptId>, Bound<TranscriptId>) {
     let cells = frame
         .drawable_rows()
         .saturating_mul(frame.columns.get() as usize);
@@ -16929,11 +16923,16 @@ fn frame_history_ids(frame: &ViewportFrame) -> Option<RangeInclusive<TranscriptI
                 ContentAnchor::History { id, .. } => Some(*id),
                 _ => None,
             });
-    let first = ids.next()?;
+    let Some(first) = ids.next() else {
+        return (
+            Bound::Included(TranscriptId(0)),
+            Bound::Excluded(TranscriptId(0)),
+        );
+    };
     let (low, high) = ids.fold((first, first), |(low, high), id| {
         (low.min(id), high.max(id))
     });
-    Some(low..=high)
+    (Bound::Included(low), Bound::Included(high))
 }
 
 fn frame_row_for_history(frame: &ViewportFrame, id: TranscriptId) -> Option<u32> {
