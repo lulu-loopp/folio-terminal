@@ -26,6 +26,10 @@
 # file to the merge base's: a row is never edited or removed, and a new row's version is above its
 # document's highest at the merge base.
 #
+# release-keys' `retired` is frozen: every version of that document keeps the array under that name,
+# lower-case hex key ids, so a build refusing a newer version still recovers the retired keys from
+# the raw JSON (T-UPDATES-TRUST-OUR-OWN-KEY 1a review P2-3, 2026-11-18). A release-keys v2 keeps it.
+#
 # This file is append-only. A new key is admitted by bumping the document's version, adding its
 # migration step (an identity step when the key has a serde default) and adding the new version's
 # rows, every type of the document again, all in one commit, the rows' reason naming the plan row.
@@ -96,4 +100,4 @@ integration-profile-files	1	PowerShellEdition	#[derive(Clone,Copy,Debug,Eq,Ord,P
 integration-profile-files	1	ProfileFile	#[derive(Clone,Debug,Serialize,Deserialize,PartialEq,Eq)]#[serde(deny_unknown_fields)]pubstructProfileFile{pubprofile:PathBuf,#[serde(default)]pubedition:Option<PowerShellEdition>,#[serde(default)]pubcreated_file:bool,#[serde(default)]pubcreated_folders:Vec<PathBuf>,#[serde(default)]pubbackup:Option<PathBuf>,#[serde(default)]pubbackup_sha256:Option<String>,}	2026-11-14: T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK (0.4.10 plan row 68d); first rows
 integration-profile-files	1	ProfileFiles	#[derive(Clone,Debug,Serialize,Deserialize,PartialEq,Eq)]#[serde(deny_unknown_fields)]pubstructProfileFiles{pubversion:u32,pubprofiles:Vec<ProfileFile>,}	2026-11-14: T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK (0.4.10 plan row 68d); first rows
 update-homes	1	UpdateHomesRecord	#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]#[serde(deny_unknown_fields)]pub(crate)structUpdateHomesRecord{version:u32,homes:Vec<PathBuf>,}	2026-11-14: T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK (0.4.10 plan row 68d); first rows
-release-keys	1	ReleaseKeysV1	#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]pubstructReleaseKeysV1{pubschema_version:u32,#[serde(default)]pubretired:Vec<String>,#[serde(flatten)]pubextra:Map<String,Value>,}	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102); first rows
+release-keys	1	ReleaseKeysV1	#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]pubstructReleaseKeysV1{pubschema_version:u32,#[serde(default)]pubretired:Vec<String>,#[serde(flatten)]pubextra:Map<String,Value>,}	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102); first rows; `retired` keeps its name and type at every later version (1a review P2-3)

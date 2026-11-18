@@ -1,9 +1,10 @@
 //! `release-keys.json` — **the release keys a verified statement has retired** (0.4.10 plan row
-//! 102, T-UPDATES-TRUST-OUR-OWN-KEY, ruling R3).
+//! 102, T-UPDATES-TRUST-OUR-OWN-KEY, ruling R8).
 //!
 //! Every build embeds two public keys a release statement may be signed with, the live key and a
-//! spare (`bt_winres::release_statement::RELEASE_KEYS`). A statement signed by one of them may
-//! retire the other — the road out of a leaked or lost live key — and a copy that has verified
+//! spare (`bt_winres::release_statement::RELEASE_KEYS`). A statement signed by the spare may
+//! retire the live key — the road out of a leaked or lost live key; the live key retires nothing,
+//! so a leaked live key cannot close that road — and a copy that has verified
 //! such a statement must refuse the retired key from then on, across restarts, even though the
 //! key is still embedded in its own executable. This file is that memory: the ids of the keys
 //! retired, and nothing else.
@@ -19,7 +20,7 @@
 //! an empty memory and is kept beside itself, as every document here is.
 //!
 //! One writer, `bt-app`'s updater, after a statement has verified; written only when a retire
-//! adds an id ([`ReleaseKeysV1::retire`]).
+//! adds an id ([`ReleaseKeysV1::remember_retired`]).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -33,6 +34,11 @@ pub struct ReleaseKeysV1 {
     pub schema_version: u32,
     /// The ids of the keys a verified statement retired, sorted and each once. A retire is never
     /// undone: a key once retired stays refused, by this copy, for good.
+    ///
+    /// **Frozen across versions** (1a review P2-3): every later version of this document keeps
+    /// this array under this name, an array of ids spelled as sixteen lower-case hex digits, so
+    /// that a build that refuses a newer version of the file can still recover what it retired
+    /// from the raw JSON rather than forget it (`DOCUMENT-KEYS.tsv`'s note on `release-keys`).
     #[serde(default)]
     pub retired: Vec<String>,
     /// Top-level keys this build has no name for, kept so that a file written by a newer build
@@ -55,7 +61,7 @@ impl ReleaseKeysV1 {
     /// **Records `ids` as retired**, keeping the list sorted and each id once, and says whether
     /// the list grew — the caller writes the file only then, so a release that retires nothing
     /// new costs no write.
-    pub fn retire<I, S>(&mut self, ids: I) -> bool
+    pub fn remember_retired<I, S>(&mut self, ids: I) -> bool
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -83,15 +89,15 @@ mod tests {
     /// of nothing new asks for no write**: the list stays sorted with each id once, what is
     /// written reads back whole, and an unknown key a newer build wrote is carried through.
     ///
-    /// MUTATION: drop the `dedup` in [`ReleaseKeysV1::retire`] (`plant-102-retire-twice.py`).
+    /// MUTATION: drop the `dedup` in [`ReleaseKeysV1::remember_retired`] (`plant-102-retire-twice.py`).
     #[test]
     fn a_retire_is_recorded_once_and_survives_the_file() {
         let mut keys = ReleaseKeysV1::default();
         assert!(!keys.is_retired("4d8ba64ee6d3ec25"));
-        assert!(keys.retire(["4d8ba64ee6d3ec25", "2802fa4fe65b594a"]));
+        assert!(keys.remember_retired(["4d8ba64ee6d3ec25", "2802fa4fe65b594a"]));
         assert_eq!(keys.retired, ["2802fa4fe65b594a", "4d8ba64ee6d3ec25"]);
         assert!(
-            !keys.retire(["4d8ba64ee6d3ec25"]),
+            !keys.remember_retired(["4d8ba64ee6d3ec25"]),
             "nothing new is retired, so nothing is written"
         );
         assert_eq!(keys.retired.len(), 2);
