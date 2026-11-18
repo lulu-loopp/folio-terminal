@@ -2982,6 +2982,66 @@ fn a_final_tab_whose_shells_exited_asks_as_the_shells_exit() {
     );
 }
 
+/// RED (mutation: `exited_tabs_the_loop_may_close` passing every exited tab) — **a final tab whose
+/// shells exited beside unsaved edits is never the shells' close**: the loop leaves it standing,
+/// asking nothing and requesting nothing, and the close that ends it is the person's own, asked
+/// through the gate and said as the final tab (0.4.10 plan row 103). The shells' road never meets
+/// the tab's question, which is why `GateRequest::CloseTab` carries no road; the window's own
+/// close, gate ③, keeps the road that asked (R7).
+#[test]
+fn a_final_tab_whose_shells_exited_beside_unsaved_edits_closes_only_as_the_persons() {
+    let mut application = one_dirty_window("close-road-exited-dirty");
+    {
+        let mut runtime = application.runtime();
+        for (_, leaf) in runtime.window.tabs[0].leaves_mut() {
+            leaf.life.land(Some(bt_pty::PtySession::fake_exited(
+                std::time::Duration::from_secs(60),
+                23,
+                b"",
+                false,
+            )));
+        }
+        runtime
+            .reap_exited_tabs(Instant::now())
+            .expect("the reaper takes its turn");
+    }
+    assert!(
+        own_requests(&application.event_loop.ledger).is_empty(),
+        "the loop asks no close of a tab whose close would ask"
+    );
+    assert_eq!(
+        application.runtime().window.dirty_gate.request(),
+        None,
+        "the loop puts no question"
+    );
+    assert_eq!(application.runtime().window.tabs.len(), 1, "the tab stands");
+    application
+        .runtime()
+        .close_tab(0)
+        .expect("the person's close asks");
+    assert_eq!(
+        application.runtime().window.dirty_gate.request(),
+        Some(&restore::GateRequest::CloseTab(0)),
+        "the person's close asks first"
+    );
+    application
+        .runtime()
+        .answer_dirty_gate(restore::GateAnswer::Discard)
+        .expect("the answer is spent");
+    assert_eq!(
+        own_requests(&application.event_loop.ledger),
+        [bt_platform::close_road::OwnCloseRoad::FinalTab]
+    );
+    application.window_event(WindowEvent::CloseRequested);
+    assert_eq!(
+        close_lines(&application),
+        [
+            "Folio: last window closed — the person closed it; window=ordinary 1; \
+          road=final-tab; delivery=posted; foreground=yes; pointer=unread; tabs=1; panes=2"
+        ]
+    );
+}
+
 /// RED (mutation: `FolioApp::close` saying `ClosedHow::Asked` with no arrival) — **Folio's own
 /// request, nothing to ask, ends the run on one line that names its road and delivery**.
 #[test]
