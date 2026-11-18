@@ -6049,8 +6049,13 @@ const PRODUCT_ROOT_FORM: &str = "cfg_attr(test,allow(clippy::disallowed_methods)
 const EXCLUDED_ROOT_FORM: &str = "allow(clippy::disallowed_methods)";
 
 /// The binaries of the product's packages that are not in the product, by package and name
-/// (revision (j)2: listed, or they are product — no third state).
-const DEVELOPMENT_BINARIES: [(&str, &str); 1] = [("bt-winres", "render-info-plist")];
+/// (revision (j)2: listed, or they are product — no third state). `check-release-statement` is
+/// the release script's and the release workflow's check of a published release (0.4.10 plan row
+/// 102), run by whoever releases and never shipped.
+const DEVELOPMENT_BINARIES: [(&str, &str); 2] = [
+    ("bt-winres", "render-info-plist"),
+    ("bt-winres", "check-release-statement"),
+];
 
 /// An attribute's body as one string with no spaces: `allow(clippy::disallowed_methods)`.
 fn spelled(src: &Src, toks: &[Tok]) -> String {
