@@ -104,9 +104,12 @@
 
     **`-ExpectSigned` alone means `on`**, because a signed release is what that
     switch is for. A signed build that is not a release — a candidate — is
-    smoked with `-ExpectSigned -Updater off`, which says so out loud. Neither
-    given, the answer is printed and not held to anything: the clean-machine
-    run starts whatever archive it was handed.
+    smoked with `-ExpectSigned -Updater off`, which says so out loud. **A
+    release packed without a signature is still a release** (0.4.10 plan row
+    102: the release statement, not the Authenticode signature, is what lets a
+    copy update itself), so it is smoked with `-Updater on` and without
+    `-ExpectSigned`. Neither given, the answer is printed and not held to
+    anything: the clean-machine run starts whatever archive it was handed.
 
 .PARAMETER Archive
     The release archive to check against the manifest its `folio.exe` carries.
@@ -213,6 +216,17 @@ if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "no folio.exe at 
 # out under `-Artifacts` first. Those are the same bytes — an entry is copied
 # out of the archive, not repacked — so the signature and the manifest read the
 # same as they will on the machine that extracts the release.
+# **The versioned release archives in `$Directory`**: `folio-<version>-windows-x64.zip`,
+# or `folio-<version>-windows-x64-unsigned.zip` for a release packed without a
+# signature (0.4.10 plan row 102, ruling R6). The copy under the stable name,
+# `folio-windows-x64.zip`, is not one of them.
+function Get-VersionedArchive {
+    param([string] $Directory)
+
+    return @(Get-ChildItem -LiteralPath $Directory -File -Filter 'folio-*-windows-x64*.zip' |
+        Where-Object { $_.Name -match '^folio-\d+\.\d+\.\d+([-+][0-9A-Za-z.]+)?-windows-x64(-unsigned)?\.zip$' })
+}
+
 function Resolve-PackageFile {
     param([string] $Path, [string] $Into)
 
@@ -302,7 +316,7 @@ else {
         $archives = @()
         $stable = Join-Path $PackageDirectory 'folio-windows-x64.zip'
         if (Test-Path -LiteralPath $PackageDirectory -PathType Container) {
-            $archives = @(Get-ChildItem -LiteralPath $PackageDirectory -File -Filter 'folio-*-windows-x64.zip')
+            $archives = @(Get-VersionedArchive -Directory $PackageDirectory)
         }
         if ($archives.Count -gt 1) {
             throw ("$PackageDirectory holds $($archives.Count) release archives — " +
@@ -413,7 +427,7 @@ function Find-ReleaseArchive {
         return $path
     }
     if (-not (Test-Path -LiteralPath $PackageDirectory -PathType Container)) { return $null }
-    $versioned = @(Get-ChildItem -LiteralPath $PackageDirectory -File -Filter 'folio-*-windows-x64.zip')
+    $versioned = @(Get-VersionedArchive -Directory $PackageDirectory)
     if ($versioned.Count -gt 1) {
         throw ("$PackageDirectory holds $($versioned.Count) release archives — " +
                "$(($versioned | ForEach-Object { $_.Name }) -join ', ') — so which one to check is not " +

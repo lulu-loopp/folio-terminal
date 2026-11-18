@@ -141,6 +141,21 @@ New-Zip -Path (Join-Path $releasePackage "folio-$releasing-windows-x64.zip") -Fi
     "folio-$releasing\folio.exe"  = 'not started by any case here'
 }
 
+# **The same release packed without a signature** (0.4.10 plan row 102,
+# ruling R6): its archive is `-unsigned`, and the stable copy beside it keeps
+# its own name. The stable copy holds other bytes here, so a case can tell
+# which of the two was read.
+$unsignedPackage = Join-Path $scratch 'unsigned-package'
+[IO.Directory]::CreateDirectory($unsignedPackage) | Out-Null
+New-Zip -Path (Join-Path $unsignedPackage "folio-$releasing-windows-x64-unsigned.zip") -Files @{
+    "folio-$releasing\folio.msix" = 'the package, out of the unsigned archive'
+    "folio-$releasing\folio.exe"  = 'not started by any case here'
+}
+New-Zip -Path (Join-Path $unsignedPackage 'folio-windows-x64.zip') -Files @{
+    "folio-$releasing\folio.msix" = 'the package, out of the stable copy'
+    "folio-$releasing\folio.exe"  = 'not started by any case here'
+}
+
 # And an empty one, for the case where neither place has a package.
 $emptyPackage = Join-Path $scratch 'empty-package'
 [IO.Directory]::CreateDirectory($emptyPackage) | Out-Null
@@ -359,6 +374,40 @@ Test-Case 'with no -Msix and no package beside the exe, the release archive is r
     }
     if ([IO.File]::ReadAllText($taken) -ne 'the package, out of the release archive') {
         throw 'what was taken out of the archive is not what went into it'
+    }
+}
+
+# RED (0.4.10 plan row 102, part 2) — **an `-unsigned` archive is the
+# release's archive**: with no `-Msix`, the package is read out of it rather
+# than out of the stable copy, and a directory holding the archive under both
+# spellings is two release archives, refused.
+#
+# MUTATION: put back the `folio-*-windows-x64.zip` filter in `smoke.ps1`
+# (`plant-102-2-smoke-signed-filter`): the stable copy is read instead.
+Test-Case 'with no -Msix, an unsigned release archive is read and not the stable copy' {
+    $artifacts = Join-Path $scratch 'default-unsigned'
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = $stubExe; ExpectSigned = $true; Artifacts = $artifacts
+        PackageDirectory = $unsignedPackage }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    $taken = Join-Path $artifacts 'package\folio.msix'
+    if (-not (Test-Path -LiteralPath $taken -PathType Leaf)) {
+        throw "no package was written to $taken : $($result.Text)"
+    }
+    if ([IO.File]::ReadAllText($taken) -ne 'the package, out of the unsigned archive') {
+        throw "the package was not taken out of the -unsigned archive: $([IO.File]::ReadAllText($taken))"
+    }
+
+    $both = Join-Path $scratch 'both-spellings'
+    Copy-Item -LiteralPath $unsignedPackage -Destination $both -Recurse
+    Copy-Item -LiteralPath (Join-Path $both "folio-$releasing-windows-x64-unsigned.zip") `
+        -Destination (Join-Path $both "folio-$releasing-windows-x64.zip")
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = $stubExe; ExpectSigned = $true; Artifacts = (Join-Path $scratch 'default-both')
+        PackageDirectory = $both }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch 'holds 2 release archives') {
+        throw "two spellings of the archive were not refused as two: $($result.Text)"
     }
 }
 
