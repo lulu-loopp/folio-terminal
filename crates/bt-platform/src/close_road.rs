@@ -25,8 +25,9 @@
 //! # The witness is the window thread's own hooks
 //!
 //! Only a thread hook sees winit's event-target window and a thread message, so the witness rides
-//! the hooks [`crate::pump`] installs: `WH_CALLWNDPROC` for sent messages (its `wParam` says
-//! whether this thread sent it), `WH_CALLWNDPROCRET` for the end of a sent `SC_CLOSE`, and
+//! the hooks [`crate::pump`] installs: `WH_CALLWNDPROC` for sent messages (its `wParam` is
+//! nonzero when another thread sent it, as measured on Windows 11 in `hook_tests`; the API page's
+//! wording reads the other way), `WH_CALLWNDPROCRET` for the end of a sent `SC_CLOSE`, and
 //! `WH_GETMESSAGE` for posted ones — taken from any pump, a nested modal loop's included, which
 //! winit's message hook is not.
 //!
@@ -37,7 +38,9 @@
 //! * Anything else is [`CloseRoad::CloseMessage`], with its delivery.
 //!
 //! The moment's two facts are read in the hook, on the window thread, as the message reaches the
-//! window: whether the window is the foreground window, and where the pointer is.
+//! window: whether the window is the foreground window, and where the pointer is. Reading the
+//! pointer's window (`WindowFromPoint`) sends `WM_NCHITTEST` to this thread's windows under the
+//! point, so the hook re-enters their procedures for that one message; see `pointer_over`.
 //!
 //! A close for a window `bt-app` registered ([`watch_closes`]) is kept, in order, until the
 //! window's `CloseRequested` takes it ([`take_close_arrival`]): each `WM_CLOSE` to a winit
@@ -45,7 +48,9 @@
 //! unowned top-level window of the thread that is not Folio's — winit's own event target, which
 //! the message destroys while every Folio window stays open (plan row 41) — or a close posted to
 //! the thread itself is said at once through [`crate::stderr_road`], as `session_end`'s arrival
-//! line is. Owned windows (pickers, message boxes) and child windows are not this module's.
+//! line is. A window Folio made that has no `CloseRequested` (the spare web parent) is named to
+//! the witness ([`name_own_window`]), and its line names it as Folio's. Owned windows (pickers,
+//! message boxes) and child windows are not this module's.
 
 use std::collections::VecDeque;
 
@@ -100,24 +105,29 @@ impl OwnCloseRoad {
     }
 }
 
-/// **How an `SC_CLOSE` was chosen**, read off its `lParam` as the API documents it: the high word
-/// is `-1` for a system accelerator (Alt+F4), the whole is `0` for a mnemonic, and otherwise it
-/// is the pointer's screen position.
+/// **How an `SC_CLOSE` was chosen, as far as its `lParam` can say** (review P2-1): a screen point
+/// when the pointer chose it (the system menu clicked), and no point when the keyboard did.
+///
+/// The API page gives a system accelerator (Alt+F4) the high word `-1` and a mnemonic (Alt+Space,
+/// then C) `0`, and `DefWindowProc` is reported to post Alt+F4's command with `0`. Which form
+/// Alt+F4 takes could not be measured here: a synthesized `WM_SYSKEYDOWN` of `VK_F4` with the Alt
+/// bit, posted or sent, with or without the thread's key state saying Alt and F4 are down, makes
+/// no `SC_CLOSE` at all off the input thread (`hook_tests`). So the two keyboard forms are one
+/// word. Two points read as the keyboard: screen (0, 0), and any point whose y is -1 (a monitor
+/// above the primary's top edge). The taskbar's Close window was not measurable either (there is
+/// no shell in the build box's session) and reads as whichever form it sends.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SystemCloseFrom {
-    Accelerator,
-    Mnemonic,
+    Keyboard,
     Pointer,
 }
 
 impl SystemCloseFrom {
-    /// The documented reading of an `SC_CLOSE`'s `lParam`.
+    /// The reading of an `SC_CLOSE`'s `lParam`: `0`, or a high word of `-1`, is the keyboard's.
     #[must_use]
     pub const fn of_lparam(lparam: isize) -> Self {
-        if (lparam as u32) >> 16 == 0xFFFF {
-            Self::Accelerator
-        } else if lparam == 0 {
-            Self::Mnemonic
+        if lparam == 0 || (lparam as u32) >> 16 == 0xFFFF {
+            Self::Keyboard
         } else {
             Self::Pointer
         }
@@ -156,8 +166,7 @@ impl CloseRoad {
             Self::Own(OwnCloseRoad::CaptionButton) => "caption-button",
             Self::Own(OwnCloseRoad::FinalTab) => "final-tab",
             Self::Own(OwnCloseRoad::ShellsExited) => "shell-exit",
-            Self::SystemClose(SystemCloseFrom::Accelerator) => "system-close (accelerator)",
-            Self::SystemClose(SystemCloseFrom::Mnemonic) => "system-close (mnemonic)",
+            Self::SystemClose(SystemCloseFrom::Keyboard) => "system-close (keyboard)",
             Self::SystemClose(SystemCloseFrom::Pointer) => "system-close (pointer)",
             Self::CloseMessage => "close-message",
             Self::CloseButton => "close-button",
@@ -190,14 +199,18 @@ impl CloseDelivery {
         }
     }
 
-    /// **A sent message's delivery**, by `WH_CALLWNDPROC`'s `wParam`: nonzero when this thread
-    /// sent it.
+    /// **A sent message's delivery**, by `WH_CALLWNDPROC`'s `wParam`: nonzero when another
+    /// thread sent it. Measured (review P2-2, `hook_tests`): a send from another thread of this
+    /// process hooks with 1, one from this thread with 0, and the `WM_CLOSE` `DefWindowProc`
+    /// sends inside another thread's `SC_CLOSE` with 0. `InSendMessageEx` is no substitute: it
+    /// answers "sent" for that nested close too, because the thread is still inside the other
+    /// thread's send.
     #[must_use]
-    pub const fn of_sent(this_thread: bool) -> Self {
-        if this_thread {
-            Self::SentHere
-        } else {
+    pub const fn of_sent(from_another_thread: bool) -> Self {
+        if from_another_thread {
             Self::SentFromAnotherThread
+        } else {
+            Self::SentHere
         }
     }
 }
@@ -232,19 +245,32 @@ pub const fn is_close_message(message: u32, wparam: usize) -> bool {
     message == WM_CLOSE || (message == WM_SYSCOMMAND && wparam & 0xFFF0 == SC_CLOSE)
 }
 
-/// **The line said when a close reaches a window of this thread that is not Folio's** — winit's
-/// event target, or the thread itself (`class` `None`). One physical line; the class name is the
-/// one foreign string and is cut to one line of at most 64 characters.
+/// **Where a close no `CloseRequested` will take arrived**: the window thread itself, a window
+/// Folio made and named to the witness ([`name_own_window`]), or another window of the thread,
+/// by its class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnwatchedCloseAt<'a> {
+    Thread,
+    FolioOwn(&'static str),
+    Foreign(&'a str),
+}
+
+/// **The line said when a close reaches a window of this thread whose close no `CloseRequested`
+/// takes**: winit's event target, a window Folio made and named, or the thread itself. One
+/// physical line; a class name is the one foreign string and is cut to one line of at most 64
+/// characters. It carries no `road=`: the ruled line has none (review N1).
 #[must_use]
 pub fn close_arrival_line(
-    class: Option<&str>,
-    road: CloseRoad,
+    at: UnwatchedCloseAt<'_>,
     delivery: CloseDelivery,
     foreground: bool,
 ) -> String {
-    let what = class.map_or_else(
-        || "the window thread (no window)".to_owned(),
-        |class| {
+    let what = match at {
+        UnwatchedCloseAt::Thread => {
+            "a window that is not Folio's — the window thread (no window)".to_owned()
+        }
+        UnwatchedCloseAt::FolioOwn(name) => format!("Folio's own {name}"),
+        UnwatchedCloseAt::Foreign(class) => {
             let one_line: String = class
                 .chars()
                 .map(|character| {
@@ -256,13 +282,11 @@ pub fn close_arrival_line(
                 })
                 .take(CLASS_CHARS)
                 .collect();
-            format!("class \"{one_line}\"")
-        },
-    );
+            format!("a window that is not Folio's — class \"{one_line}\"")
+        }
+    };
     format!(
-        "Folio: close message to a window that is not Folio's — {what}; road={}; delivery={}; \
-         foreground={}; Folio's windows stay open",
-        road.road_word(),
+        "Folio: close message to {what}; delivery={}; foreground={}; Folio's windows stay open",
         delivery.delivery_word(),
         if foreground { "yes" } else { "no" },
     )
@@ -283,6 +307,8 @@ struct OpenSystemClose {
 pub struct CloseBook {
     watched: Vec<(isize, VecDeque<CloseArrival>)>,
     open: Vec<OpenSystemClose>,
+    /// Folio's own windows that no `CloseRequested` answers for, by what they are.
+    named: Vec<(isize, &'static str)>,
 }
 
 impl CloseBook {
@@ -297,6 +323,27 @@ impl CloseBook {
     pub fn unwatch_window(&mut self, window: isize) {
         self.watched.retain(|(watched, _)| *watched != window);
         self.open.retain(|open| open.window != window);
+    }
+
+    /// Folio made `window` and no `CloseRequested` answers for it: a close to it is said as
+    /// reaching Folio's own `name`.
+    pub fn name_window(&mut self, window: isize, name: &'static str) {
+        self.named.retain(|(named, _)| *named != window);
+        self.named.push((window, name));
+    }
+
+    /// The named window has gone.
+    pub fn forget_named_window(&mut self, window: isize) {
+        self.named.retain(|(named, _)| *named != window);
+    }
+
+    /// What Folio named `window`, if it did.
+    #[must_use]
+    pub fn name_of_own_window(&self, window: isize) -> Option<&'static str> {
+        self.named
+            .iter()
+            .find(|(named, _)| *named == window)
+            .map(|(_, name)| *name)
     }
 
     /// Whether `window` is one of Folio's.
@@ -394,6 +441,20 @@ pub fn watch_closes(window: crate::NativeWindow) {
     let _ = window;
 }
 
+/// **A window Folio made whose close no `CloseRequested` answers for**, named for the line a
+/// close to it says (review N2): the spare web parent, which `DefWindowProc` destroys on a
+/// `WM_CLOSE` (plan row 41). Windows only; called on the window thread.
+#[cfg(windows)]
+pub(crate) fn name_own_window(window: crate::NativeWindow, name: &'static str) {
+    windows_close_road::with_book(|book| book.name_window(window.as_handle().get(), name));
+}
+
+/// **The named window has gone.**
+#[cfg(windows)]
+pub(crate) fn forget_own_window(window: crate::NativeWindow) {
+    windows_close_road::with_book(|book| book.forget_named_window(window.as_handle().get()));
+}
+
 /// **The window has gone**: what it heard and nobody took goes with it.
 pub fn unwatch_closes(window: crate::NativeWindow) {
     #[cfg(windows)]
@@ -481,8 +542,8 @@ pub(crate) mod windows_close_road {
     };
 
     use super::{
-        CloseArrival, CloseBook, CloseDelivery, ClosePointer, SC_CLOSE, WM_CLOSE, WM_SYSCOMMAND,
-        close_arrival_line,
+        CloseArrival, CloseBook, CloseDelivery, ClosePointer, SC_CLOSE, UnwatchedCloseAt, WM_CLOSE,
+        WM_SYSCOMMAND, close_arrival_line,
     };
 
     thread_local! {
@@ -501,14 +562,14 @@ pub(crate) mod windows_close_road {
         message: u32,
         wparam: usize,
         lparam: isize,
-        this_thread: bool,
+        from_another_thread: bool,
     ) {
         heard_close(
             hwnd,
             message,
             wparam,
             lparam,
-            CloseDelivery::of_sent(this_thread),
+            CloseDelivery::of_sent(from_another_thread),
         );
     }
 
@@ -546,9 +607,14 @@ pub(crate) mod windows_close_road {
         if message != WM_CLOSE {
             return;
         }
-        let (road, delivery, ours) = with_book(|book| {
+        let (road, delivery, ours, named) = with_book(|book| {
             let (road, delivery) = book.classify_close(window, wparam, lparam, delivery);
-            (road, delivery, book.watches(window))
+            (
+                road,
+                delivery,
+                book.watches(window),
+                book.name_of_own_window(window),
+            )
         });
         // SAFETY: a read with no arguments.
         let foreground = !hwnd.is_invalid() && unsafe { GetForegroundWindow() } == hwnd;
@@ -562,22 +628,22 @@ pub(crate) mod windows_close_road {
             with_book(|book| book.keep_arrival(window, arrival));
             return;
         }
-        // Not Folio's: said at once if it is the thread's own (no window) or an unowned
-        // top-level window of the thread — winit's event target — and left alone otherwise.
-        let class = if hwnd.is_invalid() {
-            None
+        // No `CloseRequested` will take it: said at once if it is the thread's own (no window),
+        // a window Folio named, or an unowned top-level window of the thread (winit's event
+        // target), and left alone otherwise.
+        let class;
+        let at = if hwnd.is_invalid() {
+            UnwatchedCloseAt::Thread
+        } else if let Some(name) = named {
+            UnwatchedCloseAt::FolioOwn(name)
         } else {
             if !unowned_top_level(hwnd) {
                 return;
             }
-            Some(class_of(hwnd))
+            class = class_of(hwnd);
+            UnwatchedCloseAt::Foreign(&class)
         };
-        crate::stderr_road::say(close_arrival_line(
-            class.as_deref(),
-            road,
-            delivery,
-            foreground,
-        ));
+        crate::stderr_road::say(close_arrival_line(at, delivery, foreground));
     }
 
     /// Where the pointer is: over `hwnd`'s client area, or not over `hwnd` at all.
@@ -587,8 +653,12 @@ pub(crate) mod windows_close_road {
         if unsafe { GetCursorPos(&mut point) }.is_err() {
             return ClosePointer::Unread;
         }
-        // SAFETY: two read-only hit tests over a screen point; a point no window covers answers
-        // null, which `GetAncestor` answers null for.
+        // SAFETY: a screen point and a window read back. `WindowFromPoint` is not a pure read: it
+        // sends `WM_NCHITTEST` to this thread's windows under the point, so their procedures run
+        // inside this hook. That is safe because the book is not borrowed across the call, the
+        // custom frame's subclass answers the hit test from atomics, `GetClientRect` and
+        // `IsZoomed`, and winit has no arm for it. A point no window covers answers null, which
+        // `GetAncestor` answers null for.
         let root = unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) };
         if root != hwnd {
             return ClosePointer::Outside;
@@ -655,16 +725,16 @@ mod tests {
         assert_eq!(OwnCloseRoad::from_mark(9, OWN_CLOSE_TAG), None);
     }
 
-    /// RED (mutation: drop the accelerator arm) — **an `SC_CLOSE`'s `lParam` is read as the API
-    /// documents it.**
+    /// RED (mutation: drop the `-1` high word from the keyboard arm) — **an `SC_CLOSE`'s `lParam`
+    /// says the keyboard when it holds no point, and the pointer otherwise** (review P2-1).
     #[test]
-    fn a_system_close_is_read_as_accelerator_mnemonic_or_pointer() {
-        assert_eq!(SystemCloseFrom::of_lparam(-1), SystemCloseFrom::Accelerator);
+    fn a_system_close_is_read_as_the_keyboard_or_the_pointer() {
+        assert_eq!(SystemCloseFrom::of_lparam(-1), SystemCloseFrom::Keyboard);
         assert_eq!(
             SystemCloseFrom::of_lparam(0xFFFF_0000_u32 as isize),
-            SystemCloseFrom::Accelerator
+            SystemCloseFrom::Keyboard
         );
-        assert_eq!(SystemCloseFrom::of_lparam(0), SystemCloseFrom::Mnemonic);
+        assert_eq!(SystemCloseFrom::of_lparam(0), SystemCloseFrom::Keyboard);
         assert_eq!(
             SystemCloseFrom::of_lparam((300 << 16) | 120),
             SystemCloseFrom::Pointer
@@ -705,7 +775,7 @@ mod tests {
         assert_eq!(
             book.classify_close(MAIN, 0, 0, CloseDelivery::SentHere),
             (
-                CloseRoad::SystemClose(SystemCloseFrom::Accelerator),
+                CloseRoad::SystemClose(SystemCloseFrom::Keyboard),
                 CloseDelivery::SentHere
             )
         );
@@ -731,14 +801,14 @@ mod tests {
     }
 
     /// RED (mutation: `of_sent` reading the hook's `wParam` the other way round) — **a sent close
-    /// is this thread's when the hook says so, and another thread's otherwise.**
+    /// is another thread's when the hook says so, and this thread's otherwise.**
     #[test]
-    fn a_sent_close_is_this_threads_only_when_the_hook_says_so() {
-        assert_eq!(CloseDelivery::of_sent(true), CloseDelivery::SentHere);
+    fn a_sent_close_is_another_threads_only_when_the_hook_says_so() {
         assert_eq!(
-            CloseDelivery::of_sent(false),
+            CloseDelivery::of_sent(true),
             CloseDelivery::SentFromAnotherThread
         );
+        assert_eq!(CloseDelivery::of_sent(false), CloseDelivery::SentHere);
     }
 
     /// RED (mutation: `posted_message_taken` keeping posted commands) — **a posted `SC_CLOSE`
@@ -799,25 +869,23 @@ mod tests {
     }
 
     /// RED (mutation: the class name not cut to one line) — **the line for a window that is not
-    /// Folio's names its class on one bounded line and says nothing closed.**
+    /// Folio's names its class on one bounded line and says nothing closed**; it carries no
+    /// `road=` (review N1).
     #[test]
     fn a_close_to_a_window_that_is_not_folios_says_its_class_on_one_line() {
         let line = close_arrival_line(
-            Some("Winit Thread Event Target"),
-            CloseRoad::CloseMessage,
+            UnwatchedCloseAt::Foreign("Winit Thread Event Target"),
             CloseDelivery::Posted,
             false,
         );
         assert_eq!(
             line,
             "Folio: close message to a window that is not Folio's — class \"Winit Thread Event \
-             Target\"; road=close-message; delivery=posted; foreground=no; Folio's windows stay \
-             open"
+             Target\"; delivery=posted; foreground=no; Folio's windows stay open"
         );
         let long = format!("planted\nclass{}", "x".repeat(300));
         let line = close_arrival_line(
-            Some(&long),
-            CloseRoad::CloseMessage,
+            UnwatchedCloseAt::Foreign(&long),
             CloseDelivery::SentFromAnotherThread,
             true,
         );
@@ -825,9 +893,33 @@ mod tests {
         assert!(line.contains(&format!("class \"planted class{}\"", "x".repeat(51))));
         assert!(!line.contains(&"x".repeat(52)), "{line}");
         assert!(
-            close_arrival_line(None, CloseRoad::CloseMessage, CloseDelivery::Posted, false)
-                .contains("— the window thread (no window); road=close-message")
+            close_arrival_line(UnwatchedCloseAt::Thread, CloseDelivery::Posted, false)
+                .contains("— the window thread (no window); delivery=posted")
         );
+    }
+
+    /// RED (mutation: `name_of_own_window` answering `None`) — **a close to a window Folio made and named is
+    /// said as reaching Folio's own window, by its name** (review N2), until the window has gone.
+    #[test]
+    fn a_close_to_a_window_folio_named_says_it_is_folios_own() {
+        let mut book = CloseBook::default();
+        book.name_window(TARGET, "spare web parent");
+        let named = book.name_of_own_window(TARGET).expect("named");
+        assert_eq!(
+            close_arrival_line(
+                UnwatchedCloseAt::FolioOwn(named),
+                CloseDelivery::Posted,
+                false
+            ),
+            "Folio: close message to Folio's own spare web parent; delivery=posted; \
+             foreground=no; Folio's windows stay open"
+        );
+        assert!(
+            !book.watches(TARGET),
+            "named is not watched: no arrival is kept for it"
+        );
+        book.forget_named_window(TARGET);
+        assert_eq!(book.name_of_own_window(TARGET), None);
     }
 
     /// RED (mutation: a `WM_SYSCOMMAND` of any command read as a close) — **only `WM_CLOSE` and
@@ -839,5 +931,257 @@ mod tests {
         assert!(is_close_message(WM_SYSCOMMAND, SC_CLOSE | 0x3));
         assert!(!is_close_message(WM_SYSCOMMAND, 0xF020), "SC_MINIMIZE");
         assert!(!is_close_message(0x0011, 0), "WM_QUERYENDSESSION");
+    }
+}
+
+/// **The witness over real Win32** (0.4.10 plan row 103, review P2-2): this thread's own hooks,
+/// a plain top-level window whose procedure swallows `WM_CLOSE` (so it stays to be closed again),
+/// and the closes Windows itself delivers to it, read back as the window's `CloseRequested`
+/// would read them.
+#[cfg(all(test, windows))]
+mod hook_tests {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE,
+        PeekMessageW, PostMessageW, RegisterClassW, SendMessageW, TranslateMessage, WM_NULL,
+        WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    };
+    use windows::core::{HSTRING, PCWSTR};
+
+    use super::*;
+
+    /// Every `SC_CLOSE` the window's procedure was handed, by its `lParam`, in order.
+    static SYSTEM_CLOSES: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+
+    unsafe extern "system" fn swallowing_close_procedure(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if message == WM_CLOSE {
+            return LRESULT(0);
+        }
+        if message == WM_SYSCOMMAND && wparam.0 & 0xFFF0 == SC_CLOSE {
+            SYSTEM_CLOSES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(lparam.0);
+        }
+        // SAFETY: the arguments are the ones this procedure was called with.
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+
+    /// Take and dispatch every message on this thread's queue, sent ones included.
+    fn pump_this_thread() {
+        let mut message = MSG::default();
+        // SAFETY: plain Win32 calls on this thread's own queue.
+        unsafe {
+            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
+
+    fn system_closes() -> Vec<isize> {
+        std::mem::take(
+            &mut *SYSTEM_CLOSES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// RED (one mutation per row) — **each road Windows delivers is read as that road**:
+    ///
+    /// * Folio's own post, marked: `Own(FinalTab)`, posted. MUTATION: drop `heard_posted` from
+    ///   `taken_posted`.
+    /// * Another program's `PostMessage(WM_CLOSE, 0, 0)`: a close message, posted.
+    /// * `SendMessage(WM_CLOSE)` from another thread: a close message, sent from another
+    ///   thread. MUTATION: drop `heard_sent` from `before_sent`, or invert `wparam.0 != 0`.
+    /// * Another thread's `SendMessage(WM_SYSCOMMAND, SC_CLOSE)`: the system's close command,
+    ///   sent from another thread, read off the `WM_CLOSE` `DefWindowProc` sends inside it.
+    /// * A posted `SC_CLOSE`: the system's close command, posted.
+    /// * A posted `SC_CLOSE` is over at the thread's next retrieval, so a close this thread sends
+    ///   afterwards is a close message. MUTATION: drop `posted_message_taken` from
+    ///   `heard_posted`.
+    /// * The `SC_CLOSE` forms: a high word of `-1` and `0` are the keyboard's, a point the
+    ///   pointer's. Alt+F4 itself cannot be made here: a synthesized `WM_SYSKEYDOWN` of `VK_F4`
+    ///   with the Alt bit, posted or sent, with or without the thread's key state saying Alt and
+    ///   F4 are down, made no `SC_CLOSE` on the build box (measured 2026-11-18).
+    /// * A sent `SC_CLOSE`: the system's close command, sent here; once it has returned, a close
+    ///   this thread sends is a close message. MUTATION: drop `sent_returned` from `after_sent`.
+    #[test]
+    fn the_hooks_read_each_road_windows_delivers() {
+        crate::pump::install_witness().expect("this thread's hooks");
+        let class = HSTRING::from("FolioCloseRoadProbe");
+        let wnd = WNDCLASSW {
+            lpfnWndProc: Some(swallowing_close_procedure),
+            lpszClassName: PCWSTR(class.as_ptr()),
+            ..Default::default()
+        };
+        // SAFETY: the class name outlives the call; a second registration of it answers zero and
+        // the first class is used.
+        unsafe { RegisterClassW(&wnd) };
+        // SAFETY: a never-shown top-level window of this thread.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                Default::default(),
+                PCWSTR(class.as_ptr()),
+                PCWSTR(HSTRING::new().as_ptr()),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                400,
+                300,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .expect("a window to close");
+        let window = crate::NativeWindow::from_hwnd(hwnd).expect("a real window handle");
+        watch_closes(window);
+        let taken = || take_close_arrival(window).map(|arrival| (arrival.road, arrival.delivery));
+        let read = |road: CloseRoad, delivery: CloseDelivery| Some((road, Some(delivery)));
+
+        crate::request_window_close(window, OwnCloseRoad::FinalTab).expect("posted");
+        pump_this_thread();
+        assert_eq!(
+            taken(),
+            read(
+                CloseRoad::Own(OwnCloseRoad::FinalTab),
+                CloseDelivery::Posted
+            ),
+            "Folio's own post"
+        );
+
+        // SAFETY: a post to this thread's own live window.
+        unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.expect("posted");
+        pump_this_thread();
+        assert_eq!(
+            taken(),
+            read(CloseRoad::CloseMessage, CloseDelivery::Posted),
+            "another program's post"
+        );
+
+        let target = hwnd.0 as isize;
+        let sender = std::thread::spawn(move || {
+            // SAFETY: a send to a live window of another thread, which pumps until it returns.
+            unsafe { SendMessageW(HWND(target as *mut _), WM_CLOSE, None, None) };
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !sender.is_finished() && Instant::now() < deadline {
+            pump_this_thread();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        sender.join().expect("the sender returns");
+        assert_eq!(
+            taken(),
+            read(
+                CloseRoad::CloseMessage,
+                CloseDelivery::SentFromAnotherThread
+            ),
+            "another thread's send"
+        );
+
+        let sender = std::thread::spawn(move || {
+            // SAFETY: a send to a live window of another thread, which pumps until it returns.
+            unsafe {
+                SendMessageW(
+                    HWND(target as *mut _),
+                    WM_SYSCOMMAND,
+                    Some(WPARAM(SC_CLOSE)),
+                    Some(LPARAM(0)),
+                )
+            };
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !sender.is_finished() && Instant::now() < deadline {
+            pump_this_thread();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        sender.join().expect("the sender returns");
+        assert_eq!(system_closes(), [0], "the command reached the window");
+        assert_eq!(
+            taken(),
+            read(
+                CloseRoad::SystemClose(SystemCloseFrom::of_lparam(0)),
+                CloseDelivery::SentFromAnotherThread
+            ),
+            "another thread's system close: the close it causes is sent here, inside it"
+        );
+
+        // SAFETY: a post to this thread's own live window.
+        unsafe { PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(SC_CLOSE), LPARAM(0)) }
+            .expect("posted");
+        pump_this_thread();
+        assert_eq!(system_closes(), [0], "the command reached the window");
+        assert_eq!(
+            taken(),
+            read(
+                CloseRoad::SystemClose(SystemCloseFrom::of_lparam(0)),
+                CloseDelivery::Posted
+            ),
+            "a posted system close"
+        );
+
+        // SAFETY: a post to this thread's own live window; its retrieval ends the posted command.
+        unsafe { PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)) }.expect("posted");
+        pump_this_thread();
+        // SAFETY: a send to this thread's own live window.
+        unsafe { SendMessageW(hwnd, WM_CLOSE, None, None) };
+        assert_eq!(
+            taken(),
+            read(CloseRoad::CloseMessage, CloseDelivery::SentHere),
+            "a posted command is over at the next retrieval"
+        );
+
+        for (lparam, from) in [
+            (0xFFFF_0000_u32 as isize, SystemCloseFrom::Keyboard),
+            ((300 << 16) | 120, SystemCloseFrom::Pointer),
+        ] {
+            // SAFETY: two posts to this thread's own live window; the second's retrieval ends the
+            // first, posted, command.
+            unsafe {
+                PostMessageW(Some(hwnd), WM_SYSCOMMAND, WPARAM(SC_CLOSE), LPARAM(lparam))
+                    .expect("posted");
+                PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)).expect("posted");
+            }
+            pump_this_thread();
+            assert_eq!(system_closes(), [lparam], "the command reached the window");
+            assert_eq!(
+                taken(),
+                read(CloseRoad::SystemClose(from), CloseDelivery::Posted),
+                "a system close by its form {lparam:#x}"
+            );
+        }
+
+        // SAFETY: a send to this thread's own live window.
+        unsafe { SendMessageW(hwnd, WM_SYSCOMMAND, Some(WPARAM(SC_CLOSE)), Some(LPARAM(0))) };
+        assert_eq!(
+            taken(),
+            read(
+                CloseRoad::SystemClose(SystemCloseFrom::of_lparam(0)),
+                CloseDelivery::SentHere
+            ),
+            "a sent system close"
+        );
+        // SAFETY: a send to this thread's own live window.
+        unsafe { SendMessageW(hwnd, WM_CLOSE, None, None) };
+        assert_eq!(
+            taken(),
+            read(CloseRoad::CloseMessage, CloseDelivery::SentHere),
+            "a sent command is over once it has returned"
+        );
+        assert_eq!(taken(), None, "one arrival per close, and no more");
+
+        unwatch_closes(window);
+        // SAFETY: this thread's own window, destroyed once.
+        let _ = unsafe { DestroyWindow(hwnd) };
     }
 }
