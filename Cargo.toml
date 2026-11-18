@@ -77,6 +77,10 @@ unsafe_code = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+# A `debug_assert!` evaluates its argument in test builds only, so a call inside one that changes
+# state is code the shipped build does not run. One closed the vendor grid's resize transaction,
+# and every release kept every row a resized pane printed (0.4.10 plan row 107).
+debug_assert_with_mut_call = "deny"
 
 [workspace.dependencies]
 # exact: a 0.26.x release on crates.io would otherwise out-resolve the local
