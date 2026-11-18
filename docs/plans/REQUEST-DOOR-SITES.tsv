@@ -898,6 +898,7 @@ crates/bt-viewport/src/lib.rs	bt-viewport crate::<FrameProjectionError as fmt::D
 crates/bt-viewport/src/lib.rs	bt-viewport crate::<FrameShapeError as fmt::Display>::fmt	Implicit	fmt::Display	12	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-viewport/src/trace.rs	bt-viewport crate::trace::line	Dynamic	writer	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-winres/src/release_manifest.rs	bt-winres crate::release_manifest::<ManifestError as fmt::Display>::fmt	Implicit	fmt::Display	3	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
+crates/bt-winres/src/release_statement.rs	bt-winres crate::release_statement::<StatementError as fmt::Display>::fmt	Implicit	fmt::Display	6	unreviewed	2026-11-18: unreviewed; T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102): the release statement refusal as a diagnostic line, six write! into the caller's Formatter, one per shape of refusal; formatting only, no effect of its own
 crates/bt-workbench/src/attention.rs	bt-workbench crate::attention::<Site as fmt::Display>::fmt	Implicit	fmt::Display	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-workbench/src/attention.rs	bt-workbench crate::attention::AttentionLedger::strong_clear	Ambiguous	is_empty	1	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))
 crates/bt-workbench/src/attention.rs	bt-workbench crate::attention::AttentionLedger::strong_clear	Dynamic	removes	2	unreviewed	2026-10-24: unreviewed since 2026-10-24 (ruling Q8 (B))

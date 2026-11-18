@@ -53,7 +53,7 @@ path = "src/bin/render-info-plist.rs"
 # is published** (0.4.10 plan row 102): the release script runs it over the package directory
 # before the upload, and the release workflow over the assets it downloads from the published
 # page. It is the product's own grammar and embedded keys, compiled without the window.
-#   cargo run -q -p bt-winres --features release-key,inflate --bin check-release-statement -- verify <folder> <version>
+#   cargo run -q -p bt-winres --features release-key,inflate --bin check-release-statement -- verify <folder> <tag>
 [[bin]]
 name = "check-release-statement"
 path = "src/bin/check-release-statement.rs"
