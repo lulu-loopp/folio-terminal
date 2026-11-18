@@ -167,7 +167,8 @@ pub struct CliRequest {
     /// diagnostics log says `update feed: <url>`. It holds for this process
     /// only: nothing writes it, a start without it asks github.com, and a
     /// launch handed over to a running Folio does not carry it. What a feed
-    /// delivers must still be signed by the same signer as the running build.
+    /// delivers must still be vouched for by a release statement that verifies
+    /// with a release key the running build embeds (0.4.10 plan row 102).
     pub update_feed: Option<String>,
 }
 

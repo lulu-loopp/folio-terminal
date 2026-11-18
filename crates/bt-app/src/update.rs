@@ -535,12 +535,13 @@ pub const FEED_LIST: &str = "releases.json";
 /// release with at least `tag_name`, `name`, `draft`, `prerelease` and
 /// `assets[]{name, browser_download_url, size}` — and the assets beside it,
 /// each `browser_download_url` a `file:` URL. The check reads the list here
-/// instead of asking [`RELEASES_HOST`], and a press copies the offer's two
-/// files instead of downloading them (`update_job::FeedCopy`); **everything
-/// after the fetch is the release page's road**: the checksum document, the
-/// archive reader and the signer the running build requires. A feed can
-/// therefore only deliver a build signed by the same signer, which is what
-/// makes a visible flag safe to have.
+/// instead of asking [`RELEASES_HOST`], and a press copies the offer's files
+/// instead of downloading them (`update_job::FeedCopy`); **everything after
+/// the fetch is the release page's road**: the release statement, verified with
+/// the release keys the running build embeds, and the archive reader holding
+/// every file to it (0.4.10 plan row 102). A feed can therefore only deliver a
+/// release a key holder vouched for, which is what makes a visible flag safe to
+/// have.
 ///
 /// **One process's input, never a fact.** Given on the command line and held
 /// in [`FEED`] for this process only: no environment variable, no settings
