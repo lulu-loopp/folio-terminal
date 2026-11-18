@@ -20,8 +20,9 @@
     The guest's `.vmx`.
 
 .PARAMETER Zip
-    The candidate, `folio-<version>-windows-x64.zip` (signed, `FOLIO_UPDATER=on`,
-    the update card enabled).
+    The candidate, `folio-<version>-windows-x64.zip`, or
+    `folio-<version>-windows-x64-unsigned.zip` for one packed without `-Sign`
+    (`FOLIO_UPDATER=on`, the update card enabled).
 
 .PARAMETER Snapshot
     The name of the snapshot to take, e.g. `a-installed`.

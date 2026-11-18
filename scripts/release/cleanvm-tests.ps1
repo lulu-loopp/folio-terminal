@@ -18,6 +18,12 @@
     MUTATION: in `run-smoke-in-vm.ps1`, drop the `foreach ($loaded in
     $smokeLoads)` that adds the derived copies.
 
+    **run_smoke_finds_an_unsigned_archive** (0.4.10 plan row 102, the 1b+2
+    review's P2-8) — with no `-Zip`, a package directory holding
+    `folio-<version>-windows-x64-unsigned.zip` beside the stable
+    `folio-windows-x64.zip` gives the versioned archive, under its own name.
+    MUTATION: put back the filter `folio-*-windows-x64.zip` alone.
+
     **a_guest_bound_script_without_a_bom_is_refused** — `release-manifest.ps1`
     without its byte-order mark stops the run on the host, by name.
     MUTATION: in `guest-files.ps1` `Assert-GuestReadable`, return at once.
@@ -169,6 +175,19 @@ try {
         $bom + [Text.Encoding]::UTF8.GetBytes("`$extra = Join-Path `$PSScriptRoot 'extra-data.txt'`r`n"))
     [IO.File]::WriteAllText((Join-Path $mutated 'scripts\release\extra-data.txt'), "data`n")
     Test-SmokeCopies $mutated 'with a dot-source added'
+
+    # ── run_smoke_finds_an_unsigned_archive ───────────────────────────────────
+    $unsignedTree = New-ScratchTree 'unsigned-archive'
+    $packaged = Join-Path $unsignedTree 'target\release-package'
+    [IO.Directory]::CreateDirectory($packaged) | Out-Null
+    foreach ($name in @('folio-9.8.7-windows-x64-unsigned.zip', 'folio-windows-x64.zip')) {
+        [IO.File]::Copy($zip, (Join-Path $packaged $name))
+    }
+    $plan = Invoke-Plan (Join-Path $unsignedTree 'scripts\release\cleanvm\run-smoke-in-vm.ps1') @(
+        '-Vmx', 'x.vmx', '-VmrunPath', $stub, '-WhatIf')
+    Check ($plan.Exit -eq 0) "run-smoke-in-vm.ps1 -WhatIf with no -Zip exits 0 over an -unsigned archive ($($plan.Exit))"
+    Check ((Get-GuestCopies $plan.Text) -contains 'C:\folio-vm\folio-9.8.7-windows-x64-unsigned.zip') `
+        'with no -Zip, the -unsigned versioned archive is the one copied in, not the stable copy'
 
     # ── a_guest_bound_script_without_a_bom_is_refused ─────────────────────────
     $bare = New-ScratchTree 'no-bom'
