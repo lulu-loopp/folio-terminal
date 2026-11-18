@@ -2826,6 +2826,29 @@ fn event_to(application: &mut HeadlessApplication, id: u64, event: WindowEvent) 
         .on_window_event(&application.event_loop, WindowId::from(id), event);
 }
 
+/// **How a close of the run's last visible window begins its line on this host** (0.4.10 plan
+/// row 103): `last window closed — ` where the run ends with it, and `window closed — ` where the
+/// application outlives its last window (macOS), so the same close ends nothing
+/// (`a_run_ends_with_its_last_visible_window`).
+fn closing_the_last_window_begins() -> &'static str {
+    if bt_platform::host_platform().an_application_outlives_its_last_window() {
+        "Folio: window closed — "
+    } else {
+        "Folio: last window closed — "
+    }
+}
+
+/// The whole line a close of the run's last visible window writes on this host: `body` after
+/// [`closing_the_last_window_begins`], and `; windows left=0` where the close ends nothing.
+fn closing_the_last_window_says(body: &str) -> String {
+    let tail = if bt_platform::host_platform().an_application_outlives_its_last_window() {
+        "; windows left=0"
+    } else {
+        ""
+    };
+    format!("{}{body}{tail}", closing_the_last_window_begins())
+}
+
 /// The close lines said since the ledger was last read, in order; the ledger is emptied.
 fn close_lines(application: &HeadlessApplication) -> Vec<String> {
     application
@@ -3027,10 +3050,10 @@ fn a_final_tab_whose_shells_exited_beside_unsaved_edits_closes_only_as_the_perso
     application.window_event(WindowEvent::CloseRequested);
     assert_eq!(
         close_lines(&application),
-        [
-            "Folio: last window closed — the person closed it; window=ordinary 1; \
+        [closing_the_last_window_says(
+            "the person closed it; window=ordinary 1; \
           road=final-tab; delivery=posted; foreground=yes; pointer=unread; tabs=1; panes=2"
-        ]
+        )]
     );
 }
 
@@ -3050,10 +3073,10 @@ fn an_own_request_with_nothing_to_ask_ends_the_run_saying_its_road() {
     application.window_event(WindowEvent::CloseRequested);
     assert_eq!(
         close_lines(&application),
-        [
-            "Folio: last window closed — the person closed it; window=ordinary 1; \
+        [closing_the_last_window_says(
+            "the person closed it; window=ordinary 1; \
           road=caption-button; delivery=posted; foreground=yes; pointer=unread; tabs=1; panes=1"
-        ]
+        )]
     );
 }
 
@@ -3079,10 +3102,10 @@ fn another_programs_close_message_says_so() {
     application.window_event(WindowEvent::CloseRequested);
     assert_eq!(
         close_lines(&application),
-        [
-            "Folio: last window closed — a close message; window=ordinary 1; road=close-message; \
+        [closing_the_last_window_says(
+            "a close message; window=ordinary 1; road=close-message; \
           delivery=posted; foreground=no; pointer=outside; tabs=1; panes=1"
-        ]
+        )]
     );
 }
 
@@ -3098,10 +3121,10 @@ fn a_close_request_nothing_witnessed_says_unmarked() {
     application.window_event(WindowEvent::CloseRequested);
     assert_eq!(
         close_lines(&application),
-        [
-            "Folio: last window closed — an unmarked close request; window=ordinary 1; \
+        [closing_the_last_window_says(
+            "an unmarked close request; window=ordinary 1; \
           road=unmarked; delivery=unread; foreground=unread; pointer=unread; tabs=1; panes=1"
-        ]
+        )]
     );
 }
 
@@ -3136,11 +3159,11 @@ fn a_close_held_by_the_question_keeps_the_road_that_asked() {
     application.window_event(WindowEvent::Focused(true));
     assert_eq!(
         close_lines(&application),
-        [
-            "Folio: last window closed — the system's close command; window=ordinary 1; \
+        [closing_the_last_window_says(
+            "the system's close command; window=ordinary 1; \
           road=system-close (keyboard); delivery=sent here; foreground=no; pointer=outside; \
           tabs=1; panes=2"
-        ]
+        )]
     );
 }
 
@@ -3209,7 +3232,10 @@ fn a_cancelled_close_does_not_lend_its_road_to_the_next() {
     let lines = close_lines(&application);
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(
-        lines[0].starts_with("Folio: last window closed — the person closed it; window=ordinary 1; road=caption-button; "),
+        lines[0].starts_with(&format!(
+            "{}the person closed it; window=ordinary 1; road=caption-button; ",
+            closing_the_last_window_begins()
+        )),
         "{lines:?}"
     );
 }
@@ -3219,6 +3245,12 @@ fn a_cancelled_close_does_not_lend_its_road_to_the_next() {
 /// was answered says the road of the request that started it (R7)**.
 #[test]
 fn a_close_the_summon_held_keeps_the_road_that_asked() {
+    // The summoned terminal is asked only by a close that ends the run. Where the application
+    // outlives its last window (macOS) no close does, so there is no held close to keep a road
+    // for: the road this test pins is not on that host.
+    if bt_platform::host_platform().an_application_outlives_its_last_window() {
+        return;
+    }
     let path = host_spelling(r"C:\w\summoned.md");
     let mut buffer = buffer_saying(&path, "summoned.md", "one\n");
     let mut caret = preview_edit::EditCaret::default();
