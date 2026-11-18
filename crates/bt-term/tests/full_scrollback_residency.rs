@@ -208,7 +208,7 @@ fn holds_still(mut pane: Pane) {
     }
     let grown = held() - full;
     eprintln!(
-        "lines, bytes held beyond the full history, document entries, layout slots, vendor          history rows: {trail:?}"
+        "lines, bytes held beyond the full history, entries, layout slots, vendor rows: {trail:?}"
     );
     assert!(
         grown.abs() < 48 * 1024,

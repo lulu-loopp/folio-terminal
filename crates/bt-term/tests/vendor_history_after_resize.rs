@@ -10,6 +10,8 @@
 //! These claims are about the grid itself, read through `alacritty_history_size`, so they hold
 //! whether or not the build evaluates its assertions.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::{
     num::{NonZeroU32, NonZeroUsize},
     time::{Duration, Instant},
