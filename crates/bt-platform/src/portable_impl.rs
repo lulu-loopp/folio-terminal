@@ -1251,8 +1251,11 @@ pub fn take_keyboard_focus(window: NativeWindow) -> Result<(), String> {
 
 /// Ask the window to close. `performClose:`; M1-3.
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn request_window_close(window: NativeWindow) -> Result<(), String> {
-    let _ = window;
+pub fn request_window_close(
+    window: NativeWindow,
+    road: crate::close_road::OwnCloseRoad,
+) -> Result<(), String> {
+    let _ = (window, road);
     Err(not_here("asking a window to close"))
 }
 
@@ -2181,7 +2184,9 @@ mod refusal_tests {
         assert!(set_window_outer_rect(window(), rect).is_err());
         assert!(get_work_area(window()).is_err());
         assert!(take_keyboard_focus(window()).is_err());
-        assert!(request_window_close(window()).is_err());
+        assert!(
+            request_window_close(window(), crate::close_road::OwnCloseRoad::CaptionButton).is_err()
+        );
         assert!(get_dpi_for_window(window()).is_err());
     }
 

@@ -59,8 +59,12 @@ impl<B: Backend> Runtime<'_, B> {
         take_owned_keyboard_focus(&self.window.window)
     }
 
-    pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
-        request_owned_window_close(&self.window.window)
+    /// Ask this window to close, as Folio's own request by `road` (0.4.10 plan row 103).
+    pub(in crate::runtime) fn request_window_close(
+        &self,
+        road: bt_platform::close_road::OwnCloseRoad,
+    ) -> Result<()> {
+        request_owned_window_close(&self.window.window, road)
     }
 }
 
@@ -158,6 +162,9 @@ impl Runtime<'_, Native> {
         // A second window is a second owner the clipboard may go through — see
         // the first constructor's note.
         bt_platform::register_clipboard_owner(native);
+        // And its closes are kept for it by the close witness — see the first constructor's note
+        // (0.4.10 plan row 103).
+        bt_platform::close_road::watch_closes(native);
         let custom_window_frame = bt_platform::CustomWindowFrame::install(
             native,
             bt_platform::CustomFrameGeometry {
@@ -1839,6 +1846,70 @@ impl<B: Backend> Runtime<'_, B> {
         self.window.window_close_requested.take()
     }
 
+    /// **A close request has reached this window: note which road it came by** (0.4.10 plan row
+    /// 103) — the close witness's record of it, taken once, and where the pointer was, named by
+    /// this window's own chrome. The wait's re-run of a held close
+    /// (`WindowRuntime::close_rerun`) is not a request and keeps the arrival it re-runs;
+    /// every other request replaces whatever was held (R7). Nothing is decided here: the gate and
+    /// the close go on exactly as before (不当保姆).
+    pub(crate) fn note_close_arrival(&mut self) {
+        if std::mem::take(&mut self.window.close_rerun) {
+            return;
+        }
+        let arrival = self.window.window.take_close_arrival();
+        let pointer = match arrival.map(|arrival| arrival.pointer) {
+            None | Some(bt_platform::close_road::ClosePointer::Unread) => {
+                crate::exit_diagnostics::PointerAtClose::Unread
+            }
+            Some(bt_platform::close_road::ClosePointer::Outside) => {
+                crate::exit_diagnostics::PointerAtClose::Outside
+            }
+            Some(bt_platform::close_road::ClosePointer::OnCloseButton) => {
+                crate::exit_diagnostics::PointerAtClose::CloseButton
+            }
+            Some(bt_platform::close_road::ClosePointer::InWindow { x, y }) => {
+                match self.chrome_target_at(winit::dpi::PhysicalPosition::new(
+                    f64::from(x),
+                    f64::from(y),
+                )) {
+                    Some(seats::ChromeTarget::CloseWindow) => {
+                        crate::exit_diagnostics::PointerAtClose::CloseButton
+                    }
+                    Some(_) => crate::exit_diagnostics::PointerAtClose::Chrome,
+                    None => crate::exit_diagnostics::PointerAtClose::Window,
+                }
+            }
+        };
+        self.window.close_asked = Some(crate::exit_diagnostics::CloseAsked { arrival, pointer });
+    }
+
+    /// **What this window is as it closes** (0.4.10 plan row 103): ordinary or the summoned
+    /// terminal (`summon`), its id, how many tabs and panes it holds, and the ordinary windows
+    /// left when the run goes on.
+    pub(crate) fn closed_facts(
+        &self,
+        summon: Option<WindowId>,
+        windows_left: Option<usize>,
+    ) -> crate::exit_diagnostics::ClosedFacts {
+        let id = self.window.window.id();
+        crate::exit_diagnostics::ClosedFacts {
+            window: if summon == Some(id) {
+                crate::exit_diagnostics::ClosedWindow::Summon
+            } else {
+                crate::exit_diagnostics::ClosedWindow::Ordinary
+            },
+            id: u64::from(id),
+            tabs: self.window.tabs.len(),
+            panes: self
+                .window
+                .tabs
+                .iter()
+                .map(|tab| tab.seats.pane_count())
+                .sum(),
+            windows_left,
+        }
+    }
+
     /// **What this window would lose if the process left now**, by name.
     ///
     /// One window's contribution to the summary card's one list. Two classes,
@@ -3003,8 +3074,11 @@ fn take_owned_keyboard_focus(window: &impl WindowHost) -> Result<()> {
     }
 }
 
-fn request_owned_window_close(window: &impl WindowHost) -> Result<()> {
-    window.request_close().map_err(|error| anyhow!(error))
+fn request_owned_window_close(
+    window: &impl WindowHost,
+    road: bt_platform::close_road::OwnCloseRoad,
+) -> Result<()> {
+    window.request_close(road).map_err(|error| anyhow!(error))
 }
 
 /// The `(bounds, maximized)` pair a snapshot should record.

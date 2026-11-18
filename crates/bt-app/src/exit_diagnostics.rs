@@ -1,7 +1,10 @@
-//! Diagnostics for a pane's shell ending and for the run's last window closing.
+//! Diagnostics for a pane's shell ending, for a window closing and for the run's last window
+//! closing.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use bt_platform::close_road::{CloseArrival, CloseRoad, OwnCloseRoad};
 
 /// The most error text a last-window diagnostic retains, including its trailing ellipsis.
 const MAX_CONTROLLED_FAILURE_CHARS: usize = 240;
@@ -174,11 +177,10 @@ pub(crate) fn say_shell_exits<'a>(
     }
 }
 
-/// Why the run's last ordinary window closed.
+/// Why the run's last ordinary window closed, on the roads that are not a window's own close
+/// (that one says itself: [`say_window_closed`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LastWindowCause<'a> {
-    EveryPaneShellExited,
-    PersonClosedIt,
     Quit,
     LaunchWireQuit,
     UpdateRestart,
@@ -287,21 +289,8 @@ fn controlled_failure_text(text: &str) -> String {
     cap_controlled_failure(&reduce_absolute_paths(&one_line(text)))
 }
 
-/// Spend the one-shot cause attached to a native close request.
-pub(crate) fn take_last_window_cause(
-    shell_exit_close_requested: &mut bool,
-) -> LastWindowCause<'static> {
-    if std::mem::take(shell_exit_close_requested) {
-        LastWindowCause::EveryPaneShellExited
-    } else {
-        LastWindowCause::PersonClosedIt
-    }
-}
-
 fn last_window_closed_line(cause: LastWindowCause<'_>) -> String {
     let why = match cause {
-        LastWindowCause::EveryPaneShellExited => "every pane's shell exited".to_owned(),
-        LastWindowCause::PersonClosedIt => "the person closed it".to_owned(),
         LastWindowCause::Quit => "quit".to_owned(),
         LastWindowCause::LaunchWireQuit => "launch wire quit".to_owned(),
         LastWindowCause::UpdateRestart => "update restart".to_owned(),
@@ -319,8 +308,148 @@ pub(crate) fn say_last_window_closed(cause: LastWindowCause<'_>, mut note: impl 
     note(&last_window_closed_line(cause));
 }
 
+/// **How a window's close was asked for** (0.4.10 plan row 103): what the platform saw of the
+/// request, and where the pointer was, named by the window's own chrome. Taken when the request
+/// arrives (`Runtime::note_close_arrival`) and kept through the close's re-runs — a gate's answer,
+/// a wait, the summoned terminal's answer — until the close is performed; every new request
+/// replaces it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CloseAsked {
+    /// `None` when nothing was witnessed: an unmarked close request.
+    pub(crate) arrival: Option<CloseArrival>,
+    pub(crate) pointer: PointerAtClose,
+}
+
+/// **Where the pointer was when the close arrived**, in the window's own words.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PointerAtClose {
+    /// Over the window's close button: Folio's caption `×`, or AppKit's on macOS.
+    CloseButton,
+    /// Over another part of the window's chrome (the caption, the tabs, the rail).
+    Chrome,
+    /// Over the window, off its chrome.
+    Window,
+    /// Not over this window.
+    Outside,
+    /// Not read.
+    Unread,
+}
+
+impl PointerAtClose {
+    const fn pointer_word(self) -> &'static str {
+        match self {
+            Self::CloseButton => "close-button",
+            Self::Chrome => "chrome",
+            Self::Window => "window",
+            Self::Outside => "outside",
+            Self::Unread => "unread",
+        }
+    }
+}
+
+/// **How a window came to close.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClosedHow {
+    /// A close request reached it.
+    Asked(CloseAsked),
+    /// Its last tab moved to another window, so nothing is left in it.
+    TabMovedOut,
+}
+
+/// Which kind of window closed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClosedWindow {
+    Ordinary,
+    /// The summoned terminal.
+    Summon,
+}
+
+/// **What the window was when it closed**: its kind and id, what it held, and — when the run goes
+/// on — how many ordinary windows are left.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ClosedFacts {
+    pub(crate) window: ClosedWindow,
+    pub(crate) id: u64,
+    pub(crate) tabs: usize,
+    pub(crate) panes: usize,
+    /// `None` when this close ends the run.
+    pub(crate) windows_left: Option<usize>,
+}
+
+/// The cause's words: the person only for Folio's own caption and final-tab roads (R3).
+const fn closed_cause(how: ClosedHow) -> &'static str {
+    match how {
+        ClosedHow::TabMovedOut => "the last tab moved to another window",
+        ClosedHow::Asked(CloseAsked { arrival: None, .. }) => "an unmarked close request",
+        ClosedHow::Asked(CloseAsked {
+            arrival: Some(arrival),
+            ..
+        }) => match arrival.road {
+            CloseRoad::Own(OwnCloseRoad::CaptionButton | OwnCloseRoad::FinalTab) => {
+                "the person closed it"
+            }
+            CloseRoad::Own(OwnCloseRoad::ShellsExited) => "every pane's shell exited",
+            CloseRoad::SystemClose(_) | CloseRoad::CloseButton | CloseRoad::Menu(_) => {
+                "the system's close command"
+            }
+            CloseRoad::CloseMessage | CloseRoad::Outside => "a close message",
+        },
+    }
+}
+
+/// **The one line a window's close writes** (0.4.10 plan row 103): `Folio: last window closed —`
+/// when it ends the run, `Folio: window closed —` with the windows left when it does not. Enum
+/// words and counts only, on one physical line.
+pub(crate) fn window_closed_line(how: ClosedHow, facts: ClosedFacts) -> String {
+    let (road, delivery, foreground, pointer) = match how {
+        ClosedHow::TabMovedOut => ("tab-moved-out", "unread", "unread", "unread"),
+        ClosedHow::Asked(asked) => (
+            asked
+                .arrival
+                .map_or("unmarked", |arrival| arrival.road.road_word()),
+            asked
+                .arrival
+                .and_then(|arrival| arrival.delivery)
+                .map_or("unread", |delivery| delivery.delivery_word()),
+            match asked.arrival.and_then(|arrival| arrival.foreground) {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "unread",
+            },
+            asked.pointer.pointer_word(),
+        ),
+    };
+    let window = match facts.window {
+        ClosedWindow::Ordinary => "ordinary",
+        ClosedWindow::Summon => "summon",
+    };
+    let head = if facts.windows_left.is_some() {
+        "Folio: window closed"
+    } else {
+        "Folio: last window closed"
+    };
+    let cause = closed_cause(how);
+    let (id, tabs, panes) = (facts.id, facts.tabs, facts.panes);
+    let mut line = format!(
+        "{head} — {cause}; window={window} {id}; road={road}; delivery={delivery}; \
+         foreground={foreground}; pointer={pointer}; tabs={tabs}; panes={panes}"
+    );
+    if let Some(left) = facts.windows_left {
+        line.push_str("; windows left=");
+        line.push_str(&left.to_string());
+    }
+    line
+}
+
+/// Say a window's one close line through the road the window says its lines on.
+pub(crate) fn say_window_closed(how: ClosedHow, facts: ClosedFacts, mut note: impl FnMut(&str)) {
+    note(&window_closed_line(how, facts));
+}
+
 #[cfg(test)]
 mod tests {
+    use bt_platform::close_road::{CloseDelivery, ClosePointer, MenuFrom, SystemCloseFrom};
+
     use super::*;
 
     fn lines_for(exits: &[ShellExit]) -> Vec<String> {
@@ -476,12 +605,142 @@ mod tests {
         );
     }
 
-    /// MUTATION (observed RED): map `EveryPaneShellExited` to `the person closed it`.
+    fn close_asked_by(road: Option<CloseRoad>) -> ClosedHow {
+        ClosedHow::Asked(CloseAsked {
+            arrival: road.map(|road| CloseArrival {
+                road,
+                delivery: Some(CloseDelivery::Posted),
+                foreground: Some(true),
+                pointer: ClosePointer::Unread,
+            }),
+            pointer: PointerAtClose::CloseButton,
+        })
+    }
+
+    const LAST: ClosedFacts = ClosedFacts {
+        window: ClosedWindow::Ordinary,
+        id: 7,
+        tabs: 9,
+        panes: 11,
+        windows_left: None,
+    };
+
+    /// MUTATION (observed RED): map `ShellsExited` to `the person closed it`.
     #[test]
     fn the_last_window_after_every_shell_exited_says_that_cause() {
         assert_eq!(
-            last_window_line(LastWindowCause::EveryPaneShellExited),
-            "Folio: last window closed — every pane's shell exited"
+            window_closed_line(
+                close_asked_by(Some(CloseRoad::Own(OwnCloseRoad::ShellsExited))),
+                ClosedFacts {
+                    tabs: 1,
+                    panes: 1,
+                    ..LAST
+                }
+            ),
+            "Folio: last window closed — every pane's shell exited; window=ordinary 7; \
+             road=shell-exit; delivery=posted; foreground=yes; pointer=close-button; tabs=1; panes=1"
+        );
+    }
+
+    /// RED (mutation: `closed_cause` answering `the person closed it` for every road) — **each
+    /// road of a window's close has its ruled words (R3)**, and only Folio's own caption and
+    /// final-tab roads say the person closed it.
+    #[test]
+    fn every_close_road_has_its_ruled_words_on_one_line() {
+        for (how, cause, road) in [
+            (
+                close_asked_by(Some(CloseRoad::Own(OwnCloseRoad::CaptionButton))),
+                "the person closed it",
+                "caption-button",
+            ),
+            (
+                close_asked_by(Some(CloseRoad::Own(OwnCloseRoad::FinalTab))),
+                "the person closed it",
+                "final-tab",
+            ),
+            (
+                close_asked_by(Some(CloseRoad::SystemClose(SystemCloseFrom::Accelerator))),
+                "the system's close command",
+                "system-close (accelerator)",
+            ),
+            (
+                close_asked_by(Some(CloseRoad::SystemClose(SystemCloseFrom::Mnemonic))),
+                "the system's close command",
+                "system-close (mnemonic)",
+            ),
+            (
+                close_asked_by(Some(CloseRoad::SystemClose(SystemCloseFrom::Pointer))),
+                "the system's close command",
+                "system-close (pointer)",
+            ),
+            (
+                close_asked_by(Some(CloseRoad::CloseMessage)),
+                "a close message",
+                "close-message",
+            ),
+            (
+                close_asked_by(Some(CloseRoad::CloseButton)),
+                "the system's close command",
+                "close-button",
+            ),
+            (
+                close_asked_by(Some(CloseRoad::Menu(MenuFrom::Key))),
+                "the system's close command",
+                "menu (key)",
+            ),
+            (
+                close_asked_by(Some(CloseRoad::Menu(MenuFrom::Pointer))),
+                "the system's close command",
+                "menu (pointer)",
+            ),
+            (
+                close_asked_by(Some(CloseRoad::Outside)),
+                "a close message",
+                "outside",
+            ),
+            (
+                close_asked_by(None),
+                "an unmarked close request",
+                "unmarked",
+            ),
+            (
+                ClosedHow::TabMovedOut,
+                "the last tab moved to another window",
+                "tab-moved-out",
+            ),
+        ] {
+            let line = window_closed_line(how, LAST);
+            assert!(
+                line.starts_with(&format!(
+                    "Folio: last window closed — {cause}; window=ordinary 7; road={road}; "
+                )),
+                "{line}"
+            );
+            assert!(line.ends_with("; tabs=9; panes=11"), "{line}");
+            assert!(!line.contains(['\r', '\n']), "{line:?}");
+        }
+    }
+
+    /// RED (mutation: the `windows left` tail dropped) — **a close that does not end the run says
+    /// so, and how many ordinary windows are left (R4)**; an unwitnessed request reads its three
+    /// unknowns as such.
+    #[test]
+    fn a_close_that_does_not_end_the_run_says_the_windows_left() {
+        let line = window_closed_line(
+            ClosedHow::Asked(CloseAsked {
+                arrival: None,
+                pointer: PointerAtClose::Unread,
+            }),
+            ClosedFacts {
+                window: ClosedWindow::Summon,
+                windows_left: Some(1),
+                ..LAST
+            },
+        );
+        assert_eq!(
+            line,
+            "Folio: window closed — an unmarked close request; window=summon 7; road=unmarked; \
+             delivery=unread; foreground=unread; pointer=unread; tabs=9; panes=11; windows left=1"
         );
     }
 
@@ -535,22 +794,6 @@ mod tests {
         assert!(!line.contains(['\r', '\n']), "{line:?}");
     }
 
-    /// MUTATION (observed RED): leave the shell-exit close latch raised when taking its cause.
-    #[test]
-    fn a_summon_refused_close_spends_its_cause_before_a_later_person_close() {
-        let mut shell_exit_close_requested = true;
-        assert_eq!(
-            take_last_window_cause(&mut shell_exit_close_requested),
-            LastWindowCause::EveryPaneShellExited,
-            "the refused attempt owns the shell-exit cause"
-        );
-        assert_eq!(
-            take_last_window_cause(&mut shell_exit_close_requested),
-            LastWindowCause::PersonClosedIt,
-            "a later hand-close is not assigned the refused attempt's cause"
-        );
-    }
-
     /// MUTATION (observed RED): keep the flattened error without reducing its absolute paths.
     #[test]
     fn a_controlled_failure_reduces_every_absolute_path_and_caps_its_error() {
@@ -574,7 +817,6 @@ mod tests {
     #[test]
     fn every_run_end_cause_has_the_ruled_words_and_stays_on_one_line() {
         for (cause, words) in [
-            (LastWindowCause::PersonClosedIt, "the person closed it"),
             (LastWindowCause::LaunchWireQuit, "launch wire quit"),
             (LastWindowCause::UpdateRestart, "update restart"),
             (LastWindowCause::SystemClosedIt, "the system closed it"),

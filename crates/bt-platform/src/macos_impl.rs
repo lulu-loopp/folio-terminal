@@ -808,9 +808,18 @@ pub fn take_keyboard_focus(window: NativeWindow) -> Result<(), String> {
 /// what `performClose:` itself does minus the beep, and it reaches the same
 /// `CloseRequested`. A window with no delegate at all is a window winit is not
 /// driving, and there is nothing honest to do with it.
-pub fn request_window_close(window: NativeWindow) -> Result<(), String> {
+///
+/// **Folio's road is marked before the question is put** (0.4.10 plan row 103):
+/// winit queues the `CloseRequested` inside this call, so the mark
+/// (`close_road::mark_own_close`) is the one that event's taking reads, and no
+/// other close can come between.
+pub fn request_window_close(
+    window: NativeWindow,
+    road: crate::close_road::OwnCloseRoad,
+) -> Result<(), String> {
     let what = "asking a window to close";
     let (_, ns_window) = window_for(window, what)?;
+    crate::close_road::mark_own_close(window, road);
     if ns_window.styleMask().contains(NSWindowStyleMask::Closable) {
         ns_window.performClose(None);
         return Ok(());
@@ -825,6 +834,87 @@ pub fn request_window_close(window: NativeWindow) -> Result<(), String> {
     // selector first; answered, it is the one `performClose:` would have sent.
     let _ = delegate.windowShouldClose(&ns_window);
     Ok(())
+}
+
+/// **What the moment says about the close request `window` has just received**
+/// (0.4.10 plan row 103), read when its `CloseRequested` is taken: Folio's own
+/// road when `own` is its mark, else the road `NSApp.currentEvent` says — a
+/// mouse event in this window over its close button is the button, a mouse
+/// event in another window (a menu's) is the menu by the pointer, a key is the
+/// menu by its key, and anything else came from outside (an accessibility press,
+/// a script). Whether the window was in front, and where the pointer is, either
+/// way. `None` off the window thread or for a view in no window.
+pub(crate) fn close_context(
+    window: NativeWindow,
+    own: Option<crate::close_road::OwnCloseRoad>,
+) -> Option<crate::close_road::CloseArrival> {
+    use crate::close_road::{CloseArrival, ClosePointer, CloseRoad, MenuFrom};
+    let (mtm, ns_window) = window_for(window, "reading a close request").ok()?;
+    let application = NSApplication::sharedApplication(mtm);
+    let foreground = application.isActive() && ns_window.isKeyWindow();
+    let in_window = ns_window.convertPointFromScreen(NSEvent::mouseLocation());
+    let on_close_button = ns_window
+        .standardWindowButton(NSWindowButton::CloseButton)
+        .is_some_and(|button| {
+            let local = button.convertPoint_fromView(in_window, None);
+            let bounds = button.bounds();
+            local.x >= bounds.origin.x
+                && local.x <= bounds.origin.x + bounds.size.width
+                && local.y >= bounds.origin.y
+                && local.y <= bounds.origin.y + bounds.size.height
+        });
+    let pointer = if on_close_button {
+        ClosePointer::OnCloseButton
+    } else {
+        // SAFETY: `window_of`'s contract exactly — the handle is winit's live
+        // `ns_view` pointer and this is the window's own thread.
+        let view: &NSView = unsafe { window.as_ns_view().as_ref() };
+        let in_view = view.convertPoint_fromView(in_window, None);
+        let bounds = view.bounds();
+        let inside = in_view.x >= 0.0
+            && in_view.y >= 0.0
+            && in_view.x <= bounds.size.width
+            && in_view.y <= bounds.size.height;
+        if inside {
+            let from_top = if view.isFlipped() {
+                in_view.y
+            } else {
+                bounds.size.height - in_view.y
+            };
+            let scale = ns_window.backingScaleFactor();
+            ClosePointer::InWindow {
+                x: (in_view.x * scale).round() as i32,
+                y: (from_top * scale).round() as i32,
+            }
+        } else {
+            ClosePointer::Outside
+        }
+    };
+    let road = match own {
+        Some(own) => CloseRoad::Own(own),
+        None => match application.currentEvent() {
+            Some(event) => {
+                let kind = event.r#type();
+                let mouse = kind == NSEventType::LeftMouseDown || kind == NSEventType::LeftMouseUp;
+                if mouse && event.windowNumber() == ns_window.windowNumber() && on_close_button {
+                    CloseRoad::CloseButton
+                } else if mouse && event.windowNumber() != ns_window.windowNumber() {
+                    CloseRoad::Menu(MenuFrom::Pointer)
+                } else if kind == NSEventType::KeyDown {
+                    CloseRoad::Menu(MenuFrom::Key)
+                } else {
+                    CloseRoad::Outside
+                }
+            }
+            None => CloseRoad::Outside,
+        },
+    };
+    Some(CloseArrival {
+        road,
+        delivery: None,
+        foreground: Some(foreground),
+        pointer,
+    })
 }
 
 /// Keep this window above the others. `NSWindow.level`.
@@ -2717,7 +2807,10 @@ mod tests {
         assert!(get_work_area(window).is_err(), "the work area");
         assert!(work_area_at(0, 0).is_err(), "the work area at a point");
         assert!(get_dpi_for_window(window).is_err(), "the backing scale");
-        assert!(request_window_close(window).is_err(), "asking it to close");
+        assert!(
+            request_window_close(window, crate::close_road::OwnCloseRoad::CaptionButton).is_err(),
+            "asking it to close"
+        );
         assert!(take_keyboard_focus(window).is_err(), "the keyboard");
         assert!(set_window_topmost(window, true).is_err(), "the level");
         assert!(

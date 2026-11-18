@@ -91,8 +91,10 @@ pub(crate) enum WindowEffect {
     ForegroundTaken,
     /// The keyboard focus taken back from a child (`WindowHost::take_keyboard_focus`).
     KeyboardFocusTaken,
-    /// The window asked to close (`WindowHost::request_close`).
-    CloseRequested,
+    /// The window asked to close, as Folio's own request by this road (`WindowHost::request_close`).
+    CloseRequested(bt_platform::close_road::OwnCloseRoad),
+    /// The close witness told the window has gone (`WindowHost::unwatch_closes`).
+    ClosesUnwatched,
     /// The taskbar button flashed (`WindowHost::flash`).
     Flashed,
     /// The taskbar button's flash stopped (`WindowHost::stop_flashing`).
@@ -351,6 +353,10 @@ pub(crate) struct HeadlessWindow {
     /// What the window's questions to the system answer: [`PlatformAnswers::default`] until a
     /// test scripts them.
     pub(crate) answers: Cell<PlatformAnswers>,
+    /// **What the close witness has seen reach this window and nobody has taken** (0.4.10 plan
+    /// row 103), oldest first: Folio's own request pushes its arrival, as the platform's hooks
+    /// would when its `WM_CLOSE` arrived; a test pushes another program's.
+    pub(crate) closes: RefCell<VecDeque<bt_platform::close_road::CloseArrival>>,
 }
 
 /// **What a headless window's questions to the system answer** — the documented stand-ins, one
@@ -557,9 +563,23 @@ impl WindowHost for HeadlessWindow {
         self.ledger.record(WindowEffect::KeyboardFocusTaken);
         Ok(())
     }
-    fn request_close(&self) -> Result<(), String> {
-        self.ledger.record(WindowEffect::CloseRequested);
+    fn request_close(&self, road: bt_platform::close_road::OwnCloseRoad) -> Result<(), String> {
+        self.ledger.record(WindowEffect::CloseRequested(road));
+        self.closes
+            .borrow_mut()
+            .push_back(bt_platform::close_road::CloseArrival {
+                road: bt_platform::close_road::CloseRoad::Own(road),
+                delivery: Some(bt_platform::close_road::CloseDelivery::Posted),
+                foreground: Some(self.focused),
+                pointer: bt_platform::close_road::ClosePointer::Unread,
+            });
         Ok(())
+    }
+    fn take_close_arrival(&self) -> Option<bt_platform::close_road::CloseArrival> {
+        self.closes.borrow_mut().pop_front()
+    }
+    fn unwatch_closes(&self) {
+        self.ledger.record(WindowEffect::ClosesUnwatched);
     }
     fn flash(&self) {
         self.ledger.record(WindowEffect::Flashed);
@@ -1650,6 +1670,7 @@ impl HeadlessParts {
                 clipboard: HeadlessClipboard::default(),
                 ime_facts: Cell::new(NativeFacts::default()),
                 answers: Cell::new(PlatformAnswers::default()),
+                closes: RefCell::new(VecDeque::new()),
             },
             glass: HeadlessGlass::new(device, ledger.clone(), size, scale),
             compositor: HeadlessCompositor {
@@ -2351,7 +2372,18 @@ mod tests {
             .expect("recorded");
         assert!(window.take_foreground(), "the system lets it");
         window.take_keyboard_focus().expect("recorded");
-        window.request_close().expect("recorded");
+        window
+            .request_close(bt_platform::close_road::OwnCloseRoad::FinalTab)
+            .expect("recorded");
+        assert_eq!(
+            window.take_close_arrival().map(|arrival| arrival.road),
+            Some(bt_platform::close_road::CloseRoad::Own(
+                bt_platform::close_road::OwnCloseRoad::FinalTab
+            )),
+            "Folio's own request arrives as its own road, once"
+        );
+        assert_eq!(window.take_close_arrival(), None);
+        window.unwatch_closes();
         window.flash();
         window.stop_flashing();
         window
@@ -2528,7 +2560,8 @@ mod tests {
                 WindowEffect::ClassBackground(Some([1, 2, 3])),
                 WindowEffect::ForegroundTaken,
                 WindowEffect::KeyboardFocusTaken,
-                WindowEffect::CloseRequested,
+                WindowEffect::CloseRequested(bt_platform::close_road::OwnCloseRoad::FinalTab),
+                WindowEffect::ClosesUnwatched,
                 WindowEffect::Flashed,
                 WindowEffect::FlashStopped,
                 WindowEffect::TaskbarProgress(bt_platform::TaskbarProgress::CLEARED),

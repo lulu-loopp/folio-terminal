@@ -12047,11 +12047,16 @@ struct WindowRuntime<B: Backend = Native> {
     /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
     /// The loop takes it through [`Runtime::take_close_request`].
     window_close_requested: Option<WindowId>,
-    /// The final tab asked the native close because its last shell exited.
-    ///
-    /// Kept until the close event comes back through `FolioApp::close`; without it that event is
-    /// indistinguishable from the window's close button.
-    shell_exit_close_requested: bool,
+    /// **How this window's close was asked for** (0.4.10 plan row 103): what the close witness
+    /// saw of the request and where the pointer was, taken when the request arrived
+    /// ([`Runtime::note_close_arrival`]). Kept through the close's re-runs — the gate's answer,
+    /// its wait, the summoned terminal's answer — and spent by [`FolioApp::close`] when the close
+    /// is performed, on the window's one close line; every new request replaces it.
+    close_asked: Option<exit_diagnostics::CloseAsked>,
+    /// **The next `CloseRequested` is the wait's re-run of a held close**, not a request
+    /// (`FolioApp::settle_close_waits`): it keeps [`Self::close_asked`] rather than taking a new
+    /// arrival. Spent by that event.
+    close_rerun: bool,
     /// Which preview pane has its filename switcher up (P130-P137).
     ///
     /// `RootMenu`'s twin down to the seat living inside it, which is the whole
@@ -35350,7 +35355,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
         window_close_requested: None,
-        shell_exit_close_requested: false,
+        close_asked: None,
+        close_rerun: false,
         preview_menu: profiles::PreviewMenu::default(),
         preview_head_measures: BTreeMap::new(),
         preview_rail_measures: BTreeMap::new(),
@@ -36096,6 +36102,11 @@ impl Runtime<'_, Native> {
                     // `bt_platform::clipboard_text`, `set_clipboard_text` and
                     // `cancel_composition` ask it rather than their callers.
                     bt_platform::register_clipboard_owner(native);
+                    // **And the close witness keeps this window's closes for it** (0.4.10
+                    // plan row 103): every close the thread's hooks see reach it is kept for
+                    // its `CloseRequested`, and one that reaches a window that is not Folio's
+                    // is said at once.
+                    bt_platform::close_road::watch_closes(native);
                     // The frame's own measurement travels with the install, from the crate
                     // that paints it (spike Q5 item 2): the title bar the pointer is tested
                     // against and the title bar the renderer draws are literally the same
@@ -47415,9 +47426,19 @@ impl<B: Backend> FolioApp<B> {
             // not before. An emptied window has no pages left to wait for, so the
             // very next turn reaps it; the point is that there is one road out.
             let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
+            let windows_left = self.windows_left_after(from);
+            let summon = self.app.as_ref().and_then(|app| app.quake.window());
             if let Some(mut runtime) = self.runtime(from) {
+                // **Its close line** (0.4.10 plan row 103, R4): the window goes with nothing
+                // left in it, and says so.
+                let facts = runtime.closed_facts(summon, Some(windows_left));
                 runtime.close_window(false)?;
                 runtime.window.leaving = Some(leaving_at);
+                exit_diagnostics::say_window_closed(
+                    exit_diagnostics::ClosedHow::TabMovedOut,
+                    facts,
+                    |line| runtime.window.window.note(line),
+                );
             }
         }
         Ok(TransferOutcome::Moved(TabTransfer {
@@ -47906,23 +47927,28 @@ impl<B: Backend> FolioApp<B> {
         // its shut too, and an unsaved buffer in it is asked about in it before
         // anything is told. Asked, this window stays open: the summoned terminal
         // never stands alone.
-        // The close request's cause is one-shot even when that question refuses this attempt:
-        // a later hand-close must describe the later request, not this one.
-        let last_window_cause = if ending {
-            let Some(runtime) = self.runtime(id) else {
-                return Ok(());
-            };
-            exit_diagnostics::take_last_window_cause(&mut runtime.window.shell_exit_close_requested)
-        } else {
-            exit_diagnostics::LastWindowCause::PersonClosedIt
-        };
+        //
+        // **The request's arrival stays with the window while that question is up** (0.4.10
+        // plan row 103, R7): the summoned terminal's answer re-runs this same close, which is
+        // still the request that arrived, and a new request replaces it when it arrives.
         if ending && !self.the_summon_lets_the_run_end(id)? {
             return Ok(());
         }
+        let windows_left = (!ending).then(|| self.windows_left_after(id));
+        let summon = self.app.as_ref().and_then(|app| app.quake.window());
         let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
+        // **The window's one close line** (0.4.10 plan row 103): which window, by which road,
+        // and what it held — read before it is taken apart.
+        let how = exit_diagnostics::ClosedHow::Asked(runtime.window.close_asked.take().unwrap_or(
+            exit_diagnostics::CloseAsked {
+                arrival: None,
+                pointer: exit_diagnostics::PointerAtClose::Unread,
+            },
+        ));
+        let facts = runtime.closed_facts(summon, windows_left);
         let closed = runtime.close_window(ending);
         // Set whatever the teardown answered: a child that refused to die is
         // said out loud by the caller and changes nothing about this window
@@ -47959,7 +47985,11 @@ impl<B: Backend> FolioApp<B> {
             if let Some(app) = self.app.as_mut() {
                 app.finish();
             }
-            exit_diagnostics::say_last_window_closed(last_window_cause, diagnostics::note);
+        }
+        if let Some(runtime) = self.runtime(id) {
+            exit_diagnostics::say_window_closed(how, facts, |line| {
+                runtime.window.window.note(line)
+            });
         }
         closed
     }
@@ -48143,7 +48173,10 @@ impl<B: Backend> FolioApp<B> {
             done.pop();
         }
         for id in done {
-            self.windows.remove(id);
+            // The window has gone, so the close witness forgets it (0.4.10 plan row 103).
+            if let Some(gone) = self.windows.remove(id) {
+                gone.window.unwatch_closes();
+            }
             // **The claim on the chord is deliberately kept** (§7.54). A reader
             // who closed the summoned terminal said "not this one", not "stop
             // answering the key": the next press opens a new one, which is the
@@ -49624,6 +49657,9 @@ impl<B: Backend> FolioApp<B> {
             }
             let after = runtime.settle_close_wait(now)?;
             let requested = runtime.take_close_request();
+            // **The wait's re-run is not a request** (0.4.10 plan row 103, R7): the event below
+            // keeps the arrival of the close it re-runs.
+            runtime.window.close_rerun = after == runtime::AfterTheWait::Shut;
             match after {
                 runtime::AfterTheWait::Nothing => {}
                 runtime::AfterTheWait::Shut => {
@@ -51966,14 +52002,26 @@ impl<B: Backend> FolioApp<B> {
                 //
                 // **Only while it is on the screen.** A `WM_CLOSE` delivered to the
                 // hidden summon is not a reader pressing its `×` — there is no `×` to
-                // press — it is the run ending, and it closes exactly as it did.
+                // press — so it is a close like any other window's: the summoned
+                // terminal goes alone, the run goes on with the ordinary windows, and the
+                // next chord opens a new one (0.4.10 plan row 103 corrected "it is the run
+                // ending": the run's end retires the summon directly, never by `WM_CLOSE`).
                 WindowEvent::CloseRequested
                     if runtime.is_quake_window() && runtime.app.quake.is_showing() =>
                 {
+                    // The witness's record of this request is spent: a hide is not a close
+                    // (0.4.10 plan row 103). A wait's re-run brought no record of its own.
+                    if !std::mem::take(&mut runtime.window.close_rerun) {
+                        let _ = runtime.window.window.take_close_arrival();
+                    }
                     runtime.app.quake.press();
                     Ok(())
                 }
                 WindowEvent::CloseRequested => {
+                    // **Which road this request came by, taken as it arrives** (0.4.10 plan row
+                    // 103): kept on the window until the close is performed, whatever the gate
+                    // below decides.
+                    runtime.note_close_arrival();
                     // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
                     // — plans carry paths, never content — so shutting asks, the same
                     // honesty as closing a tab."
@@ -56033,9 +56081,10 @@ mod floated_page_tests {
     /// MUTATIONS: call `hide_quake_window` or `dismiss_quake` from the close arm and the first
     /// assertion goes red naming the second road. Raise the dirty gate on it and a hide starts
     /// asking about buffers that are not going anywhere. Drop the `is_showing` guard and a
-    /// `WM_CLOSE` delivered to the hidden summon — which is how a run ends, and how
-    /// `scripts/release/smoke.ps1` gate 6 ends one — *summons* it instead of closing it. Give the
-    /// summoned window back its minimise or maximise button and the last assertion names it.
+    /// `WM_CLOSE` delivered to the hidden summon — another program's close, which closes the
+    /// summoned terminal alone while the run goes on (0.4.10 plan row 103: the run's end retires
+    /// it directly, never by `WM_CLOSE`) — *summons* it instead of closing it. Give the summoned
+    /// window back its minimise or maximise button and the last assertion names it.
     #[test]
     fn the_summoned_terminals_close_button_is_the_chords_own_bit() {
         // This arm is a *part* of a body, so what it is cut out of is the body —
@@ -56057,7 +56106,7 @@ mod floated_page_tests {
         assert!(
             arm.contains("runtime.is_quake_window() && runtime.app.quake.is_showing()"),
             "a WM_CLOSE delivered to the hidden summoned terminal is being read as a press on a \
-             × nobody can see, so the run cannot end:\n{arm}"
+             × nobody can see, so it summons the window instead of closing it:\n{arm}"
         );
         assert!(
             !arm.contains("hide_quake_window") && !arm.contains("dismiss_quake"),

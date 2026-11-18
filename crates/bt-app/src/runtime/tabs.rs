@@ -435,7 +435,20 @@ impl<B: Backend> Runtime<'_, B> {
         })
     }
 
+    /// Close the tab at `index` by a verb: the window's only tab asks the window's close as
+    /// [`OwnCloseRoad::FinalTab`](bt_platform::close_road::OwnCloseRoad::FinalTab).
     pub(in crate::runtime) fn close_tab(&mut self, index: usize) -> Result<()> {
+        self.close_tab_by(index, bt_platform::close_road::OwnCloseRoad::FinalTab)
+    }
+
+    /// Close the tab at `index`; when it is the window's only tab, the window's close is asked as
+    /// Folio's own request by `road`, which rides in the message (0.4.10 plan row 103) — the
+    /// shells' exit asks as [`OwnCloseRoad::ShellsExited`](bt_platform::close_road::OwnCloseRoad).
+    pub(in crate::runtime) fn close_tab_by(
+        &mut self,
+        index: usize,
+        road: bt_platform::close_road::OwnCloseRoad,
+    ) -> Result<()> {
         if index >= self.window.tabs.len() {
             return Ok(());
         }
@@ -479,7 +492,7 @@ impl<B: Backend> Runtime<'_, B> {
         self.end_capture(OwnerGone(Gone::Tab(closing)));
         match tab_close_action(self.window.tabs.len(), self.window.active_tab, index) {
             TabCloseAction::CloseWindow => {
-                self.request_window_close()
+                self.request_window_close(road)
                     .context("request close after the final tab")?;
             }
             TabCloseAction::Keep { active_tab } => {
@@ -3884,12 +3897,13 @@ impl<B: Backend> Runtime<'_, B> {
             }
         }
         for index in exited.into_iter().rev() {
-            let final_tab = self.window.tabs.len() == 1 && index == 0;
-            self.close_tab(index)?;
-            if final_tab {
-                self.window.shell_exit_close_requested = true;
+            // **The window's only tab asks the window's close as the shells' exit**, a road the
+            // message itself carries (0.4.10 plan row 103), so the close line says why.
+            if self.window.tabs.len() == 1 && index == 0 {
+                self.close_tab_by(index, bt_platform::close_road::OwnCloseRoad::ShellsExited)?;
                 break;
             }
+            self.close_tab(index)?;
         }
         Ok(())
     }

@@ -9223,6 +9223,12 @@ pub mod threads;
 /// them by. Nothing is installed off Windows; see the module's own header.
 pub mod pump;
 
+/// **Which road a window's close came by** (0.4.10 plan row 103): Folio's own requests carry
+/// their road in the `WM_CLOSE` they post, and the window thread's hooks ([`pump`]) witness every
+/// close — its road, how it was delivered, whether the window was in front and where the pointer
+/// was — for the window's `CloseRequested` to take. It reads and says; it refuses nothing.
+pub mod close_road;
+
 /// **The program's icon on the system's message box** (0.4.10 plan row 72,
 /// T-MESSAGE-BOX-WEARS-THE-ICON): the executable's own icon group, loaded at the box's
 /// display's scale and sent to the box as its window's icon by a `WH_CBT` hook this thread holds
@@ -13141,9 +13147,26 @@ mod windows_impl {
         .max(1)
     }
 
-    pub fn request_window_close(window: NativeWindow) -> Result<(), String> {
-        unsafe { PostMessageW(Some(window.as_hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0)) }
-            .map_err(|error| format!("PostMessageW(WM_CLOSE) failed: {error}"))
+    /// Ask the window to close, as Folio's own request by `road`.
+    ///
+    /// **The road rides in the message** (0.4.10 plan row 103): `wParam` is its
+    /// number and `lParam` Folio's tag, two parameters `WM_CLOSE` does not use and
+    /// winit drops, so the close witness (`close_road`) can tell this close from
+    /// any other program's at the moment it reaches the window — a mark kept
+    /// beside the message would be taken by whichever close arrived first.
+    pub fn request_window_close(
+        window: NativeWindow,
+        road: crate::close_road::OwnCloseRoad,
+    ) -> Result<(), String> {
+        unsafe {
+            PostMessageW(
+                Some(window.as_hwnd()),
+                WM_CLOSE,
+                WPARAM(road.mark_code()),
+                LPARAM(crate::close_road::OWN_CLOSE_TAG),
+            )
+        }
+        .map_err(|error| format!("PostMessageW(WM_CLOSE) failed: {error}"))
     }
 
     /// Put the keyboard back on this window itself.
