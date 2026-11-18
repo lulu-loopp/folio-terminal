@@ -1272,7 +1272,6 @@ pub struct TranscriptStore {
     /// every push and pop so the ceiling never has to walk history to ask how big
     /// it is.
     frozen_bytes: usize,
-    tombstones: Vec<TranscriptId>,
     pending_evictions: Vec<TranscriptId>,
 }
 
@@ -1299,7 +1298,6 @@ impl TranscriptStore {
             resize_staging: Vec::new(),
             frozen: VecDeque::new(),
             frozen_bytes: 0,
-            tombstones: Vec::new(),
             pending_evictions: Vec::new(),
         }
     }
@@ -1452,9 +1450,6 @@ impl TranscriptStore {
             .map(|row| self.capture_staged(row))
             .collect()
     }
-    pub fn tombstones(&self) -> &[TranscriptId] {
-        &self.tombstones
-    }
     pub fn source_generation(&self) -> SourceGeneration {
         self.source_generation
     }
@@ -1578,7 +1573,6 @@ impl TranscriptStore {
             if let Some(line) = self.frozen.pop_front() {
                 self.frozen_bytes = self.frozen_bytes.saturating_sub(line.resident_bytes());
                 removed.push(line.id);
-                self.tombstones.push(line.id);
             }
         }
         if !removed.is_empty() {
@@ -1587,7 +1581,8 @@ impl TranscriptStore {
         removed
     }
 
-    /// ED3 and quota eviction intentionally share this tombstoning pipeline.
+    /// ED3 and quota eviction intentionally share this deletion pipeline: the caller runs the
+    /// returned ids through the document's deletion, exactly as it does an eviction's.
     pub fn clear_history(&mut self) -> Vec<TranscriptId> {
         let mut removed = self
             .frozen
@@ -1598,9 +1593,8 @@ impl TranscriptStore {
         self.staging.clear();
         self.staging_rows = 0;
         self.resize_staging.clear();
-        self.tombstones.extend(removed.iter().copied());
         self.source_generation.0 += 1;
-        // Staging IDs are not tombstones. The caller must explicitly relocate their anchors by
+        // Staging IDs are not among the removed. The caller must explicitly relocate their anchors by
         // invoking HistoryDocument::delete_transaction with clear_staging=true; generation only
         // invalidates versioned work and is not an anchor-deletion mechanism.
         removed.shrink_to_fit();
@@ -1639,7 +1633,7 @@ impl TranscriptStore {
     /// same number into the memory it may cost. Whichever arrives first is the one
     /// that binds, and neither is a second eviction mechanism: both count how many
     /// lines have to go and then hand that one number to [`Self::evict_oldest`], so
-    /// the tombstones, the single source-generation bump, and everything
+    /// the removed ids, the single source-generation bump, and everything
     /// `delete_history` retires downstream are character for character what a
     /// line-count overflow has always produced.
     ///
@@ -2373,7 +2367,7 @@ mod tests {
     }
 
     #[test]
-    fn mutable_staging_can_be_rewritten_and_eviction_leaves_tombstone() {
+    fn mutable_staging_can_be_rewritten_and_eviction_names_the_line() {
         let mut store = TranscriptStore::new(nz(8));
         let staged = store.capture(CapturedRow::plain("old", true));
         assert!(store.rewrite_staged(staged.staging_id, CapturedRow::plain("new", true)));
@@ -2385,7 +2379,7 @@ mod tests {
         assert_eq!(finalized.line.text, "old");
         let removed = store.evict_oldest(1);
         assert_eq!(removed, vec![finalized.line.id]);
-        assert_eq!(store.tombstones(), removed);
+        assert!(store.frozen().is_empty(), "the evicted line is no longer held");
     }
 
     #[test]
@@ -2426,7 +2420,6 @@ mod tests {
             vec!["two", "three"]
         );
         assert_eq!(store.take_evictions(), vec![TranscriptId(1)]);
-        assert_eq!(store.tombstones(), &[TranscriptId(1)]);
     }
 
     /// PIN — **a capacity binds the moment it is named**, and lowering one deletes
@@ -2458,7 +2451,6 @@ mod tests {
             vec!["three", "four"],
             "the oldest go, because history is read from its newest end"
         );
-        assert_eq!(store.tombstones(), &[TranscriptId(1), TranscriptId(2)]);
         assert_eq!(store.frozen_quota(), 2);
         assert!(
             store.take_evictions().is_empty(),
@@ -2614,11 +2606,13 @@ mod tests {
         let wide = "x".repeat(WIDTH);
         let mut first = None;
         let mut last = None;
+        let mut evicted = Vec::new();
         for _ in 0..LINE_QUOTA {
             for finalized in store.capture(CapturedRow::plain(&wide, false)).finalized {
                 first.get_or_insert(finalized.line.id);
                 last = Some(finalized.line.id);
             }
+            evicted.extend(store.take_evictions());
         }
         let first = first.expect("the flood froze at least one line");
         let last = last.expect("the flood froze at least one line");
@@ -2665,8 +2659,8 @@ mod tests {
             "and the newest line is still admitted"
         );
         assert!(
-            store.tombstones().contains(&first),
-            "a byte-evicted line leaves the same tombstone a line-evicted one does"
+            evicted.contains(&first),
+            "a byte-evicted line is handed out for deletion as a line-evicted one is"
         );
     }
 

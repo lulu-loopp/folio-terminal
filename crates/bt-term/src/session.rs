@@ -18074,10 +18074,6 @@ mod tests {
                 !session.document.entries().contains_key(id),
                 "history line {id:?} left the store; the document must not still answer for it"
             );
-            assert!(
-                session.document.tombstones().contains(id),
-                "and it must be tombstoned, so an anchor into it degrades rather than dangles"
-            );
         }
 
         // And growing is the honest half: nothing comes back, and the new room is real.
@@ -18097,7 +18093,7 @@ mod tests {
     /// is what the reader measured. The ceiling arrives first now, and it arrives
     /// through the road every other eviction takes: the ids reach
     /// [`DualPlaneSession::delete_history`] in the ordinary pending channel, so the
-    /// document tombstones them and everything anchored to them retires with them.
+    /// document deletes them and everything anchored to them retires with them.
     ///
     /// Red run with the byte arm of `enforce_frozen_limits` removed:
     /// `lines_kept=599 resident=12471180 budget=2048000`. Green: `lines_kept=98
@@ -18154,11 +18150,6 @@ mod tests {
             assert!(
                 !session.document.entries().contains_key(&id),
                 "evicted history line {id:?} is still in the document"
-            );
-            assert!(
-                session.document.tombstones().contains(&id),
-                "evicted history line {id:?} was deleted without a tombstone, so an anchor \
-                 into it dangles instead of degrading"
             );
         }
         // And new output is still admitted on top of a full pane: the ceiling
@@ -20975,7 +20966,14 @@ mod tests {
                 )
                 .unwrap();
             hide_cursor(&mut tombstoned, start);
-            assert!(!tombstoned.transcript.tombstones().is_empty());
+            assert!(
+                tombstoned
+                    .transcript
+                    .frozen()
+                    .front()
+                    .is_some_and(|line| line.id.0 > 1),
+                "the fixture's oldest lines have been evicted"
+            );
             assert!(
                 tombstoned.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
                 "tombstoned candidate was not scheduled: {source}"

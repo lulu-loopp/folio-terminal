@@ -36,6 +36,16 @@ pub struct HistoryEntry {
     /// Only the session may write it ([`HistoryDocument::set_inline_site`]); a line that has not
     /// been judged reads [`InlineMathSite::Ineligible`], which is the conservative verdict.
     pub inline_site: InlineMathSite,
+    /// The staging rows this line was frozen from — the keys of its own entries in
+    /// [`HistoryDocument`]'s staging relocations.
+    ///
+    /// **Kept so that deleting the line deletes exactly those and touches nothing else** (0.4.10
+    /// plan row 105). A relocation lives as long as its line, because a scroll anchor that still
+    /// names a staging row resolves through it on every frame. Deletion used to find a line's
+    /// relocations by walking all of them, and once history is full every frozen line deletes
+    /// one: on the clean VM that walk was 500,000–800,000 entries per line, 6 ms each, and a
+    /// flood fell from 10,000 lines a second to 143.
+    relocated_from: Box<[StagingId]>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -45,7 +55,12 @@ pub struct HistoryDocument {
     staging_relocations: BTreeMap<StagingId, StagingRelocation>,
     selection: Option<Selection>,
     next_anchor: u64,
-    tombstones: Vec<TranscriptId>,
+    /// How many staging relocations deletion has visited, ever. See
+    /// [`Self::relocation_visits`].
+    relocation_visits: u64,
+    /// How many lines have entered or left this document anywhere but at its two ends. See
+    /// [`Self::interior_edits`].
+    interior_edits: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,8 +75,30 @@ impl HistoryDocument {
         &self.entries
     }
 
-    pub fn tombstones(&self) -> &[TranscriptId] {
-        &self.tombstones
+    /// **The work deletion has done on the staging relocations, counted rather than timed.**
+    ///
+    /// One visit per relocation entry a [`Self::delete_transaction`] looks at. Deleting a line
+    /// visits that line's own rows and nothing else, so the count a line costs is the same in a
+    /// history of a thousand lines and of a hundred thousand — which is the claim the tests make
+    /// with it (0.4.10 plan row 105). Hidden: it is a measurement, not an API.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn relocation_visits(&self) -> u64 {
+        self.relocation_visits
+    }
+
+    /// **How many lines have entered or left this document anywhere but at its two ends**, ever:
+    /// a line frozen with an id below the newest one, or a line deleted while an older one stays.
+    ///
+    /// A running pane only ever does the other two things — freezing appends the next id, an
+    /// eviction takes the oldest line and ED3 takes all of them — so there this stays at zero. A
+    /// reader that keeps its own ordered copy of the document (the viewport's projection) can
+    /// therefore bring that copy up to date by dropping its front and appending what follows its
+    /// end, and this is the number that tells it when it may not: any change here means a line
+    /// moved in the middle, and only a rebuild is the document again.
+    #[must_use]
+    pub fn interior_edits(&self) -> u64 {
+        self.interior_edits
     }
 
     pub fn selection(&self) -> Option<&Selection> {
@@ -230,6 +267,20 @@ impl HistoryDocument {
     pub fn finalize_transaction(&mut self, finalized: FinalizedLine) {
         let generation = finalized.line.source_generation;
         let transcript_id = finalized.line.id;
+        // Every mapping of a frozen line names that line (`bt_transcript`'s `normalize`), which is
+        // what lets the line's own `relocated_from` stand for "the relocations of this line".
+        debug_assert!(
+            finalized
+                .mappings
+                .iter()
+                .all(|mapping| mapping.transcript_id == transcript_id),
+            "a finalized line's mappings name that line"
+        );
+        let relocated_from = finalized
+            .mappings
+            .iter()
+            .map(|mapping| mapping.staging_id)
+            .collect();
         for mapping in &finalized.mappings {
             self.staging_relocations.insert(
                 mapping.staging_id,
@@ -266,12 +317,20 @@ impl HistoryDocument {
             })
             .collect::<Vec<_>>();
 
+        if self
+            .entries
+            .last_key_value()
+            .is_some_and(|(newest, _)| *newest >= transcript_id)
+        {
+            self.interior_edits = self.interior_edits.wrapping_add(1);
+        }
         self.entries.insert(
             transcript_id,
             HistoryEntry {
                 line: finalized.line,
                 decoration: DecorationIntent::Plain,
                 inline_site: InlineMathSite::Ineligible,
+                relocated_from,
             },
         );
         for (id, anchor) in replacements {
@@ -314,12 +373,27 @@ impl HistoryDocument {
         }
         let removed_set = removed.iter().copied().collect::<BTreeSet<_>>();
         for id in removed {
-            if let Some(entry) = self.entries.remove(id) {
-                self.tombstones.push(entry.line.id);
+            let oldest = self.entries.first_key_value().map(|(first, _)| *first);
+            let Some(entry) = self.entries.remove(id) else {
+                continue;
+            };
+            if oldest != Some(*id) {
+                self.interior_edits = self.interior_edits.wrapping_add(1);
+            }
+            // The line's own relocations, found by the keys it carries rather than by walking
+            // every relocation in the document (row 105). A relocation is only ever written for
+            // the line whose mappings named it, so these are exactly the ones naming this line.
+            for staging in &entry.relocated_from {
+                self.relocation_visits = self.relocation_visits.wrapping_add(1);
+                if self
+                    .staging_relocations
+                    .get(staging)
+                    .is_some_and(|relocation| relocation.transcript_id == *id)
+                {
+                    self.staging_relocations.remove(staging);
+                }
             }
         }
-        self.staging_relocations
-            .retain(|_, relocation| !removed_set.contains(&relocation.transcript_id));
         let deleted_anchors = self
             .anchors
             .iter()
@@ -468,5 +542,75 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Rows per logical line in the eviction fixture: five soft-wrapped rows and the row that ends.
+    const ROWS_PER_LINE: u64 = 6;
+
+    /// Freeze one logical line of [`ROWS_PER_LINE`] physical rows, and run whatever it evicted
+    /// through the document's deletion, as the session does.
+    fn print_line(store: &mut TranscriptStore, document: &mut HistoryDocument) {
+        for row in 0..ROWS_PER_LINE {
+            for finalized in store
+                .capture(CapturedRow::plain("row", row + 1 < ROWS_PER_LINE))
+                .finalized
+            {
+                document.finalize_transaction(finalized);
+            }
+        }
+        let evicted = store.take_evictions();
+        document.delete_transaction(&evicted, false, GridGeneration(1));
+    }
+
+    /// **Evicting a line visits that line's own staging rows and no other relocation**, at a
+    /// thousand lines of history and at twenty thousand alike (0.4.10 plan row 105, T1).
+    ///
+    /// Deletion used to find a line's relocations with a `retain` over all of them — one per
+    /// frozen physical row — so the work per evicted line grew with history: with
+    /// `staging_relocations.retain` back in `delete_transaction`, this reads 6 000 and 120 000.
+    #[test]
+    fn an_eviction_visits_only_its_own_rows() {
+        for depth in [1_000, 20_000] {
+            let mut store = TranscriptStore::with_quotas(
+                bt_transcript::DEFAULT_STAGING_QUOTA,
+                NonZeroUsize::new(depth).unwrap(),
+            );
+            let mut document = HistoryDocument::default();
+            for _ in 0..depth {
+                print_line(&mut store, &mut document);
+            }
+            assert_eq!(document.entries().len(), depth, "history is full");
+            assert_eq!(document.relocation_visits(), 0, "and nothing has left it yet");
+
+            print_line(&mut store, &mut document);
+            assert_eq!(document.entries().len(), depth, "one line in, one line out");
+            assert_eq!(
+                document.relocation_visits(),
+                ROWS_PER_LINE,
+                "evicting one line of {ROWS_PER_LINE} rows from a {depth}-line history"
+            );
+        }
+    }
+
+    /// **A line deleted while an older one stays is an interior edit; an eviction is not** — the
+    /// number the viewport reads to know it may follow the document's two ends instead of
+    /// projecting it again (0.4.10 plan row 105).
+    #[test]
+    fn a_line_from_the_middle_is_an_interior_edit() {
+        let mut store = TranscriptStore::with_quotas(
+            bt_transcript::DEFAULT_STAGING_QUOTA,
+            NonZeroUsize::new(3).unwrap(),
+        );
+        let mut document = HistoryDocument::default();
+        for _ in 0..5 {
+            print_line(&mut store, &mut document);
+        }
+        assert_eq!(document.interior_edits(), 0, "evictions take the oldest line");
+
+        let ids = document.entries().keys().copied().collect::<Vec<_>>();
+        document.delete_transaction(&[ids[1]], false, GridGeneration(1));
+        assert_eq!(document.interior_edits(), 1, "the middle line went");
+        document.delete_transaction(&[ids[0], ids[2]], false, GridGeneration(1));
+        assert_eq!(document.interior_edits(), 1, "each went as the oldest");
     }
 }

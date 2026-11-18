@@ -2052,7 +2052,7 @@ fn g1_harvested_resize_rows_never_move_back_from_frozen_history() {
 }
 
 #[test]
-fn g1_ed3_deletes_history_and_records_tombstones() {
+fn g1_ed3_deletes_every_history_line() {
     let mut session = new_session(8, 2);
     session.feed(b"one\r\ntwo\r\ntail").unwrap();
     let removed = session
@@ -2064,7 +2064,12 @@ fn g1_ed3_deletes_history_and_records_tombstones() {
     assert!(!removed.is_empty());
     session.feed(b"\x1b[3J").unwrap();
     assert!(session.document().entries().is_empty());
-    assert_eq!(session.document().tombstones(), removed);
+    assert!(
+        removed
+            .iter()
+            .all(|id| !session.document().entries().contains_key(id)),
+        "every line ED3 named has left the document"
+    );
 }
 
 #[test]
@@ -2075,7 +2080,6 @@ fn g1_frozen_quota_evicts_through_the_document_pipeline() {
         .feed(b"one\r\ntwo\r\nthree\r\nfour\r\ntail\r\nend")
         .unwrap();
     assert_eq!(session.document().entries().len(), 2);
-    assert_eq!(session.document().tombstones().len(), 2);
     assert_eq!(history_text(&session), vec!["three", "four"]);
 }
 
