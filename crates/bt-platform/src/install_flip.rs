@@ -47,12 +47,16 @@
 //!   died) and has only the journal's record to go by. macOS: `SIGTERM` to
 //!   ask, `SIGKILL` to end. Windows: the process is opened and its creation
 //!   time read again **from that handle**, so a pid reused between the look
-//!   and the act is never touched; to ask, `WM_CLOSE` is posted to each of its
-//!   visible, unowned top-level windows that are not tool windows — the close
-//!   a person makes, and the one `scripts/release/smoke.ps1` ends a run with
-//!   (Folio listens to no other quit road; a process with no such window is
-//!   asked by nothing, and its grace runs out); to end, `TerminateProcess` on
-//!   the same handle. Refused by name elsewhere.
+//!   and the act is never touched; to ask, Folio's quit from outside
+//!   (`session_end::OUTSIDE_QUIT_MESSAGE`, 0.4.10 plan row 87, part 87a; R9)
+//!   is posted to every top-level window of the process — a put-away run's
+//!   window is hidden, and a hidden window is one too — and then `WM_CLOSE` to
+//!   each of its visible, unowned top-level windows that are not tool windows,
+//!   the close a person makes, for a build older than the message (a build
+//!   that hears the message has left by the close's turn, or puts its window
+//!   away on it); a process with no window at all is asked by nothing, and its
+//!   grace runs out; to end, `TerminateProcess` on the same handle. Refused by
+//!   name elsewhere.
 //! * **[`held_open`]** (Windows): whether another process holds a file open,
 //!   asked by opening it for reading and writing with no sharing at all —
 //!   E-7's process check before the first move. Any other handle on the file
@@ -216,8 +220,9 @@ pub fn parent_of(child: Running) -> Option<Running> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ask {
     /// The ordinary request to quit, which a process may answer in its own
-    /// time (or ignore): `SIGTERM` on macOS, `WM_CLOSE` to its windows on
-    /// Windows.
+    /// time (or ignore): `SIGTERM` on macOS; on Windows, Folio's quit from
+    /// outside to every top-level window, then `WM_CLOSE` to the ones a person
+    /// could close (see the module header).
     Quit,
     /// The end, which no process can refuse: `SIGKILL` on macOS,
     /// `TerminateProcess` on Windows.
@@ -713,7 +718,18 @@ mod imp {
         }
         match ask {
             super::Ask::Quit => {
-                for window in closable_windows_of(process.pid) {
+                // Folio's quit from outside first, to every window of the process (R9): the
+                // message is a number registered in this session, and 0 is a refused
+                // registration, which is posted to nobody.
+                let quit = crate::session_end::outside_quit_message();
+                if quit != 0 {
+                    for window in top_level_windows_of(process.pid, TopLevelReach::Every) {
+                        // SAFETY: as below.
+                        let _ = unsafe { PostMessageW(Some(window), quit, WPARAM(0), LPARAM(0)) };
+                    }
+                }
+                // Then the close a person makes, for a build older than the message.
+                for window in top_level_windows_of(process.pid, TopLevelReach::Closable) {
                     // SAFETY: a post takes the window and two integers; a
                     // window that has gone since it was listed refuses it.
                     let _ = unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) };
@@ -738,13 +754,22 @@ mod imp {
     /// The exit code of a process [`signal`] ends.
     const ENDED_BY_A_ROLLBACK: u32 = 1;
 
-    /// **The windows of the process `pid` a person could close**: its
-    /// top-level windows that are visible, have no owner and are not tool
-    /// windows — the ones a person's `×` or `Alt+F4` closes.
-    fn closable_windows_of(pid: u32) -> Vec<HWND> {
+    /// **Which of a process's top-level windows [`top_level_windows_of`] lists.**
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TopLevelReach {
+        /// Every one, shown or hidden: Folio's quit from outside is heard by each.
+        Every,
+        /// The ones a person could close: visible, with no owner and not tool windows — the ones
+        /// a person's `×` or `Alt+F4` closes.
+        Closable,
+    }
+
+    /// **The top-level windows of the process `pid`**, as `reach` says.
+    fn top_level_windows_of(pid: u32, reach: TopLevelReach) -> Vec<HWND> {
         /// What the enumeration looks for, and what it found.
         struct Look {
             pid: u32,
+            reach: TopLevelReach,
             found: Vec<HWND>,
         }
 
@@ -752,7 +777,7 @@ mod imp {
         /// `&mut Look` below, which outlives the enumeration because
         /// `EnumWindows` is synchronous.
         unsafe extern "system" fn keep_closable(window: HWND, state: LPARAM) -> BOOL {
-            // SAFETY: `state` is the `&mut Look` of `closable_windows_of`,
+            // SAFETY: `state` is the `&mut Look` of `top_level_windows_of`,
             // live for the whole enumeration and touched by nothing else.
             let look = unsafe { &mut *(state.0 as *mut Look) };
             let mut owner_pid = 0u32;
@@ -760,6 +785,10 @@ mod imp {
             // writable.
             unsafe { GetWindowThreadProcessId(window, Some(&raw mut owner_pid)) };
             if owner_pid != look.pid {
+                return true.into();
+            }
+            if look.reach == TopLevelReach::Every {
+                look.found.push(window);
                 return true.into();
             }
             // SAFETY: three reads of the enumerated window's own state.
@@ -776,6 +805,7 @@ mod imp {
 
         let mut look = Look {
             pid,
+            reach,
             found: Vec::new(),
         };
         // SAFETY: the callback reads `look` only during this synchronous call.

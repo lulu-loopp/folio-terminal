@@ -39,6 +39,16 @@
 //!
 //! [`SessionEndWatch::saved`] takes the line down once the loop has written the layout.
 //!
+//! # Folio's own quit from outside (0.4.10 plan row 87, part 87a; R9)
+//!
+//! A program that wants a running Folio to quit — the install flip's verbs, an update's trial
+//! stopped, the uninstaller, the release smoke — used to post `WM_CLOSE`, and once the last
+//! window's close keeps the run (part 87a) a `WM_CLOSE` puts it away instead. So they post
+//! [`OUTSIDE_QUIT_MESSAGE`], a registered window message, and the same subclass hears it on every
+//! Folio window, hidden ones included, as the Restart Manager's close
+//! ([`answer_outside_quit`]): the question, so the layout is written, and then the close, so the
+//! process leaves by itself — no question asked, the unsaved kept in the recovered copies.
+//!
 //! # Coming back after the system's restart
 //!
 //! [`register_restart`] is the other half of what an application tells Windows about its end:
@@ -154,6 +164,58 @@ pub enum SessionEnd {
     /// closing this application, the session goes on, and the application leaves by itself.
     Closed,
 }
+
+/// **The name Folio's quit from outside is registered under** (0.4.10 plan row 87, part 87a; R9):
+/// `RegisterWindowMessageW` of this string gives the same number in every process of the session,
+/// so the program that asks and the Folio that hears agree on it without a constant. Versioned in
+/// its name, so a later shape is a second message an older Folio does not hear, not a different
+/// meaning for this one.
+pub const OUTSIDE_QUIT_MESSAGE: &str = "Folio.QuitFromOutside.v1";
+
+/// **[`OUTSIDE_QUIT_MESSAGE`]'s number in this session**, registered once per process; 0 off
+/// Windows, and when the system refuses the registration — a number no message has, which
+/// [`answer_outside_quit`] never hears.
+#[must_use]
+pub fn outside_quit_message() -> u32 {
+    #[cfg(windows)]
+    {
+        static NUMBER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *NUMBER.get_or_init(|| {
+            let name = windows::core::HSTRING::from(OUTSIDE_QUIT_MESSAGE);
+            // SAFETY: the string lives across the call; the call reads it and returns a number.
+            unsafe { windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(&name) }
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+/// **What the window procedure answers Folio's quit from outside**, once `hear` has been told
+/// (0.4.10 plan row 87, part 87a; R9): `message` is it when it is `registered`, the session's
+/// number for [`OUTSIDE_QUIT_MESSAGE`] (0 is no message's). `hear` is told what the Restart
+/// Manager's close tells it — [`SessionEnd::Asked`], so the layout is written, then
+/// [`SessionEnd::Closed`], so the process leaves by itself — and the answer is 0, a processed
+/// message's. `None` for every other message. Pure.
+pub fn answer_outside_quit(
+    message: u32,
+    registered: u32,
+    hear: &dyn Fn(SessionEnd),
+) -> Option<isize> {
+    if registered == 0 || message != registered {
+        return None;
+    }
+    hear(SessionEnd::Asked);
+    hear(SessionEnd::Closed);
+    Some(0)
+}
+
+/// The line `diagnostics.log` gets when Folio's quit from outside arrives — beside the session-end
+/// messages' own ([`arrival_line`]), and as one of them: it is settled as the Restart Manager's
+/// close.
+pub const OUTSIDE_QUIT_ARRIVAL_LINE: &str =
+    "BT_SESSION_END Folio's quit from outside arrived; settled as the Restart Manager's close";
 
 /// **Which session-end message this is, if it is one.** Pure; `WM_ENDSESSION(TRUE)` without
 /// [`ENDSESSION_CLOSEAPP`] is `None`, because by then there is nothing left to hear: the system
@@ -333,7 +395,10 @@ mod windows_session_end {
     use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows::core::HSTRING;
 
-    use super::{SessionEnd, answer, arrival_line, heard, the_session_really_ends};
+    use super::{
+        OUTSIDE_QUIT_ARRIVAL_LINE, SessionEnd, answer, answer_outside_quit, arrival_line, heard,
+        outside_quit_message, the_session_really_ends,
+    };
     use crate::NativeWindow;
 
     /// "BTSE". Distinct from every other subclass id in this crate.
@@ -446,6 +511,12 @@ mod windows_session_end {
         // shells' exit lines (plan row 191): one queue, in order, written by the log's own thread.
         if let Some(line) = arrival_line(message, wparam.0, lparam.0) {
             crate::stderr_road::say(line);
+        }
+        // **Folio's quit from outside** (0.4.10 plan row 87, part 87a; R9): heard on a put-away
+        // window as on a shown one, and settled as the Restart Manager's close.
+        if let Some(answered) = answer_outside_quit(message, outside_quit_message(), &*hook.hear) {
+            crate::stderr_road::say(OUTSIDE_QUIT_ARRIVAL_LINE.to_owned());
+            return LRESULT(answered);
         }
         // **The last word** (plan row 201): what became of the question's save is said and the
         // log fenced before the answer. The call is on the procedure's own count of the hook.
@@ -698,6 +769,64 @@ mod tests {
         SessionEnd, WM_ENDSESSION, WM_QUERYENDSESSION, answer, arrival_line, heard, shutting_down,
         the_session_really_ends,
     };
+
+    /// RED (0.4.10 plan row 87, part 87a; R9) — **Folio's quit from outside is heard as the
+    /// Restart Manager's close**: the question, so the layout is written, then the close, so the
+    /// process leaves by itself; answered as processed. Only the registered number is heard, and a
+    /// refused registration (0) is no message's.
+    ///
+    /// MUTATION (P11): answer `None` from `answer_outside_quit` — the message is read as an
+    /// ordinary close and nothing is heard.
+    #[test]
+    fn the_outside_quit_is_heard_as_the_restart_managers_close() {
+        use super::answer_outside_quit;
+        let heard = std::cell::RefCell::new(Vec::new());
+        let hear = |end| heard.borrow_mut().push(end);
+        let registered = 0xC123;
+        assert_eq!(answer_outside_quit(registered, registered, &hear), Some(0));
+        assert_eq!(
+            heard.take(),
+            [SessionEnd::Asked, SessionEnd::Closed],
+            "the question, then the close"
+        );
+        assert_eq!(
+            answer_outside_quit(0x0010, registered, &hear),
+            None,
+            "WM_CLOSE"
+        );
+        assert_eq!(
+            answer_outside_quit(0, 0, &hear),
+            None,
+            "a refused registration"
+        );
+        assert_eq!(heard.take(), [], "neither tells anybody");
+    }
+
+    /// PIN (0.4.10 plan row 87, part 87a; R9) — **the release smoke asks by the name Folio
+    /// registers**: gate 6 registers the same string in its own process, and a name that drifted
+    /// would leave the smoke waiting twenty seconds for a quit Folio never heard. On Windows the
+    /// registration answers a number of the registered range, the same one each time.
+    #[test]
+    fn the_smoke_asks_by_the_name_folio_registers() {
+        let smoke = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/release/smoke.ps1");
+        let smoke = std::fs::read_to_string(smoke).expect("the release smoke");
+        assert!(
+            smoke.contains(&format!(
+                "RegisterWindowMessageW('{}')",
+                super::OUTSIDE_QUIT_MESSAGE
+            )),
+            "the smoke registers another name than {}",
+            super::OUTSIDE_QUIT_MESSAGE
+        );
+        let number = super::outside_quit_message();
+        if cfg!(windows) {
+            assert!((0xC000..=0xFFFF).contains(&number), "{number:#x}");
+        } else {
+            assert_eq!(number, 0, "no window message off Windows");
+        }
+        assert_eq!(super::outside_quit_message(), number, "registered once");
+    }
 
     /// RED (plan row 199) — **the session-end probe answers on Windows, and only there**: a
     /// machine running its tests is not signing out, so the read is `Some(false)`; off Windows

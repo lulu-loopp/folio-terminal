@@ -24,7 +24,10 @@
          the window Folio opened equals `GetDpiForMonitor` for the monitor it
          opened on. Stated as an agreement rather than as "96", so the same
          check is the 200% check on a machine set to 200%.
-      6. It shuts down when asked, rather than being killed.
+      6. Its window's close puts it away, and the process stays (0.4.10 plan
+         row 87, part 87a); and it shuts down when asked by Folio's quit from
+         outside — the registered message an installer, an update's rollback
+         and the uninstaller send — rather than being killed.
       7. The file a bug report actually arrives as — `diagnostics.log`, written
          by an ordinary run with no trace variable set — opens with the same
          build line `--version` printed, and says whether this build may update
@@ -490,6 +493,7 @@ Add-Type -Namespace Smoke -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessageW(string name);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
@@ -883,9 +887,27 @@ if ($window -ne [IntPtr]::Zero) {
     [void][Smoke.Win32]::GetDpiForMonitor($monitor, 0, [ref] $monitorDpi, [ref] $y) # MDT_EFFECTIVE_DPI
 }
 
-# Shut it the way a person does, and give it the time a clean quit takes.
+# **Close it the way a person does: the window is put away, and the run stays** (0.4.10 plan
+# row 87, part 87a). `close_keeps_running` is on in a home of its own, which is this one, so
+# the last window's close hides the window and keeps the process; five seconds is far more than
+# a hide takes, and a run that ended in them is the old close.
+$putAway = $false
 if (-not $folio.HasExited -and $window -ne [IntPtr]::Zero) {
     [void][Smoke.Win32]::PostMessageW($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) # WM_CLOSE
+    $hidden = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $hidden -and [Smoke.Win32]::IsWindowVisible($window) -and -not $folio.HasExited) {
+        Start-Sleep -Milliseconds 100
+    }
+    Start-Sleep -Milliseconds 500
+    $putAway = -not $folio.HasExited -and -not [Smoke.Win32]::IsWindowVisible($window)
+}
+
+# **Then ask it to quit the way the installer and the uninstaller do** — Folio's quit from
+# outside (`bt_platform::session_end::OUTSIDE_QUIT_MESSAGE`), which is heard on a hidden window
+# as on a shown one — and give it the time a clean quit takes.
+$outsideQuit = [Smoke.Win32]::RegisterWindowMessageW('Folio.QuitFromOutside.v1')
+if (-not $folio.HasExited -and $window -ne [IntPtr]::Zero -and $outsideQuit -ne 0) {
+    [void][Smoke.Win32]::PostMessageW($window, $outsideQuit, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 $closed = $folio.WaitForExit(20000)
 
@@ -921,9 +943,11 @@ Write-Host ("dpi: window and monitor agree at {0} ({1:P0} scaling)." -f $windowD
 
 # ── 6 ────────────────────────────────────────────────────────────────────────
 
-if (-not $closed) { throw 'the window did not close when it was asked to' }
+if (-not $putAway) { throw 'the window close did not put Folio away: the window stayed up, or the run ended' }
+Write-Host 'its window close put it away, and the process stayed.'
+if (-not $closed) { throw 'Folio did not quit when asked by its quit from outside' }
 if ($folio.ExitCode -ne 0) { throw "folio exited $($folio.ExitCode)" }
-Write-Host 'it closed when asked, and exited 0.'
+Write-Host 'it quit when asked from outside, and exited 0.'
 
 # ── 7: the log an ordinary run leaves says which build left it ───────────────
 #
@@ -963,8 +987,9 @@ $second = [IntPtr]::Zero
         }
         return $true
     }, [IntPtr]::Zero) | Out-Null
-if ($second -ne [IntPtr]::Zero) {
-    [void][Smoke.Win32]::PostMessageW($second, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+# Folio's quit from outside, as gate 6 asks it: a `WM_CLOSE` would put this run away.
+if ($second -ne [IntPtr]::Zero -and $outsideQuit -ne 0) {
+    [void][Smoke.Win32]::PostMessageW($second, $outsideQuit, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 [void]$plain.WaitForExit(20000)
 if (-not $plain.HasExited) { $plain.Kill() }
