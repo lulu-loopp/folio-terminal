@@ -10405,7 +10405,7 @@ pub enum TermMenuRow {
     /// is what makes the prompt still be there afterwards.
     ClearScreen,
     /// **The whole of §3.1's ED3 deletion** — history, staging, blocks, indexes,
-    /// caches, anchor degradation, tombstones — which is what makes it the one
+    /// caches, anchor degradation — which is what makes it the one
     /// row on this menu behind a confirmation.
     ClearScrollback,
     /// The shell is killed and a new one takes its place in the same seat, on

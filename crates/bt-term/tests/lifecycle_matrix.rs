@@ -2055,21 +2055,12 @@ fn g1_harvested_resize_rows_never_move_back_from_frozen_history() {
 fn g1_ed3_deletes_every_history_line() {
     let mut session = new_session(8, 2);
     session.feed(b"one\r\ntwo\r\ntail").unwrap();
-    let removed = session
-        .document()
-        .entries()
-        .keys()
-        .copied()
-        .collect::<Vec<_>>();
-    assert!(!removed.is_empty());
+    assert!(
+        !session.document().entries().is_empty(),
+        "history holds lines before ED3"
+    );
     session.feed(b"\x1b[3J").unwrap();
     assert!(session.document().entries().is_empty());
-    assert!(
-        removed
-            .iter()
-            .all(|id| !session.document().entries().contains_key(id)),
-        "every line ED3 named has left the document"
-    );
 }
 
 #[test]

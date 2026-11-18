@@ -822,7 +822,7 @@ impl HorizontalIndexStore {
         self.entries.get(&key)
     }
 
-    /// Release every index for one history line — its eviction, or its tombstone.
+    /// Release every index for one history line — its eviction, or its deletion.
     pub fn release_history(&mut self, id: TranscriptId) {
         self.release(|key| key.names(id));
     }

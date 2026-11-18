@@ -16,7 +16,7 @@ use crate::pointer_app_tests::held_bytes;
 use crate::test_support::ringing_tab;
 
 /// PowerShell's `'x' * 200`, one line per write — the clean VM's flood.
-fn line() -> String {
+fn flood_line() -> String {
     format!("{}\r\n", "x".repeat(200))
 }
 
@@ -70,7 +70,7 @@ impl Window {
     /// Print until `lines` lines have been written: each drain slice fed the way
     /// `drain_leaf_pty` feeds it, inside the feed turn, then the frame its output asks for.
     fn print_until(&mut self, lines: usize) {
-        let line = line();
+        let line = flood_line();
         while self.lines < lines {
             let mut slice = Vec::with_capacity(SLICE + line.len());
             while slice.len() < SLICE && self.lines < lines {

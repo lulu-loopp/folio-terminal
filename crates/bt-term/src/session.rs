@@ -20936,7 +20936,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_9k_primary_live_detection_survives_long_history_and_tombstones() {
+    fn m1_9k_primary_live_detection_survives_long_history_and_eviction() {
         let start = Instant::now();
         for source in ["$$x$$", "\\begin{align}x &= y\\end{align}"] {
             let mut long = DualPlaneSession::new(nz(40), nz(4));
@@ -20956,18 +20956,18 @@ mod tests {
                 "visible math must not be disabled by a >1024-line history: {source}"
             );
 
-            let mut tombstoned =
+            let mut evicted =
                 DualPlaneSession::with_frozen_quota(nz(40), nz(4), NonZeroUsize::new(2).unwrap());
-            tombstoned
+            evicted
                 .feed_at(
                     format!("old-0\r\nold-1\r\nold-2\r\nold-3\r\nold-4\r\nold-5\r\n{source}")
                         .as_bytes(),
                     start,
                 )
                 .unwrap();
-            hide_cursor(&mut tombstoned, start);
+            hide_cursor(&mut evicted, start);
             assert!(
-                tombstoned
+                evicted
                     .transcript
                     .frozen()
                     .front()
@@ -20975,13 +20975,13 @@ mod tests {
                 "the fixture's oldest lines have been evicted"
             );
             assert!(
-                tombstoned.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
-                "tombstoned candidate was not scheduled: {source}"
+                evicted.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
+                "evicted candidate was not scheduled: {source}"
             );
             assert_eq!(
-                complete_detected_live_tasks(&mut tombstoned, synthetic_raster(32, 18)),
+                complete_detected_live_tasks(&mut evicted, synthetic_raster(32, 18)),
                 1,
-                "visible math must not be disabled by a tombstone: {source}"
+                "visible math must not be disabled by an eviction: {source}"
             );
         }
     }
