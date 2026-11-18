@@ -69,6 +69,10 @@
 //! * `retires`: key ids this statement retires (see [`verify_statement`]).
 //! * `assets`: the release's files by platform, each with its SHA-256 and size. The updater
 //!   takes the name of its platform's file from here rather than composing it from the tag.
+//!   A name is held to the archive members' rule (`release_manifest::check_member_name`), which
+//!   forbids only what Windows forbids, so it may hold `#`, `%` or `[`, which a URL path or a
+//!   glob reads otherwise; what is fetched under it is held to the SHA-256 and size here either
+//!   way (the 1b+2 review's N16).
 //! * `members <platform>`: every member of that asset's archive, `folio.exe` and `folio.msix`
 //!   included — the two files the F-4 manifest cannot list, the one that carries it among them.
 //!
