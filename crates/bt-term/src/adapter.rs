@@ -2625,6 +2625,26 @@ mod tests {
         assert_eq!(terminal.alacritty_history_size(), 0);
     }
 
+    /// **A transaction finished with no stage before it is closed too** (0.4.10 plan row 107, the
+    /// review's P2-1): F1's own claim. The session always stages before it finishes, so there the
+    /// vendor's empty stage (F2) has closed the transaction already; this is the one road on which
+    /// only the adapter's call closes it, and a release build once skipped that call.
+    #[test]
+    fn a_finish_after_no_stage_closes_the_vendor_transaction() {
+        let mut terminal = TerminalAdapter::new(nz(40), nz(4));
+        terminal.feed(b"PS> ");
+        terminal.begin_resize_transaction();
+        terminal.finish_staged_resize_transaction(0);
+        for _ in 0..50 {
+            terminal.feed(b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n");
+        }
+        assert_eq!(
+            terminal.alacritty_history_size(),
+            0,
+            "the vendored grid kept the rows that scrolled off after a finish with no stage"
+        );
+    }
+
     #[test]
     fn resize_history_can_transfer_to_staging_and_return_before_reflow() {
         let mut terminal = TerminalAdapter::new(nz(8), nz(4));

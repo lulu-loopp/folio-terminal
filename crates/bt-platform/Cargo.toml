@@ -1261,6 +1261,8 @@ trust-harness = ["dep:bt-testpath"]
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+# The workspace's entry, copied as the three above are (0.4.10 plan row 107; see its comment there).
+debug_assert_with_mut_call = "deny"
 
 [dependencies]
 # **Only with `trust-harness`**, and for this crate's own tests: every test's scratch name comes

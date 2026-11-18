@@ -88,6 +88,8 @@ const LINE: &str = concat!(
 /// What one drain reads: `bt_pty::TERM_READ_SLICE`.
 const SLICE: usize = 8 * 1024;
 const COLUMNS: u32 = 40;
+/// The width the VM run's focused pane wore after its two splits (0.4.10 plan row 107, T-c).
+const VM_COLUMNS: u32 = 31;
 const ROWS: u32 = 24;
 const CAPACITY: usize = 2_000;
 
@@ -119,7 +121,7 @@ impl Pane {
         }
     }
 
-    /// A pane opened wide with only its prompt on screen, narrowed to the VM run's 31 columns
+    /// A pane opened wide with only its prompt on screen, narrowed to the VM run's [`VM_COLUMNS`]
     /// and settled as the window settles a resize (0.4.10 plan row 107): the first layout resize
     /// of a fresh pane, which pushes nothing off the top.
     fn settled_at_vm_width() -> Self {
@@ -127,10 +129,10 @@ impl Pane {
         pane.session.feed(b"PS> ").expect("a prompt is plain text");
         let at = Instant::now();
         pane.session
-            .resize_at(nz(31), nz(ROWS), at)
+            .resize_at(nz(VM_COLUMNS), nz(ROWS), at)
             .expect("the resize reflows");
         pane.session
-            .mark_pty_resize_requested_at(nz(31), nz(ROWS), at);
+            .mark_pty_resize_requested_at(nz(VM_COLUMNS), nz(ROWS), at);
         assert!(
             pane.session
                 .finish_resize_if_quiescent(at + Duration::from_millis(200))

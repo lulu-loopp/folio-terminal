@@ -452,7 +452,9 @@ A string literal that wraps continues with `\` at the end of the line, so the br
 
 ### 现在就 gate 的（`Cargo.toml` 的 `[workspace.lints]`，全树今天真的过）
 
-`unsafe_code` · `clippy::todo` · `clippy::unimplemented` · `clippy::dbg_macro`
+`unsafe_code` · `clippy::todo` · `clippy::unimplemented` · `clippy::dbg_macro` · `clippy::debug_assert_with_mut_call`
+
+`clippy::debug_assert_with_mut_call` does not see a method call through a field (`self.term.finish_resize_transaction()`, the shape 0.4.10 plan row 107 found inside a `debug_assert!`), so that shape is guarded by review only until plan row 110. <!-- zh: pending T-SIX-KB-PER-LINE-PAST-THE-CAP -->
 
 ⚠️ **成员 crate 必须写 `[lints] workspace = true`**——cargo 不自动继承。缺这行整张表就是摆设（这正是本规范首版的真实状态：写了一大堆 lint，一条都没生效）。**vendor 不继承**：它是 upstream 的代码，按 upstream 的标准。
 
