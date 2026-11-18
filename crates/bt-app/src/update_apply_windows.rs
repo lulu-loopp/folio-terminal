@@ -563,8 +563,8 @@ pub(crate) struct Road {
     /// the applier inherits O's environment).
     pub(crate) data: PathBuf,
     /// What the kept release statement is verified with: the embedded keys,
-    /// and the retires remembered in [`Self::data`]'s `release-keys.json`
-    /// (`update_prepare::Vouching`).
+    /// and the retires remembered in the `release-keys.json` the Prepare and
+    /// the resume read (`update_prepare::Vouching`; [`Self::of_this_copy`]).
     pub(crate) vouching: crate::update_prepare::Vouching,
     /// How the installed copy was installed, derived now.
     pub(crate) channel: Option<Channel>,
@@ -620,11 +620,19 @@ impl Road {
     pub(crate) fn of_this_copy(home: Home, installed: PathBuf, rescue: PathBuf) -> Self {
         let channel = Some(crate::install_channel::channel_of(&installed));
         let data = crate::persist::storage_dir_unmoved();
+        // **The retires are read from the folder O read them from** (the 1b+2
+        // review's N13): O's `persist::storage_dir`, which this process may not
+        // settle — settling pays a data-folder move, and the applier moves
+        // nothing. While a move is owed (deferred by a trial) that folder is
+        // still the previous name, which is the one the disk holds as it stands.
+        let vouching = crate::update_prepare::Vouching::in_data_folder(
+            &crate::persist::storage_dir_as_it_stands(),
+        );
         Self {
             home,
             installed,
             rescue,
-            vouching: crate::update_prepare::Vouching::in_data_folder(&data),
+            vouching,
             data,
             channel,
             limits: Limits::PRODUCT,
