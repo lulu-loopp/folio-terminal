@@ -736,6 +736,56 @@ impl<B: Backend> Runtime<'_, B> {
         self.put_the_window_on_the_glass(maximized)
     }
 
+    /// **Put the run's last ordinary window away** (0.4.10 plan row 87, part 87a; R1, R3): the close
+    /// that would have ended the run hides the window instead, and keeps everything in it.
+    ///
+    /// What [`Self::hide_quake_window`] does less its keyboard hand-back — the gesture the window
+    /// held is cancelled, and the window leaves the glass through the owner-thread door — plus one
+    /// write of the window's picture, so that the document on the disk is the layout as it was put
+    /// away. Nothing else: no dirty gate (nothing is lost, so nothing is asked), no teardown
+    /// ([`Self::close_window`] is not reached), and the run's sentinel stays where it is.
+    ///
+    /// `window_shown` is kept, for `hide_quake_window`'s reason: a hidden window is not a window
+    /// that was never shown, and gate 1 (`window_is_hidden`) reads the pair.
+    pub(crate) fn put_the_window_away(&mut self) -> Result<()> {
+        self.end_capture(Ending::Cancel)?;
+        // An owner-thread door (`doors::SetVisible`). A refusal is a hide that had no effect, and
+        // the window, still on the glass, is not marked away.
+        let hidden = admitted::<doors::SetVisible, _>(|token| {
+            owner_door::set_visible(token, &self.window.window, false);
+        });
+        if hidden.is_err() {
+            return Ok(());
+        }
+        self.window.put_away = true;
+        // The turn's facts read again, so that this turn's own fold and present already see a
+        // window off the glass (gate 1), not the next turn's.
+        self.observe_window_place();
+        self.mark_session_dirty(Instant::now());
+        crate::diagnostics::note(
+            "BT_PUT_AWAY the last window's close put it away; the run keeps going",
+        );
+        Ok(())
+    }
+
+    /// **Bring a put-away window back on the glass** (0.4.10 plan row 87, part 87a; R10, R13): the
+    /// window's half of `FolioApp::bring_the_window_back`, the one door every road back takes.
+    ///
+    /// [`Self::put_the_window_on_the_glass`] — written re-entrant for the summoned terminal, so a
+    /// second show is a statement of fact and not a step — with the window as it was: maximized if
+    /// it was put away maximized. `false` for a window that is not put away, which is left alone.
+    pub(crate) fn bring_the_window_back_on_the_glass(&mut self) -> Result<bool> {
+        if !self.window.put_away {
+            return Ok(false);
+        }
+        self.window.put_away = false;
+        let maximized = self.window.window.is_maximized();
+        self.put_the_window_on_the_glass(maximized)?;
+        // And read again on the glass, for the put-away's reason the other way round.
+        self.observe_window_place();
+        Ok(true)
+    }
+
     /// The three things showing a window does, said once for the two doors that
     /// do it.
     pub(in crate::runtime) fn put_the_window_on_the_glass(
@@ -3080,3 +3130,7 @@ pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
 #[cfg(test)]
 #[path = "windows_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "put_away_tests.rs"]
+mod put_away_tests;

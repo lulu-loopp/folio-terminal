@@ -45,7 +45,12 @@ fn a_close_request_is_taken_once_through_the_windows_door() {
         "the keystroke landed"
     );
     let (tab, _) = tab_with_a_preview(1, vec![buffer]);
-    let folio = HeadlessFolio::with_tabs("close-request-door", vec![tab], 0);
+    let mut folio = HeadlessFolio::with_tabs("close-request-door", vec![tab], 0);
+    // The switch off: with it on, this last window's close puts it away and asks nothing (0.4.10
+    // plan row 87, part 87a, T2).
+    let mut settings = folio.app.settings_store.loaded().clone();
+    settings.close_keeps_running = false;
+    assert!(folio.app.settings_store.store(settings));
     let mut application = HeadlessApplication::of(folio);
     let window = application.id;
 

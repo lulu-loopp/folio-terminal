@@ -428,6 +428,20 @@ fn origin_from_token(token: &str) -> Option<cli::LaunchOrigin> {
 }
 
 impl LaunchRequest {
+    /// **A launch that asked for Folio and for nothing else** (0.4.10 plan row 87, part 87a; R10):
+    /// a person starting it from the taskbar pin, Start or a shortcut, with no flag, no folder, no
+    /// profile and no carried environment. While the run is put away, such a launch is answered by
+    /// the window brought back as it was, and lands nothing ([`landing`] is not asked). A rollback's
+    /// report rides along either way: it is told where the launch lands.
+    pub(crate) fn asks_for_folio_and_nothing_else(&self) -> bool {
+        !self.new_window
+            && !self.tab
+            && self.origin == cli::LaunchOrigin::Plain
+            && self.cwd.is_none()
+            && self.profile.is_none()
+            && self.carried_environment.is_none()
+    }
+
     /// **The request a command line becomes** — built from argv and from nothing else.
     ///
     /// `None` for a launch this channel cannot carry, which is exactly one case: a bare positional

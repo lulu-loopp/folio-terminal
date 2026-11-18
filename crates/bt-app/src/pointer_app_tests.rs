@@ -1274,7 +1274,7 @@ fn a_divider_released_anywhere_commits_through_the_whole_dispatch() {
 /// the capture before it changes what the owner names. The resize door's sample is its own item
 /// (the divider's, generalised), so its row names that call; every other door calls
 /// `end_capture` itself.
-const LIFECYCLE_DOORS: [(&str, &str); 15] = [
+const LIFECYCLE_DOORS: [(&str, &str); 16] = [
     ("window_blurred", "end_capture"),
     (
         "flush_pending_pty_resize",
@@ -1282,6 +1282,9 @@ const LIFECYCLE_DOORS: [(&str, &str); 15] = [
     ),
     ("scale_factor_changed", "end_capture"),
     ("hide_quake_window", "end_capture"),
+    // The last ordinary window put away with the run (0.4.10 plan row 87, part 87a): the window
+    // leaves the glass as the summoned terminal's hide does.
+    ("put_the_window_away", "end_capture"),
     ("close_window", "end_capture"),
     ("activate_tab", "end_capture"),
     ("close_tab", "end_capture"),
