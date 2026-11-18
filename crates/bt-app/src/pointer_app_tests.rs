@@ -1284,7 +1284,7 @@ const LIFECYCLE_DOORS: [(&str, &str); 15] = [
     ("hide_quake_window", "end_capture"),
     ("close_window", "end_capture"),
     ("activate_tab", "end_capture"),
-    ("close_tab", "end_capture"),
+    ("close_tab_by", "end_capture"),
     ("close_pane", "end_capture"),
     ("toggle_pane_zoom", "end_capture"),
     ("sweep_preview_panes", "end_capture"),
