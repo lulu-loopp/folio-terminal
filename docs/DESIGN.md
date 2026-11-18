@@ -16938,3 +16938,57 @@ The flags are a debt and never a liveness: `Runtime::turn_facts` counts them as 
 **Not yet.** Part 1a changes no update road: the updater still trusts by Authenticode until part 1b moves `update_prepare_windows`, `update_prepare_macos` and the apply side onto the statement.
 
 **Proof.** `release_statement::tests::{the_embedded_keys_verify_the_statements_signed_with_the_real_keys, this_build_embeds_no_test_key, an_openssl_signature_by_a_test_key_verifies, a_tampered_byte_is_refused, a_statement_by_a_key_outside_the_set_is_an_unknown_key, a_statement_verifies_with_the_key_it_names_only, a_retired_key_is_refused, a_statement_may_not_retire_its_signer, a_retire_of_a_key_the_build_does_not_embed_is_refused, the_live_key_may_not_retire_the_spare, a_statement_for_another_tag_is_refused, a_statement_for_another_version_is_refused, min_from_above_this_build_is_too_old, a_file_is_held_to_its_platform_s_line, a_member_list_that_differs_is_refused, a_member_found_twice_is_refused, members_of_another_platform_are_refused, the_statement_reads_back_as_written, a_statement_cut_at_any_line_is_truncated, another_format_is_refused_by_name, a_cr_is_refused, a_line_after_the_last_member_is_refused, a_tag_that_does_not_name_the_version_is_refused, a_version_with_a_leading_zero_is_refused, a_key_id_reads_back_from_lower_case_hex_only, the_release_check_reads_a_published_release_whole, an_archive_holding_a_name_twice_is_refused, the_release_check_refuses_a_set_holding_a_test_key, a_malleated_or_degenerate_signature_is_refused}` (the last pins RFC 8032 §7.1 TEST 1 and the refusal of S + L, an identity R and an all-zero signature through the pinned package), `bt_persist`'s `release_keys::tests::a_retire_is_recorded_once_and_survives_the_file` and `document_keys_tests`, and the plants `plant-102-*.py` in the row's report.
+
+### 2026-11-18 — A release is vouched for by a statement signed with our own Ed25519 key; part 1b: the update roads take the statement, and no signature of the operating system's decides an update (T-UPDATES-TRUST-OUR-OWN-KEY, 0.4.10 plan row 102; rulings R3, R4, R7, R8, R9)
+
+**What changed.** Part 1a gave the format, the keys and the check. Part 1b puts them on the update roads of both platforms. The offer no longer names a file: it carries the tag, the version and the platform word the statement lists its file under (`windows-x64`, `macos-arm64`), and a press first fetches `RELEASE-STATEMENT.txt` and its `.sig` by the offer's own tag (`Offer::requests`). `update_prepare::vouched` verifies the statement with this build's embedded keys, refusing any key the data folder remembers as retired (`Vouching::verified`). It records what the statement retires, then holds the statement to the offer: tag and version the offer's, `min_from` no newer than this build. A newer `min_from` is `Stop::TooOld` before the large download. Every other refusal is the new `Stop::StatementRefused`, whose card reads *The update is not vouched for.* (`Text::UpdateFailedUnvouched`; zh pending). Each refusal also writes one `diagnostics.log` line naming the refusal. The platform's file is then fetched by the name the statement gives it and held to the statement's SHA-256 and size (`fetch_vouched_asset`, through `VerifiedStatement::asset_matches`; a difference is `Stop::Sums`). The updater no longer reads `SHA256SUMS*.txt`. Each statement file is refused on its size before it is read.
+
+**Windows (`update_prepare_windows`).** The running build is read for its digest, its size and its embedded manifest only. A build without the manifest is `NotOurs`; its signature is not read (R3: "signed and flagged" became "flagged"). The statement and its signature are copied into `H\<txn>\` beside `set\` (`update_prepare::kept_statement`). Today's archive reader runs unchanged. Then every member, `folio.exe` and `folio.msix` included, is held to the statement's member lines (`held_to_the_statement`, `members_match`): the names are the same set and each SHA-256 and size are the same, or the stop is `Identity`. `still_staged` re-verifies the kept statement and holds every staged member to it and to its recorded digest. The rescue copy is held to the running image's digest and size only, since equal bytes are the same build. No `trust` call is a gate any more:
+- the sidecars' Microsoft signatures leave the updater (R9; `package.ps1` keeps checking them);
+- `trust_refused`, `trust_refused_line` and `Stop::Offline` are gone, together with the 0.4.9 offline card (`Text::UpdateFailedOffline` is now `UpdateFailedUnvouched`; its CHANGELOG line under Unreleased is removed, since that card never shipped);
+- the one reading left is `service_signature`, the updater's own reading of the staged `folio.exe`. It answers `Ours` only for a valid signature whose subject is `msix::PACKAGE_PUBLISHER` and whose identity OID is our profile's, both constants in code (`OUR_SERVICE`). It decides no step: the Prepare writes it as one diagnostics line, and part 3 gives the Ready card its sentence from it (R4, R5).
+
+`WinPrepare` keeps its policy for that reading alone.
+
+**Resume and apply.** `staged_as_verified` checks the following, and answers the version from the statement rather than from the staged `folio.exe`'s `VERSIONINFO`:
+- the channel and the home;
+- the installed image against the journal's old inventory;
+- the kept statement, verified again;
+- every staged member, against both the statement and the journal;
+- the rescue copy's digest.
+
+A transaction folder with no statement fails closed and is discarded. That covers one prepared by an older build and found by a hand-installed 0.4.10. The applier verifies with the embedded keys and the data folder's `release-keys.json` (`Road::vouching`). Those keys are O's, because the applier is O's rescue copy. The applier's behaviour on a refusal is unchanged: `Unverified`, then `Abandoned`. **The hand-off concludes nothing about the running image** (R3, §1.5): its applier is the rescue copy, whose bytes equal the running image's, and it re-verifies the statement and the set before it arms.
+
+**macOS (`update_prepare_macos`).** The statement and the image are fetched and checked the same way before the image is attached. Codesign against the running bundle's designated requirement, Gatekeeper's assessment, the version, the architecture, the protocol and `FolioMinUpdater` stay as they are (§1.3 step 10). The statement is checked in addition and is not kept: a staged bundle is revalidated by its code signature, as before.
+
+**`release-keys.json` (R8).** A Prepare is its only writer (`Vouching::remember`). It writes only when the list grows, and only over a missing file, one this build read, or a refused file whose bytes were kept beside it. It never writes over a newer build's document. A failed write is one line, and the Prepare goes on. A refused file still names what it retired: `bt_persist::read_release_keys_keeping` recovers the frozen `retired` array from the refused bytes (`release_keys::retired_in`). A downgrade therefore keeps refusing a retired key.
+
+**Unchanged.** `MIN_UPDATER` stays 0.4.6 (R7). `trust` keeps every door. `update_handoff`'s sidecar line stays a diagnostic.
+
+**Proof.** The tests below; the plants `plant-102-1b-*.py` are listed in the row's report.
+
+- bt-app `update_prepare::tests::`
+  - `the_test_seeds_are_the_test_keys`
+  - `a_vouched_statement_admits_the_file_it_names`
+  - `a_statement_by_a_key_this_build_does_not_embed_is_refused`
+  - `a_statement_that_needs_a_newer_build_is_too_old_before_the_download`
+  - `a_statement_for_another_release_is_refused`
+  - `a_file_the_statement_does_not_list_is_refused`
+  - `the_retire_lines_are_remembered_after_a_verified_statement`
+  - `a_remembered_retired_key_is_refused`
+  - `a_newer_release_keys_file_is_never_written_over`
+  - `an_oversized_statement_file_is_refused_on_its_size`
+- `update_job::tests::the_offer_fetches_the_statement_and_its_signature_by_tag`
+- `update_card::tests::an_unvouched_release_says_so_on_the_card`
+- `update_prepare_windows::tests::`
+  - `a_replaced_archive_is_refused_by_the_statement`
+  - `an_archive_whose_members_are_not_the_statement_s_is_refused`
+  - `an_unsigned_exe_listed_by_the_statement_is_staged`
+  - `a_revoked_signature_listed_by_the_statement_is_staged`
+  - `the_service_signature_reading_tells_ours_from_every_other`
+  - `the_statement_is_kept_beside_the_staged_set`
+  - `a_staged_set_without_a_kept_statement_is_discarded`
+  - `a_feed_cannot_deliver_a_release_no_embedded_key_vouches_for`
+  - the existing Prepare, resume and feed tests, rewritten onto signed statements
+- `update_apply_windows::tests::a_set_whose_kept_statement_does_not_verify_is_refused_before_the_entrance`
+- bt-persist `release_keys::tests::a_refused_file_still_names_what_it_retired`
