@@ -580,7 +580,11 @@ mod tests {
                 print_line(&mut store, &mut document);
             }
             assert_eq!(document.entries().len(), depth, "history is full");
-            assert_eq!(document.relocation_visits(), 0, "and nothing has left it yet");
+            assert_eq!(
+                document.relocation_visits(),
+                0,
+                "and nothing has left it yet"
+            );
 
             print_line(&mut store, &mut document);
             assert_eq!(document.entries().len(), depth, "one line in, one line out");
@@ -605,7 +609,11 @@ mod tests {
         for _ in 0..5 {
             print_line(&mut store, &mut document);
         }
-        assert_eq!(document.interior_edits(), 0, "evictions take the oldest line");
+        assert_eq!(
+            document.interior_edits(),
+            0,
+            "evictions take the oldest line"
+        );
 
         let ids = document.entries().keys().copied().collect::<Vec<_>>();
         document.delete_transaction(&[ids[1]], false, GridGeneration(1));

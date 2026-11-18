@@ -169,7 +169,9 @@ fn history_holds_still_once_the_scrollback_is_full() {
         ));
     }
     let grown = held() - full;
-    eprintln!("lines, bytes held beyond the full history, document entries, layout slots: {trail:?}");
+    eprintln!(
+        "lines, bytes held beyond the full history, document entries, layout slots: {trail:?}"
+    );
     assert!(
         grown.abs() < 16 * 1024,
         "{} more lines past a full {CAPACITY}-line history changed what the pane holds by {grown} \

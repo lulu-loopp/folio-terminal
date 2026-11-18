@@ -112,7 +112,10 @@ fn a_full_scrollback_holds_still_in_the_window() {
         .transcript()
         .frozen()
         .len();
-    assert_eq!(frozen, CAPACITY, "the history is full before the first measurement");
+    assert_eq!(
+        frozen, CAPACITY,
+        "the history is full before the first measurement"
+    );
     let full = held_bytes();
     let mut trail = Vec::new();
     for step in 1..=4 {

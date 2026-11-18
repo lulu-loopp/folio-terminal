@@ -2379,7 +2379,10 @@ mod tests {
         assert_eq!(finalized.line.text, "old");
         let removed = store.evict_oldest(1);
         assert_eq!(removed, vec![finalized.line.id]);
-        assert!(store.frozen().is_empty(), "the evicted line is no longer held");
+        assert!(
+            store.frozen().is_empty(),
+            "the evicted line is no longer held"
+        );
     }
 
     #[test]

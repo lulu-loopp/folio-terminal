@@ -4916,9 +4916,8 @@ impl ViewportProjection {
             self.visual_row_heights.drop_front(leaving);
             self.heights.drop_front(leaving);
             self.horizontal_index.release_history_before(first);
-            self.inference.retain(
-                |key, _| !matches!(key, LineKey::History(line, _) if departed(*line)),
-            );
+            self.inference
+                .retain(|key, _| !matches!(key, LineKey::History(line, _) if departed(*line)));
         }
 
         let last = self.ordered_ids.back().copied();
@@ -10954,10 +10953,7 @@ mod tests {
         // One slot per line (0.4.10 plan row 105, ruling R4): a width the pane comes back to is
         // measured again, and the cache never holds two widths of one line.
         let lines = document.entries().len();
-        assert_eq!(
-            narrow.cache_misses(),
-            misses_after_new_width + lines as u64
-        );
+        assert_eq!(narrow.cache_misses(), misses_after_new_width + lines as u64);
         assert_eq!(narrow.cache_len(), lines);
     }
 
@@ -14703,7 +14699,11 @@ mod tests {
         // Lines 0..=3 leave: the opener goes, and 4..=60 stay with nothing swallowing them.
         print_and_evict(&mut store, &mut document, 4);
         projection.project(&document);
-        assert_eq!(projection.rebuilds(), rebuilds + 1, "the departure is a rebuild");
+        assert_eq!(
+            projection.rebuilds(),
+            rebuilds + 1,
+            "the departure is a rebuild"
+        );
 
         let mut fresh = eviction_projection(&store);
         fresh.sync_math_artifacts(block());

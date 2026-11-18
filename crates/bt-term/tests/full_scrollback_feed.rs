@@ -65,7 +65,10 @@ fn the_feed_costs_the_same_before_and_after_the_cap() {
         print(&mut session, 2_000);
         let evicted = oldest(&session) - first;
         let visited = session.document().relocation_visits() - visits;
-        assert_eq!(evicted, 2_000, "every line printed past the cap evicted one");
+        assert_eq!(
+            evicted, 2_000,
+            "every line printed past the cap evicted one"
+        );
         per_line.push((capacity, visited / evicted, visited % evicted));
     }
     assert_eq!(
