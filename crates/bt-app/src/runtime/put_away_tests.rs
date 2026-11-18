@@ -508,3 +508,95 @@ fn a_put_away_windows_reach_is_a_toast() {
         "a window not shown yet"
     );
 }
+
+/// The text a frame shows, its drawable rows joined.
+fn frame_says(frame: &bt_viewport::ViewportFrame) -> String {
+    (0..frame.drawable_rows())
+        .map(|row| crate::test_support::frame_row_text(frame, row))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// RED (T5b; the VM's M1 and M3, 2026-11-18) — **a put-away window publishes nothing, and its
+/// first frame back is built from the grid then**: what a shell prints while the window is away is
+/// fed (the pane's grid holds it), but the drain's publish composes no frame, files nothing in the
+/// slot and leaves no coalescing debt standing; the plain launch that brings the window back
+/// composes a frame, and that frame shows what was printed.
+///
+/// PLANT P15: drop the `put_away` gate at the top of `Runtime::publish_frame_inner` — the drain
+/// composes a frame for the put-away window.
+#[test]
+fn a_put_away_window_publishes_nothing_and_its_first_frame_back_is_built_then() {
+    let mut run = PutAway::open("publish", true);
+    let _ = run.close();
+    assert!(run.window().put_away, "the fixture's window is put away");
+    let id = run.application.id;
+    let composed = run.window().composed_terminal_frames;
+    let revision = run.window().terminal_content_revision;
+    let overwrites = run.window().pending_frames.overwrites();
+    {
+        let mut runtime = run.application.folio.runtime(id).expect("the window");
+        let now = std::time::Instant::now();
+        // The debt a drain opens when it holds its frame for the coalescing window.
+        let _ = runtime.window.pty_coalesce.opened_at(now);
+        runtime.window.pty_coalesce.until = Some(now + crate::coalesce::COALESCE_WINDOW);
+        runtime
+            .shell_mut()
+            .session
+            .feed(b"printed-while-away")
+            .expect("the shell's bytes are fed");
+        runtime
+            .publish_pty_drain_frame(now, false)
+            .expect("the drain's publish");
+        runtime
+            .publish_pty_drain_frame(now, true)
+            .expect("a forced one");
+    }
+    assert_eq!(
+        run.window().composed_terminal_frames,
+        composed,
+        "no frame is composed off the glass"
+    );
+    assert_eq!(
+        run.window().terminal_content_revision,
+        revision,
+        "no picture is newer than the glass"
+    );
+    assert_eq!(
+        run.window().pending_frames.overwrites(),
+        overwrites,
+        "nothing is filed in the slot"
+    );
+    assert_eq!(
+        run.window().pty_coalesce,
+        crate::coalesce::Pending::default(),
+        "and the PTY's debt is settled: no deadline stands for a picture nobody draws"
+    );
+    let (_, _, texts) = run.holding();
+    assert!(
+        texts.iter().any(|text| text.contains("printed-while-away")),
+        "the grid holds what was printed: {texts:?}"
+    );
+    let request = crate::launch_wire::LaunchRequest::default();
+    let landed = run
+        .application
+        .folio
+        .land_one_launch_request(&run.application.event_loop, &request)
+        .expect("the launch lands");
+    assert_eq!(landed, Some(id), "the plain launch brings the window back");
+    assert!(
+        run.window().composed_terminal_frames > composed,
+        "the way back composes a frame"
+    );
+    let window = run.window();
+    let shown = window
+        .pending_frames
+        .pending_frame()
+        .or(window.last_presented_frame.as_ref())
+        .expect("a frame for the glass");
+    assert!(
+        frame_says(shown).contains("printed-while-away"),
+        "built from the grid as it stands: {}",
+        frame_says(shown)
+    );
+}

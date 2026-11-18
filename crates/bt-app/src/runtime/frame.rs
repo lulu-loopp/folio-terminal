@@ -197,6 +197,31 @@ impl<B: Backend> Runtime<'_, B> {
         trigger: FrameTrigger,
         skip_unchanged: bool,
     ) -> Result<bool> {
+        // **Every publish settles the PTY's debt**, and this is the one door they all come
+        // through — a keystroke's frame, an expose, a resize's, the drain's own. What has been
+        // fed is about to be on the glass, or is about to be found no different from what
+        // already is, and either answers the question the wait was asking. Cleared here rather
+        // than at each caller so that a publication path added later cannot forget: an armed
+        // deadline nobody disarms is the failure [`coalesce::Pending`] is written against. First,
+        // so that the put-away window's publish below settles it too: no deadline stands for a
+        // picture nobody will draw.
+        self.window.pty_coalesce.settle();
+        // **A put-away window publishes nothing** (0.4.10 plan row 87, part 87a; the VM's M1 and
+        // M3, 2026-11-18): off the glass there is no picture to make, and everything below is
+        // the making of one - the journeys carried, the projection of the focused grid, the
+        // detection pass, the decorations dispatched, the frame in the slot. Gate 1 already
+        // stopped the present; on a flood this half still cost the window thread 126-143 ms a
+        // second. The drain goes on feeding every grid, so nothing a shell prints is lost. The
+        // first frame on the way back is built then: `Runtime::bring_the_window_back_on_the_glass`
+        // lowers the mark before it shows the window, and the show publishes from the grids as
+        // they stand.
+        //
+        // On `put_away` and not on gate 1's `window_hidden`: a minimised or cloaked window comes
+        // back by the platform's restore, which publishes nothing first, so it keeps the slot's
+        // picture fresh as before.
+        if self.window.put_away {
+            return Ok(false);
+        }
         hang_watch::during(hang_watch::Station::Present, || {
             // **Whatever asked for this frame, it carries every journey that is
             // running** (review 2026-09-18, P1). Above everything that reads a
@@ -207,13 +232,6 @@ impl<B: Backend> Runtime<'_, B> {
             // Costs a window with nothing moving one `bool` and one `Option` read.
             // See [`Self::carry_live_journeys`].
             self.carry_live_journeys(Instant::now());
-            // **Every publish settles the PTY's debt**, and this is the one door they all come
-            // through — a keystroke's frame, an expose, a resize's, the drain's own. What has been
-            // fed is about to be on the glass, or is about to be found no different from what
-            // already is, and either answers the question the wait was asking. Cleared here rather
-            // than at each caller so that a publication path added later cannot forget: an armed
-            // deadline nobody disarms is the failure [`coalesce::Pending`] is written against.
-            self.window.pty_coalesce.settle();
             // **The tripwire.** A frame is about to describe a tab whose seat set
             // may have changed; if it changed without anyone carrying the change to
             // the shells, this is the moment the two pictures diverge and the last
@@ -620,7 +638,9 @@ impl<B: Backend> Runtime<'_, B> {
         // wheel bug [`Self::repaint_pane_change`] was written for, and the same
         // repair: run the compositor over the picture already on the glass, which
         // rebuilds every unfocused pane from its own projection.
-        if !published && self.window.unpainted_pane_output {
+        // Nor for a put-away window: its glass is nobody's (see `publish_frame_inner`'s gate),
+        // and the show that brings it back draws every pane from its own grid.
+        if !published && self.window.unpainted_pane_output && !self.window.put_away {
             self.represent_on_screen_frame(FrameTrigger {
                 occurred_at: now,
                 source: FrameSource::Expose,
