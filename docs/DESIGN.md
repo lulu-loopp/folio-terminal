@@ -16994,3 +16994,19 @@ A transaction folder with no statement fails closed and is discarded. That cover
   - the existing Prepare, resume and feed tests, rewritten onto signed statements
 - `update_apply_windows::tests::a_set_whose_kept_statement_does_not_verify_is_refused_before_the_entrance`
 - bt-persist `release_keys::tests::a_refused_file_still_names_what_it_retired`
+
+### 2026-11-18 — A release is vouched for by a statement signed with our own Ed25519 key; part 3: what the reader is told of a signature (T-UPDATES-TRUST-OUR-OWN-KEY, 0.4.10 plan row 102; rulings R4, R5)
+
+**What changed.** No Authenticode signature decides an update (part 1b, R4), so a release may ship without our signing service's signature — and Windows may then warn when the new `folio.exe` starts. The reader is asked before that, by one sentence and no new card (R5): **the Ready card says *Windows may warn about this update.* before Restart** when the staged set's `folio.exe` is not signed by our signing service, and **About → Version's line ends *This copy is not signed by Microsoft's signing service.*** when the running one is not. Both are the updater's own reading (`update_prepare_windows::service_signature`: valid, with our service's subject and profile), never the statement's `authenticode` line, so a key holder without the signing service cannot hide either sentence; any refusal — another signer, none, revoked, offline, unknown — says it (`ServiceSignature::note`, `update_job::SignatureNote`).
+
+**Where each is read.** The staged set's `folio.exe` is read once the set is `Prepared` (`staged_signature_note`) and handed to the job beside the staged transaction (`Poster::verified`, the slot's third member); a later launch that resumes the set reads it again (`resumer`, under the system's policy) and hands it with `Landed::Resumed`. The Ready card is `update_card::paint_of`: the sentence is its detail, or follows the detail a restart-missed card already has (`i18n::two_sentences`, each language's own spacing). Restart is the one press that installs (`UpdateRestart`), so this card is where the question belongs. The running copy is read once per visit to About (`SettingsPanel::take_about_open_edge`, the General page's sign-in edge's shape), on a background worker — Windows may ask the network about revocation — and the line is drawn from the last reading (`update::this_copy_note`), said in `diagnostics.log` the first time and whenever it changes. macOS has no Authenticode reading; there neither sentence is ever said.
+
+**Copy.** English now; both entries are `Text::CHINESE_PENDING` for the Chinese pass. The 0.4.10 CHANGELOG says the road change and the two sentences, each marked `zh: pending T-UPDATES-TRUST-OUR-OWN-KEY`.
+
+**Proof.**
+- `update_card::tests::{the_ready_card_says_windows_may_warn_only_of_a_set_not_signed_by_our_service, the_version_line_of_a_copy_not_signed_by_our_service_says_so}`
+- `update_job::tests::{a_verified_report_hands_the_job_its_reading_of_the_signature, a_resumed_set_not_signed_by_our_service_keeps_both_lines_on_its_card}`
+- `update_prepare_windows::tests::{only_our_services_signature_says_nothing, the_prepare_hands_the_job_its_reading_of_the_staged_exe, a_resume_reads_the_staged_exe_again_for_its_card}`
+- `settings::tests::this_copys_signature_is_read_once_per_visit_to_about`
+- `update::tests::{no_reading_of_this_copys_signature_starts_off_windows, the_about_page_asks_for_this_copys_signature_and_draws_it}`
+- the plants `plant-102-3-*.py` in the row's report.
