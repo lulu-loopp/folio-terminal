@@ -59893,7 +59893,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 46] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 47] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -59966,6 +59966,10 @@ mod platform_gate_tests {
         // A test re-export gated as its only test caller is: a share handed over, which
         // only Windows names by its own spelling (`tests.rs`).
         "runtime/mod.rs",
+        // One test gated off macOS (2026-11-18, 0.4.10 plan row 103): the summoned terminal's
+        // question held over the run's end, which a Mac run never reaches because its
+        // application outlives its last window; the close lines are every platform's.
+        "runtime/windows_tests.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
         // Windows-only test fixtures: real Windows PowerShell 5.1 panes running Folio's

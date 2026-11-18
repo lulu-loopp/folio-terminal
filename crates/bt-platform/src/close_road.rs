@@ -948,21 +948,26 @@ mod tests {
 /// would read them.
 #[cfg(all(test, windows))]
 mod hook_tests {
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
+    use std::cell::RefCell;
 
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE,
-        PeekMessageW, PostMessageW, RegisterClassW, SendMessageW, TranslateMessage, WM_NULL,
-        WNDCLASSW, WS_OVERLAPPEDWINDOW,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, MSG,
+        PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassW, SendMessageW, TranslateMessage,
+        WM_NULL, WNDCLASSW, WS_OVERLAPPEDWINDOW,
     };
     use windows::core::{HSTRING, PCWSTR};
 
     use super::*;
 
-    /// Every `SC_CLOSE` the window's procedure was handed, by its `lParam`, in order.
-    static SYSTEM_CLOSES: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+    thread_local! {
+        /// Every `SC_CLOSE` the window's procedure was handed, by its `lParam`, in order: the
+        /// procedure runs on the window's thread, which is the test's own.
+        static SYSTEM_CLOSES: RefCell<Vec<isize>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// The `wParam` of the `WM_NULL` a sending thread posts once its send has returned.
+    const SENDER_RETURNED: usize = 0x5E17;
 
     unsafe extern "system" fn swallowing_close_procedure(
         hwnd: HWND,
@@ -974,10 +979,7 @@ mod hook_tests {
             return LRESULT(0);
         }
         if message == WM_SYSCOMMAND && wparam.0 & 0xFFF0 == SC_CLOSE {
-            SYSTEM_CLOSES
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(lparam.0);
+            SYSTEM_CLOSES.with(|closes| closes.borrow_mut().push(lparam.0));
         }
         // SAFETY: the arguments are the ones this procedure was called with.
         unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
@@ -996,11 +998,39 @@ mod hook_tests {
     }
 
     fn system_closes() -> Vec<isize> {
-        std::mem::take(
-            &mut *SYSTEM_CLOSES
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
+        SYSTEM_CLOSES.with(|closes| std::mem::take(&mut *closes.borrow_mut()))
+    }
+
+    /// **Send `message` to `target` from another thread, pumping this one until it returns.**
+    ///
+    /// The sender posts a `WM_NULL` tagged [`SENDER_RETURNED`] once its send is back; this thread
+    /// waits in `GetMessageW`, which delivers another thread's send inside the wait, and stops at
+    /// that post. No clock: the post is the completion signal.
+    fn send_from_another_thread(target: HWND, message: u32, wparam: usize, lparam: isize) {
+        let target = target.0 as isize;
+        let sender = std::thread::spawn(move || {
+            let target = HWND(target as *mut _);
+            // SAFETY: a send to a live window of another thread, which pumps until it returns.
+            unsafe { SendMessageW(target, message, Some(WPARAM(wparam)), Some(LPARAM(lparam))) };
+            // SAFETY: a post to the same live window.
+            unsafe { PostMessageW(Some(target), WM_NULL, WPARAM(SENDER_RETURNED), LPARAM(0)) }
+                .expect("the sender says it returned");
+        });
+        let mut taken = MSG::default();
+        loop {
+            // SAFETY: this thread's own queue; the call blocks until a post arrives.
+            let got = unsafe { GetMessageW(&mut taken, None, 0, 0) };
+            assert!(got.0 > 0, "the queue answers until the sender's post");
+            if taken.message == WM_NULL && taken.wParam.0 == SENDER_RETURNED {
+                break;
+            }
+            // SAFETY: a message this thread took off its own queue.
+            unsafe {
+                let _ = TranslateMessage(&taken);
+                DispatchMessageW(&taken);
+            }
+        }
+        sender.join().expect("the sender returns");
     }
 
     /// RED (one mutation per row) — **each road Windows delivers is read as that road**:
@@ -1077,17 +1107,7 @@ mod hook_tests {
             "another program's post"
         );
 
-        let target = hwnd.0 as isize;
-        let sender = std::thread::spawn(move || {
-            // SAFETY: a send to a live window of another thread, which pumps until it returns.
-            unsafe { SendMessageW(HWND(target as *mut _), WM_CLOSE, None, None) };
-        });
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !sender.is_finished() && Instant::now() < deadline {
-            pump_this_thread();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        sender.join().expect("the sender returns");
+        send_from_another_thread(hwnd, WM_CLOSE, 0, 0);
         assert_eq!(
             taken(),
             read(
@@ -1097,23 +1117,7 @@ mod hook_tests {
             "another thread's send"
         );
 
-        let sender = std::thread::spawn(move || {
-            // SAFETY: a send to a live window of another thread, which pumps until it returns.
-            unsafe {
-                SendMessageW(
-                    HWND(target as *mut _),
-                    WM_SYSCOMMAND,
-                    Some(WPARAM(SC_CLOSE)),
-                    Some(LPARAM(0)),
-                )
-            };
-        });
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !sender.is_finished() && Instant::now() < deadline {
-            pump_this_thread();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        sender.join().expect("the sender returns");
+        send_from_another_thread(hwnd, WM_SYSCOMMAND, SC_CLOSE, 0);
         assert_eq!(system_closes(), [0], "the command reached the window");
         assert_eq!(
             taken(),

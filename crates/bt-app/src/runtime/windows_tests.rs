@@ -3243,14 +3243,14 @@ fn a_cancelled_close_does_not_lend_its_road_to_the_next() {
 /// RED (mutation: `FolioApp::close` taking the held arrival before
 /// `the_summon_lets_the_run_end`) — **a close the summoned terminal held while its own question
 /// was answered says the road of the request that started it (R7)**.
+///
+/// Not on macOS (CONVENTIONS H1 rule 2): the summoned terminal is asked only by a close that ends
+/// the run, and there the application outlives its last window, so no close ends it and none is
+/// held; that arm is `a_run_ends_with_its_last_visible_window`'s, pinned by
+/// `only_a_mac_keeps_an_application_standing_with_no_window_left` in `main.rs`.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_close_the_summon_held_keeps_the_road_that_asked() {
-    // The summoned terminal is asked only by a close that ends the run. Where the application
-    // outlives its last window (macOS) no close does, so there is no held close to keep a road
-    // for: the road this test pins is not on that host.
-    if bt_platform::host_platform().an_application_outlives_its_last_window() {
-        return;
-    }
     let path = host_spelling(r"C:\w\summoned.md");
     let mut buffer = buffer_saying(&path, "summoned.md", "one\n");
     let mut caret = preview_edit::EditCaret::default();
