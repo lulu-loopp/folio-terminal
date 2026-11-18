@@ -751,8 +751,12 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
       ```
 
       **演练声明只放在演练文件夹里,只用于这一次运行**:从不上传;最后一行跑完,
-      `make-feed.ps1 -Out <feed 文件夹> -Remove` 删掉声明和签名(Mac 上由 `teardown.sh` 删),
-      客户机里的那份随每行回滚的快照一起消失。
+      `make-feed.ps1 -Out <feed 文件夹> -Remove` 删掉声明和签名(Mac 上由 `teardown.sh` 删,
+      `in/` 与 `feed/` 里的都删),客户机里的那份随每行回滚的快照一起消失。组好声明之后任何一步
+      失败(等签名超时、核对被拒),`make-feed.ps1` 当场删掉声明和签名,报错里写明 `-Remove`:
+      超时之后才写出来的签名用它删;重做时换一个新文件夹。**剩下的风险**:演练声明、它的签名和
+      B 的包若一起泄露,有人可以劝用户带 `--update-feed` 指向这几个文件启动 0.4.10 及以后的
+      Folio,装上 B;挡住它的只有「从不上传、跑完即删」,最坏时撤换 live 密钥。
    3. **拷进客户机** `C:\feed\`:`run-row.ps1 -Feed <宿主上的 feed 文件夹>` 每一行都逐个文件拷入。
    4. **带参数启动 A**:`guest/keys.ps1` 的第一步 `launchfeed` 以
       `C:\folio-vm\folio\folio.exe --update-feed file:///C:/feed/` 启动它。
@@ -766,9 +770,11 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
    源的答复**:此后 24 小时内的普通启动仍会提示 v<B>,按下去去问 github.com(U-31 D-10)。
 
    macOS 同理:资产是 `Folio-<B>-macos-arm64.dmg`、声明和它的签名,声明就是
-   `make-feed.ps1 -Image` 陈述两半的那一份。`mac/setup.sh` 先核对 dmg 与声明的 `macos-arm64`
-   行(名字、大小、SHA-256)和声明的版本,再只把这三个文件放进演练文件夹的 `feed/`,在声明的
-   标签下写好 `releases.json`,URL 形如 `file://<演练文件夹>/feed/Folio-<B>-macos-arm64.dmg`。
+   `make-feed.ps1 -Image` 陈述两半的那一份。三个文件先 `scp` 到 Mac 上演练文件夹的 `in/`;
+   `mac/setup.sh` 只认 `in/RELEASE-STATEMENT.txt` 与 `in/RELEASE-STATEMENT.txt.sig`(`teardown.sh`
+   删的就是这两个),先核对 dmg 与声明的 `macos-arm64` 行(名字、大小、SHA-256)、声明的版本
+   和补丁号不小于 1000,再只把这三个文件放进演练文件夹的 `feed/`,在声明的标签下写好
+   `releases.json`,URL 形如 `file://<演练文件夹>/feed/Folio-<B>-macos-arm64.dmg`。
 
 #### Windows 步骤(W1–W15)
 
@@ -874,8 +880,9 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
 **前提。**
 
 1. A 与 B 的 dmg、B 的声明 `RELEASE-STATEMENT.txt` 与签名 `RELEASE-STATEMENT.txt.sig`
-   (宿主上 `make-feed.ps1 -Image` 做出并核对过的)已在 Mac 上(dmg 的文件名必须是
-   `Folio-<版本>-macos-arm64.dmg`,版本从文件名读);A 已签名、公证、`spctl` 接受。
+   (宿主上 `make-feed.ps1 -Image` 做出并核对过的)已拷到 Mac 上演练文件夹的 `in/`(dmg 的
+   文件名必须是 `Folio-<版本>-macos-arm64.dmg`,版本从文件名读;声明与签名用这两个原名);
+   A 已签名、公证、`spctl` 接受。
 2. 控制台会话**已登录且未锁屏**,演练期间没人用这台 Mac:按键和截图都作用在真屏幕上;
    锁屏会让每一行停在第一次按键(「not frontmost; nothing sent」)。
 3. 没有演练文件夹以外的 Folio 在跑。每个脚本自己查,查到就以退出码 3 停下;请人退出它,
@@ -891,6 +898,7 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
 | `app/Folio.app` | 安装;它的 home H 是 `app/.Folio.app.folio-update` |
 | `H/journal.json` | 日志(不是 `H/<txn>/journal.json`) |
 | `H/<txn>/{stage,rescue,owner,health-<nonce>,mnt}` | 一个事务的文件 |
+| `in/` | 从宿主 `scp` 来的 A、B 的 dmg、声明与签名(声明与签名由 `teardown.sh` 删掉) |
 | `feed/` | B 的 dmg、声明、签名与 `releases.json`(声明与签名由 `teardown.sh` 删掉) |
 | `versions` | A、B 的版本(setup 写,row 读) |
 | `data-before/` | 数据文件夹的备份(`Folio/`,或没有时的 `ABSENT`) |
@@ -901,7 +909,9 @@ ssh 字符串里不写变量,行名照字面替换):
 
 ```text
 scp scripts/release/cleanvm/updater/mac/setup.sh scripts/release/cleanvm/updater/mac/row.sh scripts/release/cleanvm/updater/mac/teardown.sh <mac>:<dir>/
-ssh <mac> 'bash <dir>/setup.sh <A.dmg> <B.dmg> <RELEASE-STATEMENT.txt> <RELEASE-STATEMENT.txt.sig>'   # 以 SETUP DONE 结束
+ssh <mac> 'mkdir -p ~/folio-rehearsal/in'
+scp <A.dmg> <B.dmg> <feed 文件夹>/RELEASE-STATEMENT.txt <feed 文件夹>/RELEASE-STATEMENT.txt.sig <mac>:folio-rehearsal/in/
+ssh <mac> 'bash <dir>/setup.sh ~/folio-rehearsal/in/<A.dmg> ~/folio-rehearsal/in/<B.dmg> ~/folio-rehearsal/in/RELEASE-STATEMENT.txt ~/folio-rehearsal/in/RELEASE-STATEMENT.txt.sig'   # 以 SETUP DONE 结束
 ssh <mac> 'nohup bash <dir>/row.sh <行> > ~/folio-rehearsal/evidence/<行>.log 2>&1 < /dev/null &'
 ssh <mac> 'tail -n 4 ~/folio-rehearsal/evidence/<行>.log'                              # 末行 ROW <行> END (<结果>)
 ssh <mac> 'bash <dir>/teardown.sh'                                                      # 以 TEARDOWN DONE 结束
