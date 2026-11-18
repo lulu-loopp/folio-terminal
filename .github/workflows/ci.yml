@@ -1953,6 +1953,18 @@ jobs:
         shell: pwsh
         run: ./scripts/release/package-tests.ps1 -Binaries target/debug
 
+      # `release-statement.ps1` over a directory packed from the same build,
+      # with the check this checkout compiles (0.4.10 plan row 102, part 2):
+      # the statement it writes read back against the files, and each refusal.
+      # A signature that verifies needs a release key, which no runner holds;
+      # that half is `bt_winres::release_statement`'s own tests.
+      - name: build the release statement's check
+        run: cargo build -p bt-winres --features release-key,inflate --bin check-release-statement --locked
+
+      - name: release-statement.ps1 on a packed release
+        shell: pwsh
+        run: ./scripts/release/release-statement-tests.ps1 -Binaries target/debug -CheckBinary target/debug/check-release-statement.exe
+
       - name: install WARP
         shell: pwsh
         run: ./scripts/ci/install-warp.ps1 -TargetDir target/debug
