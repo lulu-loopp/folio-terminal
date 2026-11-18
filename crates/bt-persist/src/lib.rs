@@ -415,13 +415,23 @@ pub fn read_release_keys(path: &Path) -> (ReleaseKeysV1, ReadReport) {
 }
 
 /// [`read_release_keys`], with the keeping of a refused file the caller's to choose ([`Keeping`]).
+///
+/// **A refused file still names what it retired** (0.4.10 plan row 102 part 1b; 1a review P2-3):
+/// the `retired` array is frozen across the document's versions, so when the read is refused —
+/// a newer build's version above all, which a downgrade finds — the returned default carries the
+/// ids the refused bytes list there (`release_keys::retired_in`) rather than forgetting them.
+/// Every other field is the default, as for any refused read.
 pub fn read_release_keys_keeping(path: &Path, keeping: Keeping) -> (ReleaseKeysV1, ReadReport) {
-    migrate::read_with_fallback(
+    let (mut keys, report, bytes): (ReleaseKeysV1, _, _) = migrate::read_with_fallback_bytes(
         path,
         RELEASE_KEYS_SCHEMA_VERSION,
         RELEASE_KEYS_MIGRATIONS,
         keeping,
-    )
+    );
+    if let DocumentBytes::Refused { bytes } = bytes {
+        keys.retired = release_keys::retired_in(&bytes);
+    }
+    (keys, report)
 }
 
 /// Serializes `keys` and writes it to `path` via [`atomic_write`]: a half-written list read by

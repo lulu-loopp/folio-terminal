@@ -80,10 +80,71 @@ impl ReleaseKeysV1 {
     }
 }
 
+/// **The ids a `release-keys.json` lists under `retired`, whatever its version**: the array is
+/// frozen across versions ([`ReleaseKeysV1::retired`]), so it is read from the raw JSON of a file
+/// this build refuses. Only entries spelled as an id is spelled (sixteen lower-case hex digits)
+/// are taken, sorted and each once; bytes that are not a JSON object, or hold no such array,
+/// name none.
+#[must_use]
+pub(crate) fn retired_in(bytes: &[u8]) -> Vec<String> {
+    let spelled = |id: &str| {
+        id.len() == 16
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let Ok(Value::Object(document)) = serde_json::from_slice::<Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(Value::Array(listed)) = document.get("retired") else {
+        return Vec::new();
+    };
+    let mut retired: Vec<String> = listed
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|id| spelled(id))
+        .map(str::to_owned)
+        .collect();
+    retired.sort();
+    retired.dedup();
+    retired
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{ReadReport, read_release_keys, write_release_keys_atomic};
+
+    /// RED (0.4.10 plan row 102 part 1b, 1a review P2-3) — **a release-keys file this build
+    /// refuses still names what it retired**: a newer build's version is refused whole and its
+    /// `retired` ids come back with the default, entries not spelled as ids left out; bytes that
+    /// are not JSON name none.
+    ///
+    /// MUTATION: drop the recovery in `read_release_keys_keeping`
+    /// (`plant-102-1b-retired-forgotten.py`): a downgrade forgets every retire.
+    #[test]
+    fn a_refused_file_still_names_what_it_retired() {
+        let dir = bt_testpath::temp_path("bt-persist-release-keys-newer");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("release-keys.json");
+        std::fs::write(
+            &path,
+            br#"{"schema_version": 2, "retired": ["4d8ba64ee6d3ec25", "NOT-AN-ID", 7], "trusted": []}"#,
+        )
+        .unwrap();
+        let (read, report) = read_release_keys(&path);
+        assert!(
+            matches!(report, ReadReport::FellBackToDefaults { .. }),
+            "{report:?}"
+        );
+        assert_eq!(read.retired, ["4d8ba64ee6d3ec25"]);
+        assert_eq!(read.schema_version, RELEASE_KEYS_SCHEMA_VERSION);
+        assert!(read.extra.is_empty(), "nothing else is taken from it");
+
+        std::fs::write(&path, b"{\"retired\": [\"4d8ba64ee6d3ec25\"").unwrap();
+        assert!(read_release_keys(&path).0.retired.is_empty(), "not JSON");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// RED (0.4.10 plan row 102) — **a retire is recorded once, survives the file, and a retire
     /// of nothing new asks for no write**: the list stays sorted with each id once, what is
