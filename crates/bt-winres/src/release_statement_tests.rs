@@ -67,15 +67,15 @@ fn the_embedded_keys_verify_the_statements_signed_with_the_real_keys() {
     for (key, slot) in RELEASE_KEYS.iter().zip(["live", "spare"]) {
         assert_eq!(key.slot, slot);
         let text = fixture(&format!("statement-{slot}.txt"));
+        let signature = fixture(&format!("statement-{slot}.txt.sig"));
+        let statement = verify_statement(&text, &signature, &KeySet::EMBEDDED, &[])
+            .unwrap_or_else(|error| panic!("the {slot} key's statement: {error}"));
+        assert_eq!(statement.key, key.key_id());
         assert_eq!(
             text,
             fixture_statement(key).into_bytes(),
             "statement-{slot}.txt is the fixture statement for the {slot} key"
         );
-        let signature = fixture(&format!("statement-{slot}.txt.sig"));
-        let statement = verify_statement(&text, &signature, &KeySet::EMBEDDED, &[])
-            .unwrap_or_else(|error| panic!("the {slot} key's statement: {error}"));
-        assert_eq!(statement.key, key.key_id());
     }
 }
 
