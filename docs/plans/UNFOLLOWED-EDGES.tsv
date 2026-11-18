@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1818. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1819. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_deref	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_str	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
@@ -6741,6 +6741,8 @@ crates/bt-app/src/update.rs	bt-app crate::update::newest_tag	Ambiguous	map	1
 crates/bt-app/src/update.rs	bt-app crate::update::newest_tag	Ambiguous	ok	1	
 crates/bt-app/src/update.rs	bt-app crate::update::offer	Ambiguous	and_then	1	
 crates/bt-app/src/update.rs	bt-app crate::update::offer	Ambiguous	offer	1	
+crates/bt-app/src/update.rs	bt-app crate::update::read_this_copy_signature	Ambiguous	is_err	1	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102, part 3); the one-reading-at-a-time latch, AtomicBool::compare_exchange(..).is_err() and spawn_at_priority's Result::is_err; in memory, no door
+crates/bt-app/src/update.rs	bt-app crate::update::read_this_copy_signature	Dynamic	wake	1	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102, part 3); the loop's WAKE (update::WAKE, the closure the check's end calls too), asked on the worker once this copy's reading is stored, so the About page draws it
 crates/bt-app/src/update.rs	bt-app crate::update::release_trial	Ambiguous	release_trial	1	
 crates/bt-app/src/update.rs	bt-app crate::update::should_offer	Ambiguous	and_then	1	
 crates/bt-app/src/update.rs	bt-app crate::update::skip	Ambiguous	map_or	1	
@@ -6997,8 +6999,8 @@ crates/bt-app/src/update_card.rs	bt-app crate::update_card::needed_megabytes	Amb
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::paint	Ambiguous	text	3	
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::paint	Ambiguous	to_owned	2	
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::paint	Dynamic	bare	6	
-crates/bt-app/src/update_card.rs	bt-app crate::update_card::paint_of	Ambiguous	text	1	
-crates/bt-app/src/update_card.rs	bt-app crate::update_card::paint_of	Ambiguous	to_owned	1	
+crates/bt-app/src/update_card.rs	bt-app crate::update_card::paint_of	Ambiguous	text	2	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102, part 3); grown 1 -> 2: Text::UpdateCardMayWarn.text(), the Ready card's sentence on a set not signed by our signing service; in memory, no door
+crates/bt-app/src/update_card.rs	bt-app crate::update_card::paint_of	Ambiguous	to_owned	2	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102, part 3); grown 1 -> 2: that sentence's to_owned, as the card's whole detail; in memory, no door
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::reason	Ambiguous	text	1	
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::reason	Ambiguous	to_owned	1	
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::spend	Dynamic	skip	1	
@@ -7006,7 +7008,7 @@ crates/bt-app/src/update_card.rs	bt-app crate::update_card::uninstall_paint	Ambi
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::uninstall_paint	Ambiguous	to_owned	2	
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::version_failed_in	Ambiguous	in_lang	1	
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::version_failed_in	Ambiguous	replace	1	
-crates/bt-app/src/update_card.rs	bt-app crate::update_card::version_row	Ambiguous	in_lang	3	
+crates/bt-app/src/update_card.rs	bt-app crate::update_card::version_row	Ambiguous	in_lang	4	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102, part 3); grown 3 -> 4: Text::VersionNotSigned.in_lang(lang), the Version line's sentence on a copy not signed by our signing service; in memory, no door
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::version_row	Ambiguous	or	1	
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::version_row	Ambiguous	to_owned	4	
 crates/bt-app/src/update_card.rs	bt-app crate::update_card::version_row	Ambiguous	unwrap_or	1	
@@ -7073,6 +7075,7 @@ crates/bt-app/src/update_homes.rs	bt-app crate::update_homes::what_the_home_hold
 crates/bt-app/src/update_homes.rs	bt-app crate::update_homes::what_the_home_holds	Ambiguous	is_file	1	2026-11-10: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE-68B (0.4.10 plan row 68e); a listed entry's own type and path (DirEntry::file_type, FileType::is_file, DirEntry::path), the listing's answers and no further read; on the carry pass's worker or the uninstall's thread
 crates/bt-app/src/update_homes.rs	bt-app crate::update_homes::what_the_home_holds	Ambiguous	path	1	2026-11-10: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE-68B (0.4.10 plan row 68e); a listed entry's own type and path (DirEntry::file_type, FileType::is_file, DirEntry::path), the listing's answers and no further read; on the carry pass's worker or the uninstall's thread
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::<FeedBytes as Read>::read	Dynamic	(value)	1	
+crates/bt-app/src/update_job.rs	bt-app crate::update_job::<Poster as Drop>::drop	Ambiguous	unwrap_or_else	1	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102, the 1b+2 review's N14); the inbox's lock taken to count a poster out, PoisonError::into_inner; in memory, no door
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::<ReleaseDownload as Transport>::fetch	Ambiguous	cancel	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::<ReleaseDownload as Transport>::fetch	Ambiguous	load	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::<ReleaseDownload as Transport>::fetch	Ambiguous	map_err	1	
@@ -7082,7 +7085,6 @@ crates/bt-app/src/update_job.rs	bt-app crate::update_job::<ReleaseDownload as Tr
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::Job::after_start	Dynamic	check	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::Job::answer_verb	Ambiguous	clone	2	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::Job::apply	Ambiguous	clone	2	
-crates/bt-app/src/update_job.rs	bt-app crate::update_job::Job::apply	Ambiguous	is_some	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::Job::apply	Ambiguous	map	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::Job::apply	Ambiguous	unwrap_or_else	1	
 crates/bt-app/src/update_job.rs	bt-app crate::update_job::Job::consider	Ambiguous	then	1	
@@ -7137,13 +7139,11 @@ crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambi
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::at_launch	Ambiguous	to_string	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::clear	Ambiguous	to_string	3	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	load	1	
-crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	post	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	saturating_add	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::fetching	Ambiguous	store	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::settle_at_launch	Ambiguous	why	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::settle_at_launch	Dynamic	resume	1	
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::settle_at_launch	Dynamic	say	8	
-crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::statement_file_bytes	Ambiguous	len	1	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102, part 1b); a statement file is refused on its size before it is read (Metadata::len, the u64 against the cap; Result::map_err onto the Stop); an in-memory read of values the call already holds, no wait
 crates/bt-app/src/update_prepare.rs	bt-app crate::update_prepare::statement_file_bytes	Ambiguous	map_err	1	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102, part 1b); a statement file is refused on its size before it is read (Metadata::len, the u64 against the cap; Result::map_err onto the Stop); an in-memory read of values the call already holds, no wait
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::<Homebrew as PreparePoint>::prepare	Ambiguous	map_err	1	
 crates/bt-app/src/update_prepare_macos.rs	bt-app crate::update_prepare_macos::<MacPrepare as Driver>::prepare	Ambiguous	map_err	1	
