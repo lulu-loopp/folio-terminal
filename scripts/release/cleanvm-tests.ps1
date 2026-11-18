@@ -72,9 +72,13 @@
     statement lists is served with the statement and its signature under the
     names the updater fetches, and nothing else, and `releases.json` lists the
     three under the statement's tag; an image whose SHA-256 is not the
-    statement's `macos-arm64` line, and a statement of the Windows half alone,
-    are refused. MUTATION: in `serve_b`, drop the comparison of the image with
-    the statement's line.
+    statement's `macos-arm64` line, a statement of the Windows half alone, a
+    statement or signature not taken from `<folder>/in/` (where teardown.sh
+    deletes them), and a successor whose patch number is below 1000 are
+    refused. MUTATION: in `serve_b`, drop the comparison of the image with
+    the statement's line (`plant-104-mac-image-unheld.py`); or the `in/`
+    test (`plant-104-mac-inputs-anywhere.py`); or the patch floor
+    (`plant-104-mac-release-number.py`).
 
     **make_feed_lists_the_statement_its_signature_and_the_archive** (0.4.10
     plan row 104) — `updater/make-feed.ps1` over a scratch checkout whose
@@ -86,16 +90,21 @@
     appears in the folder; with `-Image` the statement states both halves and
     the image is not left in the Windows feed; a successor whose patch number
     is below 1000 is refused before the folder exists; a statement the check
-    refuses leaves no `releases.json`; `-Remove` deletes the statement and its
-    signature. MUTATION: list the package folder's files in `releases.json`
-    instead of the statement's archive line and the two statement files (the
-    signature drops out of the feed); or skip the wait for the signature.
+    refuses, and a wait for the signature that runs out, leave no
+    `releases.json`, no statement and no signature, and name `-Remove`;
+    `-Remove` deletes the statement and its signature. MUTATION: list the
+    package folder's files in `releases.json` instead of the statement's
+    archive line and the two statement files (the signature drops out of the
+    feed; `plant-104-feed-lists-the-package.py`); or skip the wait for the
+    signature (`plant-104-feed-skips-the-wait.py`); or leave the statement on
+    a failure (`plant-104-feed-failure-keeps-the-statement.py`).
 
     **install_candidate_holds_the_archive_to_its_statement** (0.4.10 plan row
     104) — `install-candidate.ps1 -Statement -WhatIf` takes an archive whose
     name, size and SHA-256 are its statement's `windows-x64` line and prints
     it, and refuses one the statement does not list before anything of the
-    guest is planned. MUTATION: drop the comparison with `$zipLine`.
+    guest is planned. MUTATION: drop the comparison with `$zipLine`
+    (`plant-104-install-unheld.py`).
 
     **the_host_reports_what_the_guest_saw** (H6) — `rows.ps1`
     `Get-RowVerdict`: a cut row's marker of FAILED, MISSED or NOT_REACHED, a
@@ -342,6 +351,12 @@ try {
     try { $made = Invoke-MakeFeed 'feed-refused' @('-Signature', $feedSig) }
     finally { Remove-Item Env:STUB_REFUSE }
     Check ($made.Exit -ne 0 -and -not (Test-Path -LiteralPath (Join-Path $scratch 'feed-refused\releases.json'))) "a statement the check refuses leaves no releases.json (exit $($made.Exit))"
+    Check ((Get-FeedNames (Join-Path $scratch 'feed-refused')) -ceq $feedArchive -and $made.Text -match '-Remove') `
+        "a refused check deletes the statement and its signature and names -Remove ($(Get-FeedNames (Join-Path $scratch 'feed-refused')))"
+    $made = Invoke-MakeFeed 'feed-timed-out' @('-WaitSeconds', '1')
+    Check ($made.Exit -ne 0 -and $made.Text -match 'no 64-byte' -and $made.Text -match '-Remove' -and
+        (Get-FeedNames (Join-Path $scratch 'feed-timed-out')) -ceq $feedArchive) `
+        "a wait that runs out deletes the statement and names -Remove (exit $($made.Exit): $(Get-FeedNames (Join-Path $scratch 'feed-timed-out')))"
 
     [IO.File]::Move((Join-Path $feedPackage $feedArchive), (Join-Path $feedPackage 'folio-0.4.11-windows-x64-unsigned.zip'))
     $made = Invoke-MakeFeed 'feed-release-number' @('-Signature', $feedSig)
@@ -502,24 +517,33 @@ try {
     $macRehearsal = Join-Path $scratch 'mac-rehearsal'
     $macInputs = Join-Path $scratch 'mac-inputs'
     [IO.Directory]::CreateDirectory($macInputs) | Out-Null
+    $macIn = Join-Path $macRehearsal 'in'
+    [IO.Directory]::CreateDirectory($macIn) | Out-Null
     $dmgName = 'Folio-0.4.1010-macos-arm64.dmg'
     $dmg = Join-Path $macInputs $dmgName
     [IO.File]::WriteAllBytes($dmg, [byte[]](1..200))
     $dmgSha = (Get-FileHash -LiteralPath $dmg -Algorithm SHA256).Hash.ToLowerInvariant()
     $otherSha = 'ab' * 32
-    function Write-MacStatement([string] $path, [string[]] $assetLines) {
-        $text = (@('folio-release-statement 1', 'product folio', 'version 0.4.1010', 'tag v0.4.1010-preview',
+    function Write-MacStatement([string] $path, [string[]] $assetLines, [string] $stated = '0.4.1010') {
+        $text = (@('folio-release-statement 1', 'product folio', "version $stated", "tag v$stated-preview",
                 'date 2026-11-18', 'key 0123456789abcdef', 'min_from 0.4.6', 'authenticode false', 'retires 0',
-                "assets $(1 + $assetLines.Count)", "$otherSha 10 windows-x64 folio-0.4.1010-windows-x64-unsigned.zip") +
+                "assets $(1 + $assetLines.Count)", "$otherSha 10 windows-x64 folio-$stated-windows-x64-unsigned.zip") +
             $assetLines + @('members windows-x64 1', "$otherSha 10 folio.exe")) -join "`n"
         [IO.File]::WriteAllText($path, "$text`n", (New-Object Text.UTF8Encoding $false))
     }
     $macSig = Join-Path $macInputs 'statement.sig'
     [IO.File]::WriteAllBytes($macSig, [byte[]]::new(64))
-    function Invoke-MacFeed([string] $statementPath) {
+    # The statement and the signature are scp'd to <folder>/in/ under the names
+    # the updater fetches; -Anywhere passes them from where they were written.
+    function Invoke-MacFeed([string] $statementPath, [switch] $Anywhere, [string] $image = $dmg) {
+        $statementIn = Join-Path $macIn 'RELEASE-STATEMENT.txt'
+        $signatureIn = Join-Path $macIn 'RELEASE-STATEMENT.txt.sig'
+        [IO.File]::Copy($statementPath, $statementIn, $true)
+        [IO.File]::Copy($macSig, $signatureIn, $true)
+        if ($Anywhere) { $statementIn = $statementPath; $signatureIn = $macSig }
         $env:FOLIO_REHEARSAL = ConvertTo-Posix $macRehearsal
         try {
-            $said = & $bash (ConvertTo-Posix $setupSh) --feed-dry-run (ConvertTo-Posix $dmg) (ConvertTo-Posix $statementPath) (ConvertTo-Posix $macSig) 2>&1 | Out-String
+            $said = & $bash (ConvertTo-Posix $setupSh) --feed-dry-run (ConvertTo-Posix $image) (ConvertTo-Posix $statementIn) (ConvertTo-Posix $signatureIn) 2>&1 | Out-String
             return @{ Exit = $LASTEXITCODE; Text = $said.Trim() }
         }
         finally { Remove-Item Env:FOLIO_REHEARSAL }
@@ -551,6 +575,16 @@ try {
     $refused = Invoke-MacFeed $windowsOnly
     Check ($refused.Exit -ne 0 -and $refused.Text -match 'SETUP STOPPED: the statement has no single macos-arm64 line') `
         "a statement of the Windows half alone is refused (exit $($refused.Exit): $($refused.Text))"
+    $refused = Invoke-MacFeed $macStatement -Anywhere
+    Check ($refused.Exit -ne 0 -and $refused.Text -match 'SETUP STOPPED: the statement and its signature are taken from .*/in/RELEASE-STATEMENT\.txt') `
+        "a statement not taken from in/ is refused (exit $($refused.Exit): $($refused.Text))"
+    $releaseDmg = Join-Path $macInputs 'Folio-0.4.11-macos-arm64.dmg'
+    [IO.File]::WriteAllBytes($releaseDmg, [byte[]](1..200))
+    $releaseStatement = Join-Path $macInputs 'release-number.txt'
+    Write-MacStatement $releaseStatement @("$dmgSha 200 macos-arm64 Folio-0.4.11-macos-arm64.dmg") '0.4.11'
+    $refused = Invoke-MacFeed $releaseStatement -image $releaseDmg
+    Check ($refused.Exit -ne 0 -and $refused.Text -match 'SETUP STOPPED: B is 0\.4\.11, which a release may carry') `
+        "a successor numbered as a release could be is refused on the Mac too (exit $($refused.Exit): $($refused.Text))"
 
     # ── the_host_reports_what_the_guest_saw ───────────────────────────────────
     $v = Get-RowVerdict -Cut -Marker "row=W4 phase=FAILED at=10:00:01.250`r`n" -WatchLog @()

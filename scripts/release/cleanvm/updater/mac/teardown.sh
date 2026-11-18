@@ -11,8 +11,9 @@
 #   * detaches any image still mounted under the folder and reports what remains;
 #   * restores ~/Library/Application Support/Folio from data-before/ (the final restore);
 #   * removes the update home app/.Folio.app.folio-update;
-#   * deletes feed/'s release statement and its signature (0.4.10 plan row 104: a rehearsal's
-#     statement, signed with the live key, lives only in the rehearsal folder and only for the run);
+#   * deletes the release statement and its signature from feed/ and from in/, where they were
+#     scp'd for setup.sh (0.4.10 plan row 104: a rehearsal's statement, signed with the live key,
+#     lives only in the rehearsal folder and only for the run);
 #   * leaves evidence/, the rest of feed/, app/Folio.app, a-pristine/ and data-before/ in place
 #     (the folder is deleted by hand after the write-up).
 set -u
@@ -88,16 +89,18 @@ if [ -n "$LEFT" ]; then say "STILL MOUNTED under $U: $LEFT"; else say "unmount c
 hdiutil info 2>/dev/null | grep -F "$U" >> "$TLOG" && say "hdiutil info still names an image under $U (see teardown.txt)"
 
 # ---- the rehearsal's release statement (row 104: it lives only in this folder, for the run) ----
-for name in RELEASE-STATEMENT.txt RELEASE-STATEMENT.txt.sig; do
-  if [ -e "$U/feed/$name" ]; then
-    rm -f "$U/feed/$name" && say "deleted feed/$name"
+for place in feed in; do
+  for name in RELEASE-STATEMENT.txt RELEASE-STATEMENT.txt.sig; do
+    if [ -e "$U/$place/$name" ]; then
+      rm -f "$U/$place/$name" && say "deleted $place/$name"
+    fi
+  done
+  if [ -e "$U/$place/RELEASE-STATEMENT.txt" ] || [ -e "$U/$place/RELEASE-STATEMENT.txt.sig" ]; then
+    say "statement check: $place/ STILL holds a release statement or its signature"
+  else
+    say "statement check: $place/ holds no release statement"
   fi
 done
-if [ -e "$U/feed/RELEASE-STATEMENT.txt" ] || [ -e "$U/feed/RELEASE-STATEMENT.txt.sig" ]; then
-  say "statement check: feed/ STILL holds a release statement or its signature"
-else
-  say "statement check: feed/ holds no release statement"
-fi
 
 # ---- the data folder ----
 if [ -n "$(ours_now)" ]; then

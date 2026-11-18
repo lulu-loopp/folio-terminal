@@ -39,7 +39,10 @@
     **The statement lives only in the rehearsal folder and only for the run.**
     It is never uploaded. After the last row, `make-feed.ps1 -Out <feed>
     -Remove` deletes it and its signature (and `mac/teardown.sh` the Mac's
-    copy); the guest's copy goes with the snapshot every row reverts to.
+    copies, in `<folder>/in/` and `feed/`); the guest's copy goes with the
+    snapshot every row reverts to. A failure at any step after the compose -
+    the wait running out, a refused check - deletes both at once and names
+    -Remove for a signature written after it.
 
     No private key is read, written or named here.
 
@@ -105,18 +108,26 @@ $signatureName = 'RELEASE-STATEMENT.txt.sig'
 $rehearsalPatchFloor = 1000
 $Out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Out)
 
-if ($Remove) {
-    if (-not (Test-Path -LiteralPath $Out -PathType Container)) { throw "there is no feed folder at $Out" }
+# **Delete the feed's statement and its signature** - after the last row
+# (-Remove), and on any failure once the statement may exist (the part 3 / 104
+# review's P2-10): a rehearsal statement signed with the live key never
+# outlives the run in this folder.
+function Remove-FeedStatement([string] $Folder) {
     foreach ($name in @($statementName, $signatureName)) {
-        $path = Join-Path $Out $name
+        $path = Join-Path $Folder $name
         if (Test-Path -LiteralPath $path) {
             Remove-Item -LiteralPath $path -Force
             Write-Host "deleted $path"
         }
     }
-    if ((Test-Path -LiteralPath (Join-Path $Out $statementName)) -or (Test-Path -LiteralPath (Join-Path $Out $signatureName))) {
-        throw "$Out still holds a release statement or its signature"
+    if ((Test-Path -LiteralPath (Join-Path $Folder $statementName)) -or (Test-Path -LiteralPath (Join-Path $Folder $signatureName))) {
+        throw "$Folder still holds a release statement or its signature"
     }
+}
+
+if ($Remove) {
+    if (-not (Test-Path -LiteralPath $Out -PathType Container)) { throw "there is no feed folder at $Out" }
+    Remove-FeedStatement $Out
     Write-Host "FEED_STATEMENT_REMOVED $Out"
     return
 }
@@ -155,57 +166,67 @@ $passed = @{ PackageDirectory = $Out }
 if ($CheckBinary) { $passed.CheckBinary = $CheckBinary }
 $composeArguments = $passed.Clone()
 if (-not $Image) { $composeArguments.WindowsOnly = $true }
-& $statementScript @composeArguments
-$statementPath = Join-Path $Out $statementName
-if (-not (Test-Path -LiteralPath $statementPath -PathType Leaf)) { throw "release-statement.ps1 wrote no $statementName in $Out" }
+try {
+    & $statementScript @composeArguments
+    $statementPath = Join-Path $Out $statementName
+    if (-not (Test-Path -LiteralPath $statementPath -PathType Leaf)) { throw "release-statement.ps1 wrote no $statementName in $Out" }
 
-$signaturePath = Join-Path $Out $signatureName
-if ($Signature) {
-    if (-not (Test-Path -LiteralPath $Signature -PathType Leaf)) { throw "there is no signature at $Signature" }
-    Copy-Item -LiteralPath $Signature -Destination $signaturePath
-}
-else {
-    Write-Host ''
-    Write-Host "waiting up to $WaitSeconds s for $signaturePath (the key holder signs with the live key, by the command above)"
-    $deadline = [DateTime]::UtcNow.AddSeconds($WaitSeconds)
-    while (-not ((Test-Path -LiteralPath $signaturePath -PathType Leaf) -and (Get-Item -LiteralPath $signaturePath).Length -eq 64)) {
-        if ([DateTime]::UtcNow -ge $deadline) { throw "no 64-byte $signatureName appeared in $Out within $WaitSeconds s" }
-        Start-Sleep -Milliseconds 500
+    $signaturePath = Join-Path $Out $signatureName
+    if ($Signature) {
+        if (-not (Test-Path -LiteralPath $Signature -PathType Leaf)) { throw "there is no signature at $Signature" }
+        Copy-Item -LiteralPath $Signature -Destination $signaturePath
     }
-}
-& $statementScript @passed -Signature $signaturePath
-
-# The archive is the one the statement lists, under the statement's tag.
-$lines = [IO.File]::ReadAllLines($statementPath)
-$tags = @($lines | Where-Object { $_ -cmatch '^tag ' } | ForEach-Object { $_.Substring(4) })
-if ($tags.Count -ne 1) { throw "$statementName has $($tags.Count) tag lines" }
-$listed = @($lines | Where-Object { $words = $_ -split ' '; $words.Count -eq 4 -and $words[2] -ceq 'windows-x64' } | ForEach-Object { ($_ -split ' ')[3] })
-if ($listed.Count -ne 1) { throw "$statementName has $($listed.Count) windows-x64 lines" }
-$archiveName = $listed[0]
-if (-not (Test-Path -LiteralPath (Join-Path $Out $archiveName) -PathType Leaf)) { throw "$statementName lists $archiveName, which is not in $Out" }
-if ($Image) { Remove-Item -LiteralPath (Join-Path $Out $imageName) -Force }
-
-$assets = foreach ($name in @($archiveName, $statementName, $signatureName)) {
-    [ordered]@{
-        name                 = $name
-        browser_download_url = "file:///C:/feed/$name"
-        size                 = (Get-Item -LiteralPath (Join-Path $Out $name)).Length
+    else {
+        Write-Host ''
+        Write-Host "waiting up to $WaitSeconds s for $signaturePath (the key holder signs with the live key, by the command above)"
+        $deadline = [DateTime]::UtcNow.AddSeconds($WaitSeconds)
+        while (-not ((Test-Path -LiteralPath $signaturePath -PathType Leaf) -and (Get-Item -LiteralPath $signaturePath).Length -eq 64)) {
+            if ([DateTime]::UtcNow -ge $deadline) { throw "no 64-byte $signatureName appeared in $Out within $WaitSeconds s" }
+            Start-Sleep -Milliseconds 500
+        }
     }
+    & $statementScript @passed -Signature $signaturePath
+
+    # The archive is the one the statement lists, under the statement's tag.
+    $lines = [IO.File]::ReadAllLines($statementPath)
+    $tags = @($lines | Where-Object { $_ -cmatch '^tag ' } | ForEach-Object { $_.Substring(4) })
+    if ($tags.Count -ne 1) { throw "$statementName has $($tags.Count) tag lines" }
+    $listed = @($lines | Where-Object { $words = $_ -split ' '; $words.Count -eq 4 -and $words[2] -ceq 'windows-x64' } | ForEach-Object { ($_ -split ' ')[3] })
+    if ($listed.Count -ne 1) { throw "$statementName has $($listed.Count) windows-x64 lines" }
+    $archiveName = $listed[0]
+    if (-not (Test-Path -LiteralPath (Join-Path $Out $archiveName) -PathType Leaf)) { throw "$statementName lists $archiveName, which is not in $Out" }
+    if ($Image) { Remove-Item -LiteralPath (Join-Path $Out $imageName) -Force }
+
+    $assets = foreach ($name in @($archiveName, $statementName, $signatureName)) {
+        [ordered]@{
+            name                 = $name
+            browser_download_url = "file:///C:/feed/$name"
+            size                 = (Get-Item -LiteralPath (Join-Path $Out $name)).Length
+        }
+    }
+    $list = @([ordered]@{
+            tag_name   = $tags[0]
+            name       = "Folio $version"
+            draft      = $false
+            prerelease = $false
+            assets     = @($assets)
+        })
+    $json = ConvertTo-Json -InputObject $list -Depth 5
+    [IO.File]::WriteAllText((Join-Path $Out 'releases.json'), ($json -replace "`r`n", "`n") + "`n", (New-Object Text.UTF8Encoding $false))
 }
-$list = @([ordered]@{
-        tag_name   = $tags[0]
-        name       = "Folio $version"
-        draft      = $false
-        prerelease = $false
-        assets     = @($assets)
-    })
-$json = ConvertTo-Json -InputObject $list -Depth 5
-[IO.File]::WriteAllText((Join-Path $Out 'releases.json'), ($json -replace "`r`n", "`n") + "`n", (New-Object Text.UTF8Encoding $false))
+catch {
+    $failure = $_
+    Remove-FeedStatement $Out
+    throw ("$($failure.Exception.Message) - the statement and its signature are deleted from $Out; " +
+           "a signature written there after this is deleted by make-feed.ps1 -Out `"$Out`" -Remove, " +
+           'and a new feed is made in a new folder')
+}
 
 Get-ChildItem -LiteralPath $Out | ForEach-Object { '{0}  {1,10}  {2}' -f (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant(), $_.Length, $_.Name }
 Get-Content -LiteralPath (Join-Path $Out 'releases.json')
 if ($Image) {
-    Write-Host "the Mac's feed: setup.sh <A.dmg> <$imageName> <$statementPath> <$signaturePath>"
+    Write-Host "the Mac's feed: scp $Image, $statementPath and $signaturePath to <folder>/in/ on the Mac, then"
+    Write-Host "  setup.sh <A.dmg> <folder>/in/$imageName <folder>/in/$statementName <folder>/in/$signatureName"
 }
 Write-Host "after the last row: make-feed.ps1 -Out `"$Out`" -Remove (the statement is never uploaded)"
 Write-Host "FEED_DONE $Out"

@@ -2,8 +2,12 @@
 # The macOS updater rehearsal (clean-vm.md 4.4, macOS), setup. Runs ON THE MAC, in the
 # account the rehearsal runs in, from ssh.
 #
-#   setup.sh <A.dmg> <B.dmg> <B's RELEASE-STATEMENT.txt> <its RELEASE-STATEMENT.txt.sig>
+#   setup.sh <A.dmg> <B.dmg> <folder>/in/RELEASE-STATEMENT.txt <folder>/in/RELEASE-STATEMENT.txt.sig
 #   setup.sh --feed-dry-run <B.dmg> <statement> <signature>    the feed step alone (the tests')
+#
+# The statement and its signature are taken only from <folder>/in/, under the names the
+# updater fetches (scp them there; clean-vm.md 4.4), so that every copy of them on this Mac
+# is one teardown.sh deletes.
 #
 # A is the candidate installed (offers on), B the successor served from a local feed; both are
 # signed, notarised and named Folio-<version>-macos-arm64.dmg, and B's version is higher. B's
@@ -21,7 +25,8 @@
 #     the localised text output), ditto's Folio.app to a-pristine/ and app/, detaches;
 #   * records A's signature, assessment and version (must read A's version);
 #   * holds B's dmg to the statement - its macos-arm64 line names the image, its SHA-256 and
-#     its size, and the statement's version is B's - and the signature to 64 bytes (the
+#     its size, and the statement's version is B's, a rehearsal version (patch 1000 or more,
+#     as make-feed.ps1 holds it) - and the signature to 64 bytes (the
 #     signature itself is the updater's to verify; the host checked it before it came here);
 #   * copies the dmg, the statement and the signature into feed/ and nothing else - the Windows
 #     archive the statement also lists is not this feed's - and writes feed/releases.json in the
@@ -74,6 +79,9 @@ B_NAME=$(basename "$B_DMG")
 # The names the updater fetches them by (bt_winres::release_statement), whatever the inputs' names.
 STATEMENT_NAME="RELEASE-STATEMENT.txt"
 SIGNATURE_NAME="RELEASE-STATEMENT.txt.sig"
+# A rehearsal successor's patch number is this or more (make-feed.ps1's rule, held here too):
+# no release of Folio carries one, so its statement is never taken for a release's.
+REHEARSAL_PATCH_FLOOR=1000
 DATA="$HOME/Library/Application Support/Folio"
 LA="$HOME/Library/LaunchAgents"
 LPFX="io.github.lulu-loopp.folio.update-"
@@ -107,11 +115,15 @@ serve_b() {
   for f in "$B_DMG" "$STATEMENT" "$SIGNATURE"; do
     [ -f "$f" ] || die "missing input $f"
   done
+  [ "$STATEMENT" = "$U/in/$STATEMENT_NAME" ] && [ "$SIGNATURE" = "$U/in/$SIGNATURE_NAME" ] \
+    || die "the statement and its signature are taken from $U/in/$STATEMENT_NAME and $U/in/$SIGNATURE_NAME only, where teardown.sh deletes them"
   [ "$(head -n 1 "$STATEMENT")" = "folio-release-statement 1" ] || die "$STATEMENT is not a release statement (v1)"
   ST_VERSION=$(sed -n 's/^version //p' "$STATEMENT")
   ST_TAG=$(sed -n 's/^tag //p' "$STATEMENT")
   [ "$ST_VERSION" = "$B_VERSION" ] || die "the statement is of version '$ST_VERSION', and B is $B_VERSION"
   case "$ST_TAG" in "v$B_VERSION" | "v$B_VERSION-preview") ;; *) die "the statement's tag '$ST_TAG' does not name $B_VERSION" ;; esac
+  [ "${B_VERSION##*.}" -ge "$REHEARSAL_PATCH_FLOOR" ] \
+    || die "B is $B_VERSION, which a release may carry; a rehearsal successor's patch number is $REHEARSAL_PATCH_FLOOR or more"
   # An asset line is the only line of four words: <sha256> <size> <platform> <name>.
   ST_LINES=$(awk 'NF == 4 && $3 == "macos-arm64"' "$STATEMENT")
   [ "$(printf '%s\n' "$ST_LINES" | grep -c .)" = 1 ] || die "the statement has no single macos-arm64 line"
