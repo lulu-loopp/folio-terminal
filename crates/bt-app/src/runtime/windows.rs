@@ -3131,6 +3131,9 @@ pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
 #[path = "windows_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+// Windows only until 87c: on macOS an application outlives its last window, so the close these
+// tests make never puts a window away and never ends the run (the rule's own test holds that
+// answer); 87c writes the macOS arms.
+#[cfg(all(test, windows))]
 #[path = "put_away_tests.rs"]
 mod put_away_tests;
