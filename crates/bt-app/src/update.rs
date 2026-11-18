@@ -3660,6 +3660,7 @@ mod tests {
                 path: String::new(),
                 tag: "v0.4.7".to_owned(),
                 file_name: name.to_owned(),
+                most: bt_platform::https_download::DOWNLOAD_CEILING_LIMIT,
             };
             assert!(
                 transport.fetch(&request, &into, &fetching).is_err(),
@@ -3709,5 +3710,59 @@ mod tests {
                 .contains(&squeezed("i18n::current(), update::this_copy_note(), ),")),
             "the Version line is given the last reading"
         );
+    }
+
+    /// RED (0.4.10 plan row 102, the 1b+2 review's N12) — **a feed's file
+    /// larger than its request may hold is refused before it is copied**: a
+    /// statement the list gives as one byte over 64 KiB leaves nothing behind.
+    ///
+    /// MUTATION: drop the size check in `FeedCopy::fetch`
+    /// (`plant-102-n12-feed-copies-any-size.py`).
+    #[test]
+    fn a_feed_file_larger_than_its_request_holds_is_not_copied() {
+        let home = dir("feed-oversized");
+        let folder = home.join("feed");
+        std::fs::create_dir_all(&folder).unwrap();
+        let name = bt_winres::release_statement::STATEMENT_FILE;
+        let most = bt_winres::release_statement::STATEMENT_MAX_BYTES;
+        std::fs::write(folder.join(name), vec![b'a'; most + 1]).unwrap();
+        std::fs::write(
+            folder.join(FEED_LIST),
+            serde_json::json!([{
+                "tag_name": "v0.4.10",
+                "name": "Folio v0.4.10",
+                "draft": false,
+                "prerelease": false,
+                "assets": [{
+                    "name": name,
+                    "browser_download_url": url_of(&folder.join(name)),
+                    "size": most + 1,
+                }],
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let feed = Feed::at(&format!("{}/", url_of(&folder)));
+        let into = home.join("into");
+        std::fs::create_dir_all(&into).unwrap();
+        let transport = crate::update_job::transport_for(
+            Some(&feed),
+            std::sync::Arc::new(crate::update_job::NoDownloadDoor),
+        );
+        let fetching = crate::update_job::Fetching {
+            report: std::sync::Arc::new(|_| {}),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let offer = crate::update_job::Offer::mint(
+            crate::update_txn::TxnId::new([0x12; 16]),
+            "v0.4.10",
+            bt_platform::HostPlatform::Windows,
+        )
+        .expect("a release");
+        let [statement, _] = offer.requests();
+        let refused = transport.fetch(&statement, &into, &fetching);
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(!into.join(name).exists(), "nothing is left");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -179,28 +179,39 @@ impl Offer {
     }
 
     /// **The two files a press fetches first** (C11; 0.4.10 plan row 102):
-    /// the release statement and its signature, both by the offer's own tag.
-    /// The one other file a press fetches is the one the verified statement
-    /// names ([`Self::asset_request`]).
+    /// the release statement and its signature, both by the offer's own tag,
+    /// each held at the door to the most its reader takes — 64 KiB and 64
+    /// bytes (the 1b+2 review's N12). The one other file a press fetches is
+    /// the one the verified statement names ([`Self::asset_request`]).
     #[must_use]
     pub(crate) fn requests(&self) -> [Request; 2] {
+        use bt_winres::release_statement::{
+            SIGNATURE_BYTES, SIGNATURE_FILE, STATEMENT_FILE, STATEMENT_MAX_BYTES,
+        };
         [
-            bt_winres::release_statement::STATEMENT_FILE,
-            bt_winres::release_statement::SIGNATURE_FILE,
+            (STATEMENT_FILE, STATEMENT_MAX_BYTES as u64),
+            (SIGNATURE_FILE, SIGNATURE_BYTES as u64),
         ]
-        .map(|name| self.asset_request(name))
+        .map(|(name, most)| self.file_request(name, most))
     }
 
     /// **The file `name` of the offer's release**, by its tag — the name a
     /// verified statement gives this platform's file, which the statement's
-    /// grammar holds to one file name (no separator, no `..` path).
+    /// grammar holds to one file name (no separator, no `..` path) — under
+    /// the download door's own ceiling.
     #[must_use]
     pub(crate) fn asset_request(&self, name: &str) -> Request {
+        self.file_request(name, bt_platform::https_download::DOWNLOAD_CEILING_LIMIT)
+    }
+
+    /// The file `name` of the offer's release, of at most `most` bytes.
+    fn file_request(&self, name: &str, most: u64) -> Request {
         Request {
             host: RELEASE_HOST,
             path: format!("{RELEASE_DOWNLOAD_PATH}/{}/{name}", self.tag),
             tag: self.tag.clone(),
             file_name: name.to_owned(),
+            most,
         }
     }
 }
@@ -228,6 +239,9 @@ pub(crate) struct Request {
     /// The offer's tag, which `path` also spells.
     pub(crate) tag: String,
     pub(crate) file_name: String,
+    /// **The most bytes the file may hold**: the ceiling the door holds the
+    /// download to, and the size a feed's copy may be.
+    pub(crate) most: u64,
 }
 
 // ── the evidence, and eligibility ───────────────────────────────────────────
@@ -1003,7 +1017,7 @@ impl Transport for ReleaseDownload {
             user_agent: crate::update::USER_AGENT,
             directory: into,
             file_name: &request.file_name,
-            ceiling: DOWNLOAD_CEILING_LIMIT,
+            ceiling: request.most.min(DOWNLOAD_CEILING_LIMIT),
             idle_timeout: DOWNLOAD_IDLE_TIMEOUT,
             floor: DOWNLOAD_FLOOR_BYTES,
             monitor: &monitor,
@@ -1030,6 +1044,12 @@ impl Transport for FeedCopy {
         fetching: &Fetching,
     ) -> Result<std::path::PathBuf, String> {
         let (source, size) = self.0.asset(&request.tag, &request.file_name)?;
+        if size > request.most {
+            return Err(format!(
+                "{} is {size} bytes in the feed, more than the {} it may hold",
+                request.file_name, request.most
+            ));
+        }
         let target = into.join(&request.file_name);
         copy_feed_file(&source, &target, size, fetching).map(|()| target)
     }
@@ -4408,4 +4428,27 @@ mod tests {
         drop(job);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// RED (0.4.10 plan row 102, the 1b+2 review's N12) — **the statement and
+    /// its signature are asked for no more than their readers take**: 64 KiB
+    /// and 64 bytes at the door, where a hostile server's answer stops; the
+    /// archive keeps the door's own ceiling.
+    ///
+    /// MUTATION: `requests` asks for both under the door's ceiling
+    /// (`plant-102-n12-door-ceiling.py`).
+    #[test]
+    fn the_statement_and_its_signature_are_asked_for_no_more_than_their_readers_take() {
+        let offer = Offer::mint(txn(0x12), "v0.4.10", HostPlatform::Windows).expect("a release");
+        let [statement, signature] = offer.requests();
+        assert_eq!(
+            (statement.most, signature.most),
+            (64 * 1024, 64),
+            "{statement:?} {signature:?}"
+        );
+        assert_eq!(
+            offer.asset_request("folio-0.4.10-windows-x64.zip").most,
+            bt_platform::https_download::DOWNLOAD_CEILING_LIMIT
+        );
+    }
+
 }
