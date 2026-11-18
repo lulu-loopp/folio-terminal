@@ -50,9 +50,9 @@ name = "render-info-plist"
 path = "src/bin/render-info-plist.rs"
 
 # **The release statement's check, for the two places a release is checked before and after it
-# is published** (0.4.10 plan row 102): the release script runs it over the package directory
-# before the upload, and the release workflow over the assets it downloads from the published
-# page. It is the product's own grammar and embedded keys, compiled without the window.
+# is published** (0.4.10 plan row 102): the release script composes the statement with it and
+# runs it over the package directory before the upload, and the release workflow over the
+# assets it downloads from the published page. It is the product's own grammar and embedded keys, compiled without the window.
 #   cargo run -q -p bt-winres --features release-key,inflate --bin check-release-statement -- verify <folder> <tag>
 [[bin]]
 name = "check-release-statement"

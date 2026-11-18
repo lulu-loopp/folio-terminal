@@ -786,6 +786,113 @@ fn the_release_check_reads_a_published_release_whole() {
     );
 }
 
+/// RED (0.4.10 plan row 102, part 2) — **the statement the release script writes is the one
+/// the release check accepts**: composed from a release's files — each asset's SHA-256 and size,
+/// every member of the Windows archive with its own — it is the statement written by hand, and
+/// once signed it passes [`check_published`]. A release the grammar refuses is refused before
+/// anything is signed: a `min_from` above the version, a tag that names no version, a release
+/// with no Windows archive, an asset that cannot be read.
+///
+/// MUTATION: skip the read-back in [`compose_statement`] (`plant-102-2-compose-unread.py`): the
+/// `min_from` above the version is composed.
+#[cfg(all(feature = "release-key", feature = "inflate"))]
+#[test]
+fn a_composed_statement_is_the_one_the_release_check_accepts() {
+    let exe: &[u8] = b"the 0.4.10 folio.exe";
+    let notice: &[u8] = b"MIT";
+    let image: &[u8] = b"the 0.4.10 macOS image";
+    let archive = stored_zip(&[
+        ("folio-0.4.10/", b""),
+        ("folio-0.4.10/folio.exe", exe),
+        ("folio-0.4.10/LICENSE-MIT", notice),
+    ]);
+    let windows = "folio-0.4.10-windows-x64-unsigned.zip";
+    let mac = "Folio-0.4.10-macos-arm64.dmg";
+    let files = |name: &str| -> Result<Vec<u8>, String> {
+        match name {
+            "folio-0.4.10-windows-x64-unsigned.zip" => Ok(archive.clone()),
+            "Folio-0.4.10-macos-arm64.dmg" => Ok(image.to_vec()),
+            other => Err(format!("{other} is not in the package directory")),
+        }
+    };
+    let inputs = StatementInputs {
+        tag: "v0.4.10-preview",
+        date: "2026-11-18",
+        min_from: "0.4.6",
+        authenticode: false,
+        key: &TEST_KEYS[0],
+        retires: Vec::new(),
+        assets: vec![(WINDOWS_X64, windows), (MACOS_ARM64, mac)],
+    };
+    let text = compose_statement(&mut { files }, &inputs).unwrap();
+
+    let mut by_hand = statement_by(&TEST_KEYS[0], Vec::new());
+    by_hand.assets = vec![
+        StatementAsset {
+            sha256: hex(&sha256(&archive)),
+            size: archive.len() as u64,
+            platform: WINDOWS_X64.to_owned(),
+            name: windows.to_owned(),
+        },
+        StatementAsset {
+            sha256: hex(&sha256(image)),
+            size: image.len() as u64,
+            platform: MACOS_ARM64.to_owned(),
+            name: mac.to_owned(),
+        },
+    ];
+    by_hand.members = ["folio.exe", "LICENSE-MIT"]
+        .iter()
+        .zip([exe, notice])
+        .map(|(name, bytes)| Member {
+            name: (*name).to_owned(),
+            sha256: hex(&sha256(bytes)),
+            size: bytes.len() as u64,
+        })
+        .collect();
+    assert_eq!(text, by_hand.statement_text());
+
+    let signature = signed(&text, TEST_LIVE_SEED);
+    let mut published = |name: &str| -> Result<Vec<u8>, String> {
+        match name {
+            STATEMENT_FILE => Ok(text.clone().into_bytes()),
+            SIGNATURE_FILE => Ok(signature.clone()),
+            other => files(other),
+        }
+    };
+    check_published(&mut published, "v0.4.10-preview", &TEST_SET).unwrap();
+
+    let refused = |inputs: StatementInputs<'_>| compose_statement(&mut { files }, &inputs);
+    assert!(matches!(
+        refused(StatementInputs {
+            min_from: "0.4.11",
+            ..inputs.clone()
+        }),
+        Err(StatementError::Malformed(detail)) if detail.contains("min_from")
+    ));
+    assert!(matches!(
+        refused(StatementInputs {
+            tag: "v0.4",
+            ..inputs.clone()
+        }),
+        Err(StatementError::Malformed(detail)) if detail.contains("names no version")
+    ));
+    assert!(matches!(
+        refused(StatementInputs {
+            assets: vec![(MACOS_ARM64, mac)],
+            ..inputs.clone()
+        }),
+        Err(StatementError::Malformed(detail)) if detail.contains("no windows-x64 archive")
+    ));
+    assert!(matches!(
+        refused(StatementInputs {
+            assets: vec![(WINDOWS_X64, "folio-0.4.10-windows-x64.zip")],
+            ..inputs.clone()
+        }),
+        Err(StatementError::Unreadable(_))
+    ));
+}
+
 /// RED (0.4.10 plan row 102, 1a review P2-1) — **an archive holding a member's name twice is
 /// refused by the release check**: the check would hash the first `folio.exe` and an extractor
 /// writes the last, so the check would vouch for bytes nobody installs. Even signed, such an

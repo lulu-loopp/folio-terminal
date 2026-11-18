@@ -1205,6 +1205,92 @@ pub fn release_check(
     check_published(read, tag, keys)
 }
 
+/// **What the release script hands [`compose_statement`]**: the facts of a release that are
+/// not read from its files (0.4.10 plan row 102, part 2).
+#[cfg(feature = "inflate")]
+#[derive(Clone, Debug)]
+pub struct StatementInputs<'a> {
+    /// The release's tag, `v<version>` or `v<version>-preview`; the version is the tag's.
+    pub tag: &'a str,
+    /// `YYYY-MM-DD`.
+    pub date: &'a str,
+    /// The Windows `folio.exe`'s own `min_updater`, which the script reads out of it.
+    pub min_from: &'a str,
+    /// Whether the Windows archive's `folio.exe` and `folio.msix` carry our service's
+    /// signature, as the script found them.
+    pub authenticode: bool,
+    /// The key that will sign the statement.
+    pub key: &'a ReleaseKey,
+    /// The key ids the statement retires.
+    pub retires: Vec<KeyId>,
+    /// Each asset, as its platform and its file name on the release page.
+    pub assets: Vec<(&'a str, &'a str)>,
+}
+
+/// **The statement of a release, composed from its files** — what the release script writes
+/// as `RELEASE-STATEMENT.txt` before the statement is signed (0.4.10 plan row 102, part 2):
+/// each asset read through `read` by its name for its SHA-256 and size, every member of the
+/// Windows archive with its own ([`archive_members`] under `folio-<version>`), and the facts in
+/// `inputs`, written in [`Statement::statement_text`]'s form and read back by
+/// [`Statement::read_statement`] — so the text is this crate's grammar or nothing, and a
+/// release the grammar refuses (a tag that names no version, a `min_from` above it, a
+/// platform listed twice) is refused here, before anything is signed.
+///
+/// # Errors
+///
+/// [`StatementError::Malformed`] for a tag that names no version or a release with no Windows
+/// archive; [`StatementError::Unreadable`] for a file `read` cannot give;
+/// [`StatementError::Archive`] for an archive [`archive_members`] refuses; and what
+/// [`Statement::read_statement`] refuses.
+#[cfg(feature = "inflate")]
+pub fn compose_statement(
+    read: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
+    inputs: &StatementInputs<'_>,
+) -> Result<String, StatementError> {
+    let version = inputs
+        .tag
+        .strip_prefix('v')
+        .map(|rest| rest.strip_suffix("-preview").unwrap_or(rest))
+        .filter(|version| version_triple(version).is_some())
+        .ok_or_else(|| {
+            StatementError::Malformed(format!("the tag {} names no version", inputs.tag))
+        })?;
+    let mut assets = Vec::new();
+    let mut members = None;
+    for (platform, name) in &inputs.assets {
+        let bytes = read(name).map_err(StatementError::Unreadable)?;
+        if *platform == WINDOWS_X64 {
+            let root = crate::release_manifest::archive_root(version);
+            members = Some(archive_members(&bytes, &root)?);
+        }
+        assets.push(StatementAsset {
+            sha256: hex(&sha256(&bytes)),
+            size: bytes.len() as u64,
+            platform: (*platform).to_owned(),
+            name: (*name).to_owned(),
+        });
+    }
+    let members = members.ok_or_else(|| {
+        StatementError::Malformed(format!("the release lists no {WINDOWS_X64} archive"))
+    })?;
+    let text = Statement {
+        product: crate::release_manifest::PRODUCT.to_owned(),
+        version: version.to_owned(),
+        tag: inputs.tag.to_owned(),
+        date: inputs.date.to_owned(),
+        key: inputs.key.key_id(),
+        min_from: inputs.min_from.to_owned(),
+        authenticode: inputs.authenticode,
+        retires: inputs.retires.clone(),
+        assets,
+        members_of: WINDOWS_X64.to_owned(),
+        members,
+    }
+    .statement_text();
+    Statement::read_statement(text.as_bytes())?;
+    Ok(text)
+}
+
 #[cfg(test)]
 #[path = "release_statement_tests.rs"]
 mod tests;
