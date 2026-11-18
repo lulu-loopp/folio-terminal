@@ -590,10 +590,12 @@ impl<B: Backend> Runtime<'_, B> {
             // Read where they are used, so the store is their door: the open
             // Advanced groups, the summoned terminal's profile — stored by id,
             // which is what its row's press stores too, rather than through the
-            // row's index into this table — and its top gap.
+            // row's index into this table — its top gap, and whether the last
+            // window's close keeps the run (read at each close, 0.4.10 plan row 87).
             ref change @ (SettingChange::AdvancedOpen(_)
             | SettingChange::QuakeProfile(_)
-            | SettingChange::QuakeTopGap(_)) => self.store_imported_value(change),
+            | SettingChange::QuakeTopGap(_)
+            | SettingChange::CloseKeepsRunning(_)) => self.store_imported_value(change),
         }
         Ok(())
     }
