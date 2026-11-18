@@ -47,6 +47,12 @@ fn statement_by(key: &ReleaseKey, retires: Vec<KeyId>) -> Statement {
     statement
 }
 
+/// `statement` taken as verified, for the tests of what a verified statement decides (only
+/// [`verify_statement`] makes one in the crate).
+fn as_verified(statement: Statement) -> VerifiedStatement {
+    VerifiedStatement(statement)
+}
+
 /// The test keys as a set.
 #[cfg(feature = "release-key")]
 const TEST_SET: KeySet<'static> = KeySet::of(&TEST_KEYS);
@@ -68,9 +74,9 @@ fn the_embedded_keys_verify_the_statements_signed_with_the_real_keys() {
         assert_eq!(key.slot, slot);
         let text = fixture(&format!("statement-{slot}.txt"));
         let signature = fixture(&format!("statement-{slot}.txt.sig"));
-        let statement = verify_statement(&text, &signature, &KeySet::EMBEDDED, &[])
+        let verified = verify_statement(&text, &signature, &KeySet::EMBEDDED, &[])
             .unwrap_or_else(|error| panic!("the {slot} key's statement: {error}"));
-        assert_eq!(statement.key, key.key_id());
+        assert_eq!(verified.what_it_says().key, key.key_id());
         assert_eq!(
             text,
             fixture_statement(key).into_bytes(),
@@ -199,20 +205,31 @@ fn a_tampered_byte_is_refused() {
     );
 }
 
-/// PIN (0.4.10 plan row 102) — **a statement verifies with the key it names and no other**: one
-/// signed by a key outside the set is an unknown key, and one that names the spare while signed
-/// by the live key fails the signature, since the key id is inside the signed bytes.
+/// RED (0.4.10 plan row 102) — **a statement signed by a key outside the set is an unknown key**:
+/// the embedded set does not hold a test key, so a statement a test key signed is refused before
+/// its signature is looked at.
+///
+/// MUTATION: make `KeySet::key_named` answer the set's first key whatever the id
+/// (`plant-102-unknown-key.py`): the statement is refused as a bad signature instead.
 #[cfg(feature = "release-key")]
 #[test]
-fn a_statement_verifies_with_the_key_it_names_only() {
+fn a_statement_by_a_key_outside_the_set_is_an_unknown_key() {
     let text = statement_by(&TEST_KEYS[0], Vec::new()).statement_text();
     let signature = signed(&text, TEST_LIVE_SEED);
     assert_eq!(
         verify_statement(text.as_bytes(), &signature, &KeySet::EMBEDDED, &[]).unwrap_err(),
-        StatementError::UnknownKey(TEST_KEYS[0].key_id()),
-        "the embedded set does not hold a test key"
+        StatementError::UnknownKey(TEST_KEYS[0].key_id())
     );
+}
 
+/// RED (0.4.10 plan row 102) — **a statement verifies with the key it names and no other**: one
+/// that names the spare while signed by the live key fails the signature, since the key id is
+/// inside the signed bytes and the verifier never tries each key in turn.
+///
+/// MUTATION: accept a signature any key of the set verifies (`plant-102-each-key.py`).
+#[cfg(feature = "release-key")]
+#[test]
+fn a_statement_verifies_with_the_key_it_names_only() {
     let named_spare = statement_by(&TEST_KEYS[1], Vec::new()).statement_text();
     let by_live = signed(&named_spare, TEST_LIVE_SEED);
     assert_eq!(
@@ -239,40 +256,54 @@ fn a_retired_key_is_refused() {
         &[],
     )
     .expect("the spare may retire the live key");
-    assert_eq!(retired.retires, vec![live]);
+    assert_eq!(retired.what_it_says().retires, vec![live]);
 
     let by_live = statement_by(&TEST_KEYS[0], Vec::new()).statement_text();
     let signature = signed(&by_live, TEST_LIVE_SEED);
     verify_statement(by_live.as_bytes(), &signature, &TEST_SET, &[])
         .expect("before the retire is remembered");
     assert_eq!(
-        verify_statement(by_live.as_bytes(), &signature, &TEST_SET, &retired.retires).unwrap_err(),
+        verify_statement(
+            by_live.as_bytes(),
+            &signature,
+            &TEST_SET,
+            &retired.what_it_says().retires
+        )
+        .unwrap_err(),
         StatementError::RetiredKey(live)
     );
 }
 
-/// RED (0.4.10 plan row 102) — **a statement retires neither its own signer nor a key the build
-/// does not embed**: the first would lock every copy out of the next release; the second is a
-/// line that names nothing this build can act on.
+/// RED (0.4.10 plan row 102) — **a statement does not retire its own signer**: that would lock
+/// every copy that read it out of the next release.
 ///
 /// MUTATION: drop the own-signer check in [`Statement::read_statement`]
 /// (`plant-102-retire-own-signer.py`).
 #[cfg(feature = "release-key")]
 #[test]
-fn a_statement_retires_neither_its_signer_nor_an_unknown_key() {
+fn a_statement_may_not_retire_its_signer() {
     let own = statement_by(&TEST_KEYS[0], vec![TEST_KEYS[0].key_id()]).statement_text();
     let error = Statement::read_statement(own.as_bytes()).unwrap_err();
     assert!(
         matches!(&error, StatementError::Malformed(detail) if detail.contains("the key that signs it")),
         "{error}"
     );
+}
 
+/// RED (0.4.10 plan row 102) — **a statement does not retire a key the build does not embed**: a
+/// line that names nothing this build can act on.
+///
+/// MUTATION: drop the `RetiresUnknownKey` check in [`verify_statement`]
+/// (`plant-102-retires-unknown.py`): the stranger is refused as not allowed instead.
+#[cfg(feature = "release-key")]
+#[test]
+fn a_retire_of_a_key_the_build_does_not_embed_is_refused() {
     let stranger = KeyId::of_public(&[7; 32]);
-    let unknown = statement_by(&TEST_KEYS[0], vec![stranger]).statement_text();
+    let unknown = statement_by(&TEST_KEYS[1], vec![stranger]).statement_text();
     assert_eq!(
         verify_statement(
             unknown.as_bytes(),
-            &signed(&unknown, TEST_LIVE_SEED),
+            &signed(&unknown, TEST_SPARE_SEED),
             &TEST_SET,
             &[]
         )
@@ -281,34 +312,72 @@ fn a_statement_retires_neither_its_signer_nor_an_unknown_key() {
     );
 }
 
-/// RED (0.4.10 plan row 102) — **a statement for another tag or another version vouches for
-/// nothing here**: a valid statement of 0.4.9 published beside the files of 0.4.10 is refused.
+/// RED (0.4.10 plan row 102, 1a review P1-1) — **retirement is one-way: the live key retires
+/// nothing**. A leaked live key — the one that signs every release — must not be able to retire
+/// the offline spare on every copy that reads it, which would refuse the owner's recovery release.
+/// The spare's retire of the live key is `a_retired_key_is_refused`'s.
 ///
-/// MUTATION: drop the tag comparison in [`Statement::vouches_for`]
-/// (`plant-102-other-tag.py`).
+/// MUTATION: drop the position check in [`verify_statement`]
+/// (`plant-102-retire-not-allowed.py`): the live key's statement retiring the spare verifies.
+#[cfg(feature = "release-key")]
 #[test]
-fn a_statement_for_another_tag_or_version_is_refused() {
-    let statement = statement_by(&TEST_KEYS[0], Vec::new());
-    let offer = |tag, version| OfferedRelease {
+fn the_live_key_may_not_retire_the_spare() {
+    let spare = TEST_KEYS[1].key_id();
+    let retiring = statement_by(&TEST_KEYS[0], vec![spare]).statement_text();
+    assert_eq!(
+        verify_statement(
+            retiring.as_bytes(),
+            &signed(&retiring, TEST_LIVE_SEED),
+            &TEST_SET,
+            &[]
+        )
+        .unwrap_err(),
+        StatementError::RetireNotAllowed(spare)
+    );
+}
+
+/// The offer of `tag` and `version` to a running 0.4.9.
+fn offered_as<'a>(tag: &'a str, version: &'a str) -> OfferedRelease<'a> {
+    OfferedRelease {
         tag,
         version,
         running: "0.4.9",
-    };
+    }
+}
+
+/// RED (0.4.10 plan row 102) — **a statement for another tag vouches for nothing here**: a valid
+/// statement of 0.4.10 published beside the files of another tag is refused.
+///
+/// MUTATION: drop the tag comparison in [`VerifiedStatement::vouches_for`]
+/// (`plant-102-other-tag.py`).
+#[test]
+fn a_statement_for_another_tag_is_refused() {
+    let statement = as_verified(statement_by(&TEST_KEYS[0], Vec::new()));
     statement
-        .vouches_for(&offer("v0.4.10-preview", "0.4.10"))
+        .vouches_for(&offered_as("v0.4.10-preview", "0.4.10"))
         .expect("its own release");
     assert_eq!(
         statement
-            .vouches_for(&offer("v0.4.11-preview", "0.4.10"))
+            .vouches_for(&offered_as("v0.4.11-preview", "0.4.10"))
             .unwrap_err(),
         StatementError::OtherTag {
             expected: "v0.4.11-preview".to_owned(),
             found: "v0.4.10-preview".to_owned(),
         }
     );
+}
+
+/// RED (0.4.10 plan row 102) — **a statement for another version vouches for nothing here**, even
+/// under the offer's own tag.
+///
+/// MUTATION: drop the version comparison in [`VerifiedStatement::vouches_for`]
+/// (`plant-102-other-version.py`).
+#[test]
+fn a_statement_for_another_version_is_refused() {
+    let statement = as_verified(statement_by(&TEST_KEYS[0], Vec::new()));
     assert_eq!(
         statement
-            .vouches_for(&offer("v0.4.10-preview", "0.4.11"))
+            .vouches_for(&offered_as("v0.4.10-preview", "0.4.11"))
             .unwrap_err(),
         StatementError::OtherVersion {
             expected: "0.4.11".to_owned(),
@@ -324,8 +393,9 @@ fn a_statement_for_another_tag_or_version_is_refused() {
 /// (`plant-102-min-from-as-text.py`).
 #[test]
 fn min_from_above_this_build_is_too_old() {
-    let mut statement = statement_by(&TEST_KEYS[0], Vec::new());
-    statement.min_from = "0.4.10".to_owned();
+    let mut read = statement_by(&TEST_KEYS[0], Vec::new());
+    read.min_from = "0.4.10".to_owned();
+    let statement = as_verified(read.clone());
     let offer = |running| OfferedRelease {
         tag: "v0.4.10-preview",
         version: "0.4.10",
@@ -341,8 +411,8 @@ fn min_from_above_this_build_is_too_old() {
     statement
         .vouches_for(&offer("0.4.10"))
         .expect("min_from is the oldest allowed, itself included");
-    statement.min_from = "0.4.6".to_owned();
-    statement
+    read.min_from = "0.4.6".to_owned();
+    as_verified(read)
         .vouches_for(&offer("0.4.9"))
         .expect("0.4.9 >= 0.4.6");
     assert_eq!(
@@ -358,12 +428,14 @@ fn min_from_above_this_build_is_too_old() {
 /// (`plant-102-extra-member.py`).
 #[test]
 fn a_member_list_that_differs_is_refused() {
-    let statement = statement_by(&TEST_KEYS[0], Vec::new());
-    let listed = statement.members.clone();
-    statement.members_match(&listed).expect("the same members");
+    let statement = as_verified(statement_by(&TEST_KEYS[0], Vec::new()));
+    let listed = statement.what_it_says().members.clone();
+    statement
+        .members_match(WINDOWS_X64, &listed)
+        .expect("the same members");
 
     assert!(matches!(
-        statement.members_match(&[]).unwrap_err(),
+        statement.members_match(WINDOWS_X64, &[]).unwrap_err(),
         StatementError::MembersDiffer(detail) if detail.contains("listed and not in the archive")
     ));
 
@@ -374,32 +446,71 @@ fn a_member_list_that_differs_is_refused() {
         size: 7,
     });
     assert!(matches!(
-        statement.members_match(&extra).unwrap_err(),
+        statement.members_match(WINDOWS_X64, &extra).unwrap_err(),
         StatementError::MembersDiffer(detail) if detail.contains("planted.dll is in the archive and not listed")
     ));
 
     let mut other = listed;
     other[0].sha256 = hex(&sha256(b"another folio.exe"));
     assert!(matches!(
-        statement.members_match(&other).unwrap_err(),
+        statement.members_match(WINDOWS_X64, &other).unwrap_err(),
         StatementError::MembersDiffer(detail) if detail.starts_with("folio.exe is")
     ));
 }
 
-/// RED (0.4.10 plan row 102) — **the text reads back as written, and a statement cut short or in
-/// another format is refused by name**: every cut at a line end is refused, never read as a
-/// smaller release; a CR, a second format and a line after the last member are refused.
+/// RED (0.4.10 plan row 102, 1a review P2-1) — **a found list naming a member twice is refused**,
+/// without case, as Windows stores names: the second `folio.exe` would be what an extractor writes
+/// last, and this check would have read the first.
+///
+/// MUTATION: drop the check for a name found twice in [`VerifiedStatement::members_match`]
+/// (`plant-102-members-twice.py`).
+#[test]
+fn a_member_found_twice_is_refused() {
+    let statement = as_verified(statement_by(&TEST_KEYS[0], Vec::new()));
+    let mut twice = statement.what_it_says().members.clone();
+    let mut again = twice[0].clone();
+    again.name = again.name.to_uppercase();
+    twice.push(again);
+    assert!(matches!(
+        statement.members_match(WINDOWS_X64, &twice).unwrap_err(),
+        StatementError::MembersDiffer(detail) if detail.contains("FOLIO.EXE is in the archive twice")
+    ));
+}
+
+/// RED (0.4.10 plan row 102, 1a review N6) — **the members are held only to the archive the
+/// statement lists them for**: asked for another platform's archive, the list is refused by name
+/// rather than read as a list that happens to differ.
+///
+/// MUTATION: drop the `members_of` comparison in [`VerifiedStatement::members_match`]
+/// (`plant-102-members-of.py`).
+#[test]
+fn members_of_another_platform_are_refused() {
+    let statement = as_verified(statement_by(&TEST_KEYS[0], Vec::new()));
+    let listed = statement.what_it_says().members.clone();
+    assert!(matches!(
+        statement.members_match(MACOS_ARM64, &listed).unwrap_err(),
+        StatementError::MembersDiffer(detail) if detail.contains("not of macos-arm64")
+    ));
+}
+
+/// PIN (0.4.10 plan row 102) — **the text reads back as written**: what
+/// [`Statement::statement_text`] writes, [`Statement::read_statement`] reads to the same statement.
+#[test]
+fn the_statement_reads_back_as_written() {
+    let statement = statement_by(&TEST_KEYS[1], vec![TEST_KEYS[0].key_id()]);
+    assert_eq!(
+        Statement::read_statement(statement.statement_text().as_bytes()).unwrap(),
+        statement
+    );
+}
+
+/// RED (0.4.10 plan row 102) — **a statement cut at any line is refused as truncated**, never read
+/// as a smaller release: every cut at a line end, with and without its newline.
 ///
 /// MUTATION: accept a text without its final newline (`plant-102-cut-accepted.py`).
 #[test]
-fn the_text_reads_back_and_a_cut_statement_is_refused() {
-    let statement = statement_by(&TEST_KEYS[0], vec![TEST_KEYS[1].key_id()]);
-    let text = statement.statement_text();
-    assert_eq!(
-        Statement::read_statement(text.as_bytes()).unwrap(),
-        statement
-    );
-
+fn a_statement_cut_at_any_line_is_truncated() {
+    let text = statement_by(&TEST_KEYS[1], vec![TEST_KEYS[0].key_id()]).statement_text();
     for (at, _) in text.match_indices('\n') {
         for cut in [&text[..at], &text[..=at]] {
             if cut.len() == text.len() {
@@ -413,19 +524,57 @@ fn the_text_reads_back_and_a_cut_statement_is_refused() {
             );
         }
     }
+}
+
+/// RED (0.4.10 plan row 102) — **a statement in another format is refused by name**, so a later
+/// format is never misread by this build.
+///
+/// MUTATION: read any format number as this one (`plant-102-any-format.py`).
+#[test]
+fn another_format_is_refused_by_name() {
+    let text = statement_by(&TEST_KEYS[0], Vec::new()).statement_text();
     assert!(matches!(
         Statement::read_statement(text.replace("statement 1", "statement 2").as_bytes())
             .unwrap_err(),
         StatementError::UnknownFormat(_)
     ));
+}
+
+/// RED (0.4.10 plan row 102) — **a CR is refused**: a statement is LF only, so its bytes have one
+/// spelling and a copy that went through a text conversion fails here, not at the signature.
+///
+/// MUTATION: let `\r` through the byte check of [`Statement::read_statement`]
+/// (`plant-102-cr-accepted.py`).
+#[test]
+fn a_cr_is_refused() {
+    let text = statement_by(&TEST_KEYS[0], Vec::new()).statement_text();
     assert!(matches!(
         Statement::read_statement(text.replace('\n', "\r\n").as_bytes()).unwrap_err(),
-        StatementError::Malformed(_)
+        StatementError::Malformed(detail) if detail.contains("0x0d")
     ));
+}
+
+/// RED (0.4.10 plan row 102) — **a line after the last member is refused**: the counted lists end
+/// the statement.
+///
+/// MUTATION: stop reading after the last member (`plant-102-line-after.py`).
+#[test]
+fn a_line_after_the_last_member_is_refused() {
+    let text = statement_by(&TEST_KEYS[0], Vec::new()).statement_text();
     assert!(matches!(
         Statement::read_statement(format!("{text}more\n").as_bytes()).unwrap_err(),
-        StatementError::Malformed(_)
+        StatementError::Malformed(detail) if detail.contains("after the last member")
     ));
+}
+
+/// RED (0.4.10 plan row 102) — **a tag that does not name the statement's version is refused**:
+/// the two cannot name different releases.
+///
+/// MUTATION: skip `tag_names_version` in [`Statement::read_statement`]
+/// (`plant-102-tag-names-version.py`).
+#[test]
+fn a_tag_that_does_not_name_the_version_is_refused() {
+    let text = statement_by(&TEST_KEYS[0], Vec::new()).statement_text();
     assert!(matches!(
         Statement::read_statement(
             text.replace("tag v0.4.10-preview", "tag v0.4.11-preview")
@@ -434,6 +583,29 @@ fn the_text_reads_back_and_a_cut_statement_is_refused() {
         .unwrap_err(),
         StatementError::Malformed(detail) if detail.contains("does not name the version")
     ));
+}
+
+/// RED (0.4.10 plan row 102, 1a review N2) — **a version with a leading zero is refused**: a
+/// version has one spelling, `0.4.10`, never `0.04.10`.
+///
+/// MUTATION: drop the leading-zero check in `version_triple`
+/// (`plant-102-leading-zero.py`).
+#[test]
+fn a_version_with_a_leading_zero_is_refused() {
+    let text = statement_by(&TEST_KEYS[0], Vec::new()).statement_text();
+    let spelled = text
+        .replace("version 0.4.10", "version 0.04.10")
+        .replace("tag v0.4.10-preview", "tag v0.04.10-preview");
+    assert!(matches!(
+        Statement::read_statement(spelled.as_bytes()).unwrap_err(),
+        StatementError::Malformed(detail) if detail.contains("is not three numbers")
+    ));
+}
+
+/// PIN (0.4.10 plan row 102) — **a key id reads back from its spelling, and only from lower-case
+/// hex**.
+#[test]
+fn a_key_id_reads_back_from_lower_case_hex_only() {
     assert_eq!(
         KeyId::parse_key_id(&TEST_KEYS[0].key_id().to_string()),
         Some(TEST_KEYS[0].key_id())
@@ -541,7 +713,7 @@ fn the_release_check_reads_a_published_release_whole() {
         &TEST_SET,
     )
     .unwrap();
-    assert_eq!(checked, statement);
+    assert_eq!(checked.what_it_says(), &statement);
 
     let mut changed = archive.clone();
     let last = changed.len() - 30;
@@ -583,4 +755,159 @@ fn the_release_check_reads_a_published_release_whole() {
             found: "v0.4.10-preview".to_owned(),
         }
     );
+}
+
+/// RED (0.4.10 plan row 102, 1a review P2-1) — **an archive holding a member's name twice is
+/// refused by the release check**: the check would hash the first `folio.exe` and an extractor
+/// writes the last, so the check would vouch for bytes nobody installs. Even signed, such an
+/// archive is refused as an archive, before its members are compared.
+///
+/// MUTATION: drop the check for a name the archive holds twice in [`archive_members`]
+/// (`plant-102-archive-twice.py`): the list is refused as members that differ instead.
+#[cfg(all(feature = "release-key", feature = "inflate"))]
+#[test]
+fn an_archive_holding_a_name_twice_is_refused() {
+    let exe: &[u8] = b"the 0.4.10 folio.exe";
+    let archive = stored_zip(&[
+        ("folio-0.4.10/folio.exe", exe),
+        ("folio-0.4.10/Folio.exe", b"what an extractor writes last"),
+    ]);
+    let mut statement = statement_by(&TEST_KEYS[0], Vec::new());
+    statement.assets = vec![StatementAsset {
+        sha256: hex(&sha256(&archive)),
+        size: archive.len() as u64,
+        platform: WINDOWS_X64.to_owned(),
+        name: "folio-0.4.10-windows-x64-unsigned.zip".to_owned(),
+    }];
+    statement.members = vec![Member {
+        name: "folio.exe".to_owned(),
+        sha256: hex(&sha256(exe)),
+        size: exe.len() as u64,
+    }];
+    let text = statement.statement_text();
+    let signature = signed(&text, TEST_LIVE_SEED);
+    let mut read = |name: &str| -> Result<Vec<u8>, String> {
+        match name {
+            STATEMENT_FILE => Ok(text.clone().into_bytes()),
+            SIGNATURE_FILE => Ok(signature.clone()),
+            _ => Ok(archive.clone()),
+        }
+    };
+    assert!(matches!(
+        check_published(&mut read, "v0.4.10-preview", &TEST_SET).unwrap_err(),
+        StatementError::Archive(detail) if detail.contains("Folio.exe is in the archive twice")
+    ));
+}
+
+/// RED (0.4.10 plan row 102, 1a review N9) — **the release check refuses to vouch with a set of
+/// keys that holds a test key**, whatever the release: the test keys' private halves are in this
+/// repository. The check binary runs [`release_check`] with the embedded keys, so a build that
+/// embedded a test key checks nothing.
+///
+/// MUTATION: drop the test-key check in [`release_check`] (`plant-102-release-check-test-key.py`):
+/// a test-signed release is vouched for.
+#[cfg(all(feature = "release-key", feature = "inflate"))]
+#[test]
+fn the_release_check_refuses_a_set_holding_a_test_key() {
+    let exe: &[u8] = b"the 0.4.10 folio.exe";
+    let archive = stored_zip(&[("folio-0.4.10/folio.exe", exe)]);
+    let mut statement = statement_by(&TEST_KEYS[0], Vec::new());
+    statement.assets = vec![StatementAsset {
+        sha256: hex(&sha256(&archive)),
+        size: archive.len() as u64,
+        platform: WINDOWS_X64.to_owned(),
+        name: "folio-0.4.10-windows-x64-unsigned.zip".to_owned(),
+    }];
+    statement.members = vec![Member {
+        name: "folio.exe".to_owned(),
+        sha256: hex(&sha256(exe)),
+        size: exe.len() as u64,
+    }];
+    let text = statement.statement_text();
+    let signature = signed(&text, TEST_LIVE_SEED);
+    let mut read = |name: &str| -> Result<Vec<u8>, String> {
+        match name {
+            STATEMENT_FILE => Ok(text.clone().into_bytes()),
+            SIGNATURE_FILE => Ok(signature.clone()),
+            _ => Ok(archive.clone()),
+        }
+    };
+    check_published(&mut read, "v0.4.10-preview", &TEST_SET)
+        .expect("the release itself is whole under the test keys");
+    assert_eq!(
+        release_check(&mut read, "v0.4.10-preview", &TEST_SET).unwrap_err(),
+        StatementError::TestKey(TEST_KEYS[0].key_id())
+    );
+}
+
+/// The group order L of edwards25519, little-endian (RFC 8032 §5.1).
+#[cfg(feature = "release-key")]
+const GROUP_ORDER: [u8; 32] = [
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+];
+
+/// `bytes` read as hex.
+#[cfg(feature = "release-key")]
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).unwrap())
+        .collect()
+}
+
+/// PIN (0.4.10 plan row 102, 1a review P2-4) — **the verifier is RFC 8032's and refuses a
+/// malleated or degenerate signature**: RFC 8032 §7.1 TEST 1 verifies through the pinned package,
+/// and a valid test-key signature turned into S + L (the same scalar, not canonical), into an
+/// identity R (small order) or into 64 zero bytes is refused as a bad signature. The refusals are
+/// the package's; this keeps them true across a later version of the pin.
+#[cfg(feature = "release-key")]
+#[test]
+fn a_malleated_or_degenerate_signature_is_refused() {
+    let secret = unhex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+    let public = unhex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+    let expected = unhex(concat!(
+        "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555",
+        "fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+    ));
+    let pair =
+        ed25519_compact::KeyPair::from_seed(ed25519_compact::Seed::from_slice(&secret).unwrap());
+    assert_eq!(pair.pk.to_vec(), public, "RFC 8032 TEST 1's key");
+    assert_eq!(pair.sk.sign(b"", None).to_vec(), expected);
+    ed25519_compact::PublicKey::from_slice(&public)
+        .unwrap()
+        .verify(
+            b"",
+            &ed25519_compact::Signature::from_slice(&expected).unwrap(),
+        )
+        .expect("RFC 8032 TEST 1 verifies");
+
+    let text = statement_by(&TEST_KEYS[0], Vec::new()).statement_text();
+    let signature = signed(&text, TEST_LIVE_SEED);
+    verify_statement(text.as_bytes(), &signature, &TEST_SET, &[]).expect("the untouched pair");
+    let refused = |signature: &[u8]| {
+        verify_statement(text.as_bytes(), signature, &TEST_SET, &[]).unwrap_err()
+    };
+    let bad = StatementError::BadSignature(TEST_KEYS[0].key_id());
+
+    let mut malleated = signature.clone();
+    let mut carry = 0u16;
+    for (byte, order) in malleated[32..].iter_mut().zip(GROUP_ORDER) {
+        let sum = u16::from(*byte) + u16::from(order) + carry;
+        *byte = sum as u8;
+        carry = sum >> 8;
+    }
+    assert_eq!(carry, 0, "S + L still fits in 32 bytes");
+    assert_eq!(refused(&malleated), bad, "S >= L");
+
+    let mut identity_r = signature.clone();
+    identity_r[..32].copy_from_slice(&[0; 32]);
+    identity_r[0] = 1;
+    assert_eq!(
+        refused(&identity_r),
+        bad,
+        "R is the identity, of small order"
+    );
+
+    assert_eq!(refused(&[0; 64]), bad, "64 zero bytes");
 }

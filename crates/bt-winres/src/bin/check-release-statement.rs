@@ -12,7 +12,8 @@
 //! `<folder>`, and refuses — with the refusal's name on stderr and a failing exit code — a
 //! signature that does not verify with the embedded key the statement names, a statement for
 //! another tag, an asset whose size or SHA-256 differs, or a Windows archive whose members are
-//! not the statement's. A build that embeds a test key refuses to vouch for anything.
+//! not the statement's. A build that embeds a test key refuses to vouch for anything
+//! (`release_check`, `test-key`).
 //!
 //! `fixture` writes the fixed statement the tests hold the embedded key of `<live|spare>` to
 //! (`bt_winres::release_statement::fixture_statement`), byte for byte, for whoever holds that
@@ -24,9 +25,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use bt_winres::release_statement::{
-    KeySet, RELEASE_KEYS, check_published, embeds_test_keys, fixture_statement,
-};
+use bt_winres::release_statement::{KeySet, RELEASE_KEYS, fixture_statement, release_check};
 
 const USAGE: &str =
     "usage: check-release-statement verify <folder> <tag> | fixture <live|spare> <out file>";
@@ -45,14 +44,11 @@ fn main() -> ExitCode {
 }
 
 fn verify(folder: &Path, tag: &str) -> ExitCode {
-    if embeds_test_keys() {
-        eprintln!("refused: this build embeds a test key, and no release may be checked by it");
-        return ExitCode::FAILURE;
-    }
     let mut read =
         |name: &str| std::fs::read(folder.join(name)).map_err(|error| format!("{name}: {error}"));
-    match check_published(&mut read, tag, &KeySet::EMBEDDED) {
-        Ok(statement) => {
+    match release_check(&mut read, tag, &KeySet::EMBEDDED) {
+        Ok(verified) => {
+            let statement = verified.what_it_says();
             let slot = RELEASE_KEYS
                 .iter()
                 .find(|key| key.key_id() == statement.key)

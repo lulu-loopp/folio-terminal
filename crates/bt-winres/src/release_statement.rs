@@ -51,9 +51,12 @@
 //! <sha256> <size> folio.exe                …every member of that asset's archive
 //! ```
 //!
-//! * `version` is three numbers, and `tag` is `v<version>` or `v<version>-preview` — the
-//!   release grammar the update job reads a tag with — so the two cannot name different
-//!   releases.
+//! * `version` is three numbers, each written without a leading zero, and `tag` is
+//!   `v<version>` or `v<version>-preview` — the release grammar the update job mints an offer
+//!   with — so the two cannot name different releases. The tag grammar is narrower than what the
+//!   update check reads (`-rc.1`, build metadata) on purpose: `v<version>` and
+//!   `v<version>-preview` are the only tags Folio has ever had, and a release under any other
+//!   word needs a new statement format, which an older build refuses by name.
 //! * `key` is the signer's [`KeyId`]. It is inside the signed bytes, so it cannot be swapped:
 //!   the verifier uses exactly that key and never tries each key in turn.
 //! * `min_from` is the oldest version that may update to this release by this statement — the
@@ -74,10 +77,16 @@
 //! [`RELEASE_KEYS`] are two: the live key every release is signed with, and a spare kept off
 //! every machine that signs, so that a leaked or lost live key can be retired without a flag
 //! day: the next release is signed with the spare and retires the live key, every copy that
-//! reads it refuses the live key from then on, and that release embeds a new pair. A statement
-//! may retire any embedded key but the one that signed it; the updater remembers what was
-//! retired in the data folder (`bt_persist::ReleaseKeysV1`). The private halves never enter
-//! this repository, the trace folder or CI; a release is signed with OpenSSL outside them.
+//! reads it refuses the live key from then on, and that release embeds a new pair.
+//! **Retirement is one-way, by position in [`RELEASE_KEYS`]**: a key may retire only the keys
+//! before it — the spare may retire the live key, and the live key retires nothing. Otherwise a
+//! leaked live key, the one that sits on a disk and signs every release, could retire the
+//! offline spare on every copy that read it, and the one road out of the leak would be closed.
+//! The price: if the spare leaks, no statement can tell an old build to refuse it — but a leaked
+//! spare was the worst case already, since it may retire the live key; old copies stay exposed
+//! until they update to a build that embeds a new pair. The updater remembers what was retired
+//! in the data folder (`bt_persist::ReleaseKeysV1`). The private halves never enter this
+//! repository, the trace folder or CI; a release is signed with OpenSSL outside them.
 //!
 //! [`TEST_KEYS`] are a throwaway pair whose private halves are committed beside this crate's
 //! fixtures, for the tests that must sign (a tampered statement, a retire). They protect
@@ -224,9 +233,7 @@ pub const TEST_KEYS: [ReleaseKey; 2] = [
 /// made of, since the test keys' private halves are public.
 #[must_use]
 pub fn embeds_test_keys() -> bool {
-    RELEASE_KEYS
-        .iter()
-        .any(|key| TEST_KEYS.iter().any(|test| test.public == key.public))
+    KeySet::EMBEDDED.holds_a_test_key()
 }
 
 /// **The keys a statement is verified against**: [`Self::EMBEDDED`] in the product and the
@@ -250,8 +257,22 @@ impl<'k> KeySet<'k> {
 
     /// The key whose id is `id`.
     #[must_use]
-    pub fn named(&self, id: KeyId) -> Option<&'k ReleaseKey> {
+    pub fn key_named(&self, id: KeyId) -> Option<&'k ReleaseKey> {
         self.keys.iter().find(|key| key.key_id() == id)
+    }
+
+    /// Where the key whose id is `id` stands in the set: the live key first.
+    #[cfg(feature = "release-key")]
+    fn place_in_set(&self, id: KeyId) -> Option<usize> {
+        self.keys.iter().position(|key| key.key_id() == id)
+    }
+
+    /// Whether the set holds one of [`TEST_KEYS`].
+    #[must_use]
+    pub fn holds_a_test_key(&self) -> bool {
+        self.keys
+            .iter()
+            .any(|key| TEST_KEYS.iter().any(|test| test.public == key.public))
     }
 }
 
@@ -325,6 +346,11 @@ pub enum StatementError {
     BadSignature(KeyId),
     /// The statement retires a key this build does not embed.
     RetiresUnknownKey(KeyId),
+    /// The statement retires a key its signer may not retire: one at or after the signer's
+    /// place in the key set (the live key retires nothing).
+    RetireNotAllowed(KeyId),
+    /// The keys a release is checked with include a test key, whose private half is public.
+    TestKey(KeyId),
     /// The statement is for another tag than the one asked for.
     OtherTag {
         /// The tag asked for.
@@ -374,6 +400,8 @@ impl StatementError {
             Self::RetiredKey(_) => "retired-key",
             Self::BadSignature(_) => "bad-signature",
             Self::RetiresUnknownKey(_) => "retires-unknown-key",
+            Self::RetireNotAllowed(_) => "retire-not-allowed",
+            Self::TestKey(_) => "test-key",
             Self::OtherTag { .. } => "other-tag",
             Self::OtherVersion { .. } => "other-version",
             Self::TooOld { .. } => "too-old",
@@ -410,7 +438,9 @@ impl fmt::Display for StatementError {
             Self::UnknownKey(id)
             | Self::RetiredKey(id)
             | Self::BadSignature(id)
-            | Self::RetiresUnknownKey(id) => write!(formatter, "{name}: key {id}"),
+            | Self::RetiresUnknownKey(id)
+            | Self::RetireNotAllowed(id)
+            | Self::TestKey(id) => write!(formatter, "{name}: key {id}"),
             Self::OtherTag { expected, found } | Self::OtherVersion { expected, found } => {
                 write!(formatter, "{name}: expected {expected}, found {found}")
             }
@@ -444,13 +474,17 @@ const HEADER: [&str; 7] = [
     "authenticode",
 ];
 
-/// **Three numbers**, `major.minor.patch`, compared as three numbers.
+/// **Three numbers**, `major.minor.patch`, compared as three numbers; each is written without a
+/// leading zero, so a version has one spelling (`0.4.10`, never `0.04.10`).
 fn version_triple(text: &str) -> Option<[u64; 3]> {
     let mut parts = [0u64; 3];
     let mut fields = text.split('.');
     for part in &mut parts {
         let field = fields.next()?;
-        if field.is_empty() || !field.bytes().all(|byte| byte.is_ascii_digit()) {
+        if field.is_empty()
+            || !field.bytes().all(|byte| byte.is_ascii_digit())
+            || (field.len() > 1 && field.starts_with('0'))
+        {
             return None;
         }
         *part = field.parse().ok()?;
@@ -458,7 +492,8 @@ fn version_triple(text: &str) -> Option<[u64; 3]> {
     fields.next().is_none().then_some(parts)
 }
 
-/// Whether `tag` is `v<version>` or `v<version>-preview`.
+/// Whether `tag` is `v<version>` or `v<version>-preview` — the only two tag forms Folio has ever
+/// released under (see the module).
 fn tag_names_version(tag: &str, version: &str) -> bool {
     tag.strip_prefix('v')
         .map(|rest| rest.strip_suffix("-preview").unwrap_or(rest))
@@ -786,6 +821,22 @@ impl Statement {
             members,
         })
     }
+}
+
+/// **A statement whose signature verified** with a key of the set it was checked against, and
+/// whose retires that set allows — made only by [`verify_statement`], and the one type that
+/// decides anything about a release ([`Self::vouches_for`], [`Self::asset_for`],
+/// [`Self::members_match`]). A [`Statement`] that was merely read decides nothing, so a caller
+/// cannot hold a release to a statement it never verified.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedStatement(Statement);
+
+impl VerifiedStatement {
+    /// What the statement says.
+    #[must_use]
+    pub const fn what_it_says(&self) -> &Statement {
+        &self.0
+    }
 
     /// **This statement vouches for the release `offered` names, and this build may update to
     /// it**: the tag and the version the offer's, then `min_from` no newer than this build.
@@ -795,26 +846,30 @@ impl Statement {
     /// [`StatementError::OtherTag`], [`StatementError::OtherVersion`],
     /// [`StatementError::RunningVersionUnreadable`], [`StatementError::TooOld`], in that order.
     pub fn vouches_for(&self, offered: &OfferedRelease<'_>) -> Result<(), StatementError> {
-        if self.tag != offered.tag {
+        let statement = &self.0;
+        if statement.tag != offered.tag {
             return Err(StatementError::OtherTag {
                 expected: offered.tag.to_owned(),
-                found: self.tag.clone(),
+                found: statement.tag.clone(),
             });
         }
-        if self.version != offered.version {
+        if statement.version != offered.version {
             return Err(StatementError::OtherVersion {
                 expected: offered.version.to_owned(),
-                found: self.version.clone(),
+                found: statement.version.clone(),
             });
         }
         let this = version_triple(offered.running)
             .ok_or_else(|| StatementError::RunningVersionUnreadable(offered.running.to_owned()))?;
-        let needs = version_triple(&self.min_from).ok_or_else(|| {
-            StatementError::Malformed(format!("min_from `{}` is not three numbers", self.min_from))
+        let needs = version_triple(&statement.min_from).ok_or_else(|| {
+            StatementError::Malformed(format!(
+                "min_from `{}` is not three numbers",
+                statement.min_from
+            ))
         })?;
         if this < needs {
             return Err(StatementError::TooOld {
-                needs: self.min_from.clone(),
+                needs: statement.min_from.clone(),
                 this: offered.running.to_owned(),
             });
         }
@@ -827,22 +882,44 @@ impl Statement {
     ///
     /// [`StatementError::NoAsset`].
     pub fn asset_for(&self, platform: &str) -> Result<&StatementAsset, StatementError> {
-        self.assets
+        self.0
+            .assets
             .iter()
             .find(|asset| asset.platform == platform)
             .ok_or_else(|| StatementError::NoAsset(platform.to_owned()))
     }
 
-    /// **The archive's members `found` are exactly the statement's**: the same names (as
-    /// written), each with the statement's SHA-256 and size. Order is not compared; the
-    /// archive reader holds the order to the archive's own records.
+    /// **The members `found` of `platform`'s archive are exactly the statement's**: the
+    /// statement lists the members of that platform's archive ([`Statement::members_of`]), no
+    /// name is found twice (compared without case, as Windows stores names: an archive holding a
+    /// name twice is read one way by this check and another by an extractor), and the names are
+    /// the same (as written), each with the statement's SHA-256 and size. Order is not compared;
+    /// the archive reader holds the order to the archive's own records.
     ///
     /// # Errors
     ///
-    /// [`StatementError::MembersDiffer`], naming the first member missing, unlisted or
-    /// different.
-    pub fn members_match(&self, found: &[Member]) -> Result<(), StatementError> {
-        for listed in &self.members {
+    /// [`StatementError::MembersDiffer`], naming the platform, or the first member found twice,
+    /// missing, unlisted or different.
+    pub fn members_match(&self, platform: &str, found: &[Member]) -> Result<(), StatementError> {
+        let statement = &self.0;
+        if statement.members_of != platform {
+            return Err(StatementError::MembersDiffer(format!(
+                "the statement lists the members of {}, not of {platform}",
+                statement.members_of
+            )));
+        }
+        for (at, member) in found.iter().enumerate() {
+            if found[..at]
+                .iter()
+                .any(|earlier| earlier.name.eq_ignore_ascii_case(&member.name))
+            {
+                return Err(StatementError::MembersDiffer(format!(
+                    "{} is in the archive twice",
+                    member.name
+                )));
+            }
+        }
+        for listed in &statement.members {
             match found.iter().find(|member| member.name == listed.name) {
                 None => {
                     return Err(StatementError::MembersDiffer(format!(
@@ -859,10 +936,12 @@ impl Statement {
                 Some(_) => {}
             }
         }
-        if let Some(extra) = found
-            .iter()
-            .find(|member| !self.members.iter().any(|listed| listed.name == member.name))
-        {
+        if let Some(extra) = found.iter().find(|member| {
+            !statement
+                .members
+                .iter()
+                .any(|listed| listed.name == member.name)
+        }) {
             return Err(StatementError::MembersDiffer(format!(
                 "{} is in the archive and not listed",
                 extra.name
@@ -950,9 +1029,11 @@ pub fn fixture_statement(key: &ReleaseKey) -> String {
 /// In order: the statement is read ([`Statement::read_statement`]); the key it names must be
 /// one of `keys` ([`StatementError::UnknownKey`]) and not remembered as retired
 /// ([`StatementError::RetiredKey`]); the signature must be [`SIGNATURE_BYTES`] long and verify
-/// over the statement's bytes with that key ([`StatementError::BadSignature`]); and every key
-/// the statement retires must be one of `keys` ([`StatementError::RetiresUnknownKey`]) — a
-/// statement may retire any embedded key but its own signer, which the grammar refuses.
+/// over the statement's bytes with that key ([`StatementError::BadSignature`]); every key the
+/// statement retires must be one of `keys` ([`StatementError::RetiresUnknownKey`]); and each must
+/// stand before its signer in `keys` ([`StatementError::RetireNotAllowed`]) — retirement is
+/// one-way: the spare may retire the live key, and the live key retires nothing (see the
+/// module). A retire of the signer itself is the grammar's to refuse.
 ///
 /// What the caller does with a verified statement's [`Statement::retires`] is to remember
 /// them, so that a later statement signed by one of them is refused here.
@@ -966,10 +1047,10 @@ pub fn verify_statement(
     signature: &[u8],
     keys: &KeySet<'_>,
     retired: &[KeyId],
-) -> Result<Statement, StatementError> {
+) -> Result<VerifiedStatement, StatementError> {
     let read = Statement::read_statement(statement)?;
     let key = keys
-        .named(read.key)
+        .key_named(read.key)
         .ok_or(StatementError::UnknownKey(read.key))?;
     if retired.contains(&read.key) {
         return Err(StatementError::RetiredKey(read.key));
@@ -984,17 +1065,33 @@ pub fn verify_statement(
     ed25519_compact::PublicKey::new(key.public)
         .verify(statement, &signature)
         .map_err(|_| StatementError::BadSignature(read.key))?;
-    if let Some(unknown) = read.retires.iter().find(|id| keys.named(**id).is_none()) {
+    if let Some(unknown) = read
+        .retires
+        .iter()
+        .find(|id| keys.key_named(**id).is_none())
+    {
         return Err(StatementError::RetiresUnknownKey(*unknown));
     }
-    Ok(read)
+    let signer = keys
+        .place_in_set(read.key)
+        .ok_or(StatementError::UnknownKey(read.key))?;
+    if let Some(later) = read
+        .retires
+        .iter()
+        .find(|id| keys.place_in_set(**id).is_none_or(|at| at >= signer))
+    {
+        return Err(StatementError::RetireNotAllowed(*later));
+    }
+    Ok(VerifiedStatement(read))
 }
 
 // ── a published release, checked whole ──────────────────────────────────────
 
 /// **Every member of the archive `archive`**, each under the one folder `root`, with its
 /// SHA-256 and size: the root's own directory entry is allowed and not counted, and any other
-/// entry outside it, or below a further folder, is refused.
+/// entry outside it, or below a further folder, is refused — and so is a name the archive holds
+/// twice (without case, as Windows stores names), whose bytes this read and an extractor would
+/// take from different entries.
 ///
 /// # Errors
 ///
@@ -1023,6 +1120,12 @@ pub fn archive_members(archive: &[u8], root: &str) -> Result<Vec<Member>, Statem
             .and_then(|rest| rest.strip_prefix('/'))
             .filter(|member| !member.is_empty() && !member.contains('/'))
             .ok_or_else(|| refused(format!("{name} is not a file directly under {root}/")))?;
+        if members
+            .iter()
+            .any(|earlier: &Member| earlier.name.eq_ignore_ascii_case(member))
+        {
+            return Err(refused(format!("{member} is in the archive twice")));
+        }
         let bytes = crate::pinned::entry(archive, &name).map_err(refused)?;
         members.push(Member {
             name: member.to_owned(),
@@ -1049,14 +1152,15 @@ pub fn check_published(
     read: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     tag: &str,
     keys: &KeySet<'_>,
-) -> Result<Statement, StatementError> {
+) -> Result<VerifiedStatement, StatementError> {
     let statement_bytes = read(STATEMENT_FILE).map_err(StatementError::Unreadable)?;
     let signature = read(SIGNATURE_FILE).map_err(StatementError::Unreadable)?;
-    let statement = verify_statement(&statement_bytes, &signature, keys, &[])?;
+    let verified = verify_statement(&statement_bytes, &signature, keys, &[])?;
+    let statement = verified.what_it_says();
     if statement.tag != tag {
         return Err(StatementError::OtherTag {
             expected: tag.to_owned(),
-            found: statement.tag,
+            found: statement.tag.clone(),
         });
     }
     for asset in &statement.assets {
@@ -1064,10 +1168,33 @@ pub fn check_published(
         asset_matches(asset, &hex(&sha256(&bytes)), bytes.len() as u64)?;
         if asset.platform == statement.members_of {
             let root = crate::release_manifest::archive_root(&statement.version);
-            statement.members_match(&archive_members(&bytes, &root)?)?;
+            verified.members_match(&asset.platform, &archive_members(&bytes, &root)?)?;
         }
     }
-    Ok(statement)
+    Ok(verified)
+}
+
+/// **The release check as the release script and the release workflow run it**: a set of keys
+/// holding one of [`TEST_KEYS`] — whose private halves are public — vouches for nothing
+/// ([`StatementError::TestKey`]), whatever the release; otherwise [`check_published`].
+///
+/// # Errors
+///
+/// [`StatementError::TestKey`]; then as [`check_published`].
+#[cfg(all(feature = "release-key", feature = "inflate"))]
+pub fn release_check(
+    read: &mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
+    tag: &str,
+    keys: &KeySet<'_>,
+) -> Result<VerifiedStatement, StatementError> {
+    if let Some(test) = keys
+        .keys
+        .iter()
+        .find(|key| TEST_KEYS.iter().any(|test| test.public == key.public))
+    {
+        return Err(StatementError::TestKey(test.key_id()));
+    }
+    check_published(read, tag, keys)
 }
 
 #[cfg(test)]
