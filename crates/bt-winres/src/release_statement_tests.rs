@@ -458,6 +458,35 @@ fn a_member_list_that_differs_is_refused() {
     ));
 }
 
+/// RED (0.4.10 plan row 102, 1a fold review P2-6) — **a file is held to its platform's line of a
+/// verified statement, its SHA-256 and its size both**: the listed file passes and answers its
+/// line; one byte more, or other bytes of the same length, are refused; a platform with no line
+/// is refused by name.
+///
+/// MUTATION: compare only the size in [`VerifiedStatement::asset_matches`]
+/// (`plant-102-asset-size-only.py`).
+#[test]
+fn a_file_is_held_to_its_platform_s_line() {
+    let statement = as_verified(statement_by(&TEST_KEYS[0], Vec::new()));
+    let listed = statement.asset_for(WINDOWS_X64).unwrap().clone();
+    assert_eq!(
+        statement.asset_matches(WINDOWS_X64, &listed.sha256, listed.size),
+        Ok(&listed)
+    );
+    assert!(matches!(
+        statement.asset_matches(WINDOWS_X64, &listed.sha256, listed.size + 1),
+        Err(StatementError::AssetDiffers(_))
+    ));
+    assert!(matches!(
+        statement.asset_matches(WINDOWS_X64, &"e".repeat(64), listed.size),
+        Err(StatementError::AssetDiffers(_))
+    ));
+    assert_eq!(
+        statement.asset_matches("linux-x64", &listed.sha256, listed.size),
+        Err(StatementError::NoAsset("linux-x64".to_owned()))
+    );
+}
+
 /// RED (0.4.10 plan row 102, 1a review P2-1) — **a found list naming a member twice is refused**,
 /// without case, as Windows stores names: the second `folio.exe` would be what an extractor writes
 /// last, and this check would have read the first.

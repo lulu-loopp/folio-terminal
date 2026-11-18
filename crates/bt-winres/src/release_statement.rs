@@ -267,12 +267,20 @@ impl<'k> KeySet<'k> {
         self.keys.iter().position(|key| key.key_id() == id)
     }
 
+    /// **The first key of the set that is one of [`TEST_KEYS`]**, by its id — the one answer
+    /// [`Self::holds_a_test_key`] and the release check ([`release_check`]) both read.
+    #[must_use]
+    pub fn first_test_key(&self) -> Option<KeyId> {
+        self.keys
+            .iter()
+            .find(|key| TEST_KEYS.iter().any(|test| test.public == key.public))
+            .map(ReleaseKey::key_id)
+    }
+
     /// Whether the set holds one of [`TEST_KEYS`].
     #[must_use]
     pub fn holds_a_test_key(&self) -> bool {
-        self.keys
-            .iter()
-            .any(|key| TEST_KEYS.iter().any(|test| test.public == key.public))
+        self.first_test_key().is_some()
     }
 }
 
@@ -949,25 +957,29 @@ impl VerifiedStatement {
         }
         Ok(())
     }
-}
 
-/// **The file `asset` lists is the one whose bytes hash to `sha256` and number `size`.**
-///
-/// # Errors
-///
-/// [`StatementError::AssetDiffers`].
-pub fn asset_matches(
-    asset: &StatementAsset,
-    sha256: &str,
-    size: u64,
-) -> Result<(), StatementError> {
-    if asset.sha256 == sha256 && asset.size == size {
-        Ok(())
-    } else {
-        Err(StatementError::AssetDiffers(format!(
-            "{} is {size} bytes with SHA-256 {sha256}, and the statement lists {} bytes with {}",
-            asset.name, asset.size, asset.sha256
-        )))
+    /// **The file whose bytes hash to `sha256` and number `size` is the one this statement lists
+    /// for `platform`**: the platform's line found and both compared in one step, so a file is
+    /// held only to a line of a verified statement (1a fold review P2-6). Answers that line.
+    ///
+    /// # Errors
+    ///
+    /// [`StatementError::NoAsset`]; [`StatementError::AssetDiffers`].
+    pub fn asset_matches(
+        &self,
+        platform: &str,
+        sha256: &str,
+        size: u64,
+    ) -> Result<&StatementAsset, StatementError> {
+        let asset = self.asset_for(platform)?;
+        if asset.sha256 == sha256 && asset.size == size {
+            Ok(asset)
+        } else {
+            Err(StatementError::AssetDiffers(format!(
+                "{} is {size} bytes with SHA-256 {sha256}, and the statement lists {} bytes with {}",
+                asset.name, asset.size, asset.sha256
+            )))
+        }
     }
 }
 
@@ -1165,7 +1177,7 @@ pub fn check_published(
     }
     for asset in &statement.assets {
         let bytes = read(&asset.name).map_err(StatementError::Unreadable)?;
-        asset_matches(asset, &hex(&sha256(&bytes)), bytes.len() as u64)?;
+        verified.asset_matches(&asset.platform, &hex(&sha256(&bytes)), bytes.len() as u64)?;
         if asset.platform == statement.members_of {
             let root = crate::release_manifest::archive_root(&statement.version);
             verified.members_match(&asset.platform, &archive_members(&bytes, &root)?)?;
@@ -1187,12 +1199,8 @@ pub fn release_check(
     tag: &str,
     keys: &KeySet<'_>,
 ) -> Result<VerifiedStatement, StatementError> {
-    if let Some(test) = keys
-        .keys
-        .iter()
-        .find(|key| TEST_KEYS.iter().any(|test| test.public == key.public))
-    {
-        return Err(StatementError::TestKey(test.key_id()));
+    if let Some(test) = keys.first_test_key() {
+        return Err(StatementError::TestKey(test));
     }
     check_published(read, tag, keys)
 }
