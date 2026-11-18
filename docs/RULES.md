@@ -1270,13 +1270,16 @@ transaction the running Folio is running — from the press to the quit, or whil
 its launch pass settles one — is not disturbed: the report is kept as the
 launch's last failure, named on Version with Details once the job is `Idle`. A
 reported launch whose folder the running Folio refuses opens its own window
-instead of ending with a sentence nobody reads. **The frozen address**: a press fetches exactly
-two files, by the offer's own tag, from
-`https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/` —
+instead of ending with a sentence nobody reads. **The frozen address**: a press fetches by the offer's own tag, from
+`https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/`, never
+`/releases/latest/`. Builds 0.4.6–0.4.9 fetch exactly two files —
 `folio-<version>-windows-x64.zip` with `SHA256SUMS.txt`, or
-`Folio-<version>-macos-arm64.dmg` with `SHA256SUMS-macos.txt` — never
-`/releases/latest/`; this grammar is read by every earlier build and does not
-change. **The card** says one line per state with C9's verbs (Update · Later ·
+`Folio-<version>-macos-arm64.dmg` with `SHA256SUMS-macos.txt` — and that
+grammar does not change: the checksum files and the disk image keep those names
+in every release, and a release whose archive is `-unsigned` is one those
+builds do not find, so their readers install it by hand. From 0.4.10 a press fetches
+`RELEASE-STATEMENT.txt` and `RELEASE-STATEMENT.txt.sig` first and then the one
+file the verified statement names for its platform (0.4.10 plan row 102). **The card** says one line per state with C9's verbs (Update · Later ·
 Skip; Cancel under the download's bar; Restart · Later at `Verified`; a failure's
 reason, then `Nothing changed.`, `Previous version restored.` or `Update
 incomplete.` with the folder of its own home's journal, whatever path
