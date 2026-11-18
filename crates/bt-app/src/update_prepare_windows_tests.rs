@@ -1907,7 +1907,7 @@ fn at_launch_gathered(knows_the_release: bool) -> Gathered {
 /// The product's resumer for `scene`'s running build, with the test keys.
 #[cfg(windows)]
 fn resumer_of(scene: &Scene) -> crate::update_prepare::Resumer {
-    resumer(scene.exe.clone(), scene.vouching())
+    resumer(scene.exe.clone(), scene.vouching(), scene.ca.policy())
 }
 
 /// **Download, Later, close**: the real Prepare of `v0.4.7` under
@@ -2600,4 +2600,75 @@ fn a_cancel_while_the_journal_is_held_ends_the_wait() {
     );
     scene.left_nothing(1);
     assert_eq!(scene.installed(), before);
+}
+
+/// RED (0.4.10 plan row 102 part 3, R4) — **only our signing service's
+/// signature says nothing**: every other answer of the reading — another
+/// signer or profile, no signature, a refusal — has the surfaces say the
+/// sentence.
+///
+/// MUTATION: `ServiceSignature::note` answers `Nothing` for `Another`
+/// (`plant-102-3-another-signer-says-nothing.py`).
+#[test]
+fn only_our_services_signature_says_nothing() {
+    assert_eq!(ServiceSignature::Ours.note(), SignatureNote::Nothing);
+    for other in [
+        ServiceSignature::Another,
+        ServiceSignature::Unsigned,
+        ServiceSignature::Refused("revoked".to_owned()),
+    ] {
+        assert_eq!(other.note(), SignatureNote::NotOurService, "{other:?}");
+    }
+}
+
+/// RED (0.4.10 plan row 102 part 3, R5) — **the Prepare hands the job its
+/// reading of the staged `folio.exe`**: a release the test root signed is
+/// staged, and since the test publisher is not our signing service the job
+/// at `Verified` holds `NotOurService` — its Ready card says Windows may
+/// warn.
+///
+/// MUTATION: `prepare_on` hands `SignatureNote::Nothing` beside the staged
+/// set (`plant-102-3-prepare-hands-nothing.py`).
+#[cfg(windows)]
+#[test]
+fn the_prepare_hands_the_job_its_reading_of_the_staged_exe() {
+    let scene = Scene::new("note");
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(Release::of(scene.archive.clone())),
+        1,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    assert_eq!(job.staged_note(), SignatureNote::NotOurService);
+    assert_eq!(
+        crate::update_card::paint_of(&job)
+            .and_then(|paint| paint.detail)
+            .as_deref(),
+        Some(Text::UpdateCardMayWarn.text())
+    );
+}
+
+/// RED (0.4.10 plan row 102 part 3, R5) — **a launch that resumes a staged
+/// set reads its `folio.exe` again for the Ready card**: after "download,
+/// Later, close", the next launch's card carries the reading that launch
+/// made of the staged set.
+///
+/// MUTATION: `resumer` answers `SignatureNote::Nothing` without reading
+/// (`plant-102-3-resume-reads-nothing.py`).
+#[cfg(windows)]
+#[test]
+fn a_resume_reads_the_staged_exe_again_for_its_card() {
+    let scene = Scene::new("resume-note");
+    prepared_and_closed(&scene);
+    let launched = launch(&scene.exe, resumer_of(&scene), &at_launch_gathered(false));
+    assert!(
+        matches!(launched.job.state(), State::Verified(_)),
+        "{:?}",
+        launched.job.state()
+    );
+    assert_eq!(launched.job.staged_note(), SignatureNote::NotOurService);
 }

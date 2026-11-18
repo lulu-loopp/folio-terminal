@@ -56,10 +56,7 @@
 //!    `download\` removed, and **`set\` verified again as it lies** — the kept
 //!    statement verified again and every member held to it ([`still_staged`])
 //!    — because what gets installed must be what was checked ([`Stop::Copy`],
-//!    [`Stop::Identity`]). Then the one reading of a signature the Prepare
-//!    makes: whether the staged `folio.exe` carries our signing service's
-//!    signature ([`service_signature`]), which decides no step — only whether
-//!    the Ready card says the version is not signed by it (R4, R5).
+//!    [`Stop::Identity`]).
 //! 7. **Rescue** (C5 as F-8 replaced it): the running executable copied to
 //!    `rescue\<name>`, the copy the applier and recovery run from and no step
 //!    ever moves; its digest and length must be the running image's — equal
@@ -67,8 +64,13 @@
 //! 8. **`Prepared`**, durably, with the inventories O measured under the lock
 //!    (F-8): the old shipped list, what is present at every name of it or of
 //!    the new set (name, digest, size), and the new set; `deferred_launches:
-//!    0`, outcome `none` (`Journal::prepare_with`); then the staged transaction
-//!    — home, journal, lock — is handed to the job with `Poster::verified`.
+//!    0`, outcome `none` (`Journal::prepare_with`); then the one reading of a
+//!    signature the Prepare makes — whether the staged `folio.exe` carries our
+//!    signing service's signature ([`service_signature`]), which decides no
+//!    step, only whether the Ready card says Windows may warn about the update
+//!    (R4, R5; row 102 part 3) — and the staged transaction — home, journal,
+//!    lock — is handed to the job with `Poster::verified`, that reading beside
+//!    it.
 //!
 //! **Every refusal after the journal exists abandons the transaction and
 //! leaves nothing** (W1): the journal is recorded `Abandoned` (`PrepareFailed`),
@@ -86,7 +88,9 @@
 //! transaction folder with no statement — one an older build prepared — is
 //! refused. The applier runs it after O has let go and before the entrance is
 //! written (U-23); O's resume at a later launch is [`resume`] ([`revalidate`],
-//! which discards on a failure; the version is the statement's), which the update job
+//! which discards on a failure; the version is the statement's), and the
+//! staged `folio.exe`'s signature read again for its Ready card
+//! ([`resumer`]), which the update job
 //! runs on its worker at every launch that finds a `Prepared` transaction
 //! (`update_prepare::settle_at_launch`, U-33).
 
@@ -112,8 +116,8 @@ use crate::update_apply::{
 use crate::update_archive::{self, Deadline, EmbeddedManifest, Expected, ManifestSource, Reason};
 use crate::update_handoff::Staged;
 use crate::update_job::{
-    Driver, NotEligible, Offer, Poster, Refused, SharedTransport, Step, Stop, Transport,
-    Unsupported,
+    Driver, NotEligible, Offer, Poster, Refused, SharedTransport, SignatureNote, Step, Stop,
+    Transport, Unsupported,
 };
 use crate::update_prepare::{
     Vouching, WORKER, abandon_on, digest_of, discard, fetch_vouched_asset, finish, journal_failed,
@@ -446,7 +450,7 @@ fn running(exe: &Path) -> Result<Running, Stop> {
 // ── steps 2–8 ───────────────────────────────────────────────────────────────
 
 /// **The Prepare, on its worker** — the module header's eight steps.
-fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
+fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<(Staged, SignatureNote), Stop> {
     let (home, adapter) = eligible(road.exe, road.channel).map_err(|why| stop_for(&why))?;
     let layout = road.layouts.named(adapter).map_err(|_| Stop::NotOurs)?;
     road.go_on()?;
@@ -490,11 +494,17 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
             Ok(prepared)
         });
     match staged {
-        Ok(journal) => Ok(Staged {
-            home,
-            journal,
-            lock,
-        }),
+        Ok(journal) => {
+            let note = staged_signature_note(&home, txn, road.policy);
+            Ok((
+                Staged {
+                    home,
+                    journal,
+                    lock,
+                },
+                note,
+            ))
+        }
         Err(stop) => {
             let _ = abandon_on(worker, road.clock, &home, &allocated, &Event::PrepareFailed);
             drop(lock);
@@ -660,8 +670,6 @@ fn acquire(
     }
     let _ = install_txn::durable_remove(&folders.expand);
     still_staged(&folders.set, &new, &kept, road.vouching)?;
-    let signed = service_signature(&folders.set.join(EXECUTABLE), road.policy, &OUR_SERVICE);
-    note(&format!("the staged {EXECUTABLE} is {}", signed.as_said()));
     road.go_on()?;
 
     // Step 7: the rescue copy of the running executable.
@@ -764,10 +772,24 @@ fn still_staged(
     Ok(statement)
 }
 
-/// **Whether a staged `folio.exe` carries our signing service's signature**
+/// **What the Ready card of the staged set of `txn` in `home` says of its
+/// signature** (0.4.10 plan row 102 part 3, R4, R5): [`service_signature`] of
+/// `set\folio.exe` under `policy`, said in one `diagnostics.log` line — a
+/// home with no set folder holds no signature of ours. Read once the set is
+/// `Prepared`, and again by every launch that resumes it.
+fn staged_signature_note(home: &Home, txn: TxnId, policy: &Policy) -> SignatureNote {
+    let Some(set) = home.members_folder(txn, Place::Set) else {
+        return SignatureNote::NotOurService;
+    };
+    let signed = service_signature(&set.join(EXECUTABLE), policy, &OUR_SERVICE);
+    note(&format!("the staged {EXECUTABLE} is {}", signed.as_said()));
+    signed.note()
+}
+
+/// **Whether a `folio.exe` carries our signing service's signature**
 /// (0.4.10 plan row 102 §1.8, R4) — the updater's own reading, which decides
-/// no step of the Prepare: part 3 of the row gives the Ready card its one
-/// sentence from it. Windows' answer under `policy` must be a valid
+/// no step of the Prepare: the Ready card's sentence and About → Version's
+/// are said from it ([`ServiceSignature::note`]). Windows' answer under `policy` must be a valid
 /// signature whose subject is `signer`'s and whose leaf carries `signer`'s
 /// identity OID; any refusal — unsigned, revoked, revocation offline or
 /// unknown — reads as not signed by it.
@@ -809,8 +831,18 @@ pub(crate) enum ServiceSignature {
 }
 
 impl ServiceSignature {
+    /// **What a surface says of it** (row 102 part 3): nothing for our
+    /// service's signature, the sentence for every other answer.
+    #[must_use]
+    pub(crate) const fn note(&self) -> SignatureNote {
+        match self {
+            Self::Ours => SignatureNote::Nothing,
+            Self::Another | Self::Unsigned | Self::Refused(_) => SignatureNote::NotOurService,
+        }
+    }
+
     /// The answer, as a diagnostics line says it.
-    fn as_said(&self) -> String {
+    pub(crate) fn as_said(&self) -> String {
         match self {
             Self::Ours => "signed by our signing service".to_owned(),
             Self::Another => "signed, by another signer than our signing service".to_owned(),
@@ -921,11 +953,17 @@ pub(crate) fn resume(
 
 /// **The resumer of the running copy** (`update_job::resumer_for_this_copy`):
 /// [`resume`] for the executable at `exe`, verifying with `vouching`, for the
-/// channel the job hands it.
+/// channel the job hands it; then the staged `folio.exe`'s signature, read
+/// again under `policy` for the Ready card this launch shows
+/// ([`staged_signature_note`], row 102 part 3).
 #[must_use]
-pub(crate) fn resumer(exe: PathBuf, vouching: Vouching) -> crate::update_prepare::Resumer {
+pub(crate) fn resumer(
+    exe: PathBuf,
+    vouching: Vouching,
+    policy: Policy,
+) -> crate::update_prepare::Resumer {
     Box::new(move |worker, staged, channel| {
-        resume(
+        let (staged, version) = resume(
             worker,
             staged,
             &Resume {
@@ -933,7 +971,9 @@ pub(crate) fn resumer(exe: PathBuf, vouching: Vouching) -> crate::update_prepare
                 channel,
                 vouching: &vouching,
             },
-        )
+        )?;
+        let note = staged_signature_note(&staged.home, staged.journal.txn, &policy);
+        Ok((staged, version, note))
     })
 }
 

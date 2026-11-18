@@ -3250,6 +3250,14 @@ text_entries! {
     UpdateCardClose,
     /// The verified card's one line (C9).
     UpdateCardReady,
+    /// The verified card's sentence before Restart when the staged set is not signed by our
+    /// signing service (`update_job::SignatureNote::NotOurService`; 0.4.10 plan row 102 part 3,
+    /// R5).
+    UpdateCardMayWarn,
+    /// **Two sentences on one line**, in the language's own spacing: `{first}`, then `{second}` —
+    /// the Ready card's detail after a restart that did not happen, and its signature sentence
+    /// (row 102 part 3).
+    TwoSentences,
     /// Beside the determinate bar: received and total, in megabytes.
     UpdateCardProgress,
     /// After the reason, when the job stopped before anything installed moved.
@@ -3282,6 +3290,9 @@ text_entries! {
     ShellEndedBySystem,
     /// About > Version: no newer release is known.
     VersionUpToDate,
+    /// About > Version, after the line, when this copy is not signed by our signing service
+    /// (`update_job::SignatureNote::NotOurService`; 0.4.10 plan row 102 part 3, R4).
+    VersionNotSigned,
     /// About > Version controls and inline links.
     VersionChecking,
     VersionCheck,
@@ -6524,6 +6535,13 @@ impl Text {
                 "Ready. Running programs will close.",
                 "准备就绪。正在运行的程序将被关闭。",
             ),
+            // The Chinese is owed (`CHINESE_PENDING`), and stands on the English until written.
+            Self::UpdateCardMayWarn => pick(
+                lang,
+                "Windows may warn about this update.",
+                "Windows may warn about this update.",
+            ),
+            Self::TwoSentences => pick(lang, "{first} {second}", "{first}{second}"),
             Self::UpdateCardProgress => pick(
                 lang,
                 "{received} / {total} MB",
@@ -6539,6 +6557,12 @@ impl Text {
             ),
             Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
             Self::VersionUpToDate => pick(lang, "Up to date", "已是最新"),
+            // The Chinese is owed (`CHINESE_PENDING`), and stands on the English until written.
+            Self::VersionNotSigned => pick(
+                lang,
+                "This copy is not signed by Microsoft's signing service.",
+                "This copy is not signed by Microsoft's signing service.",
+            ),
             Self::VersionChecking => pick(lang, "Checking…", "检查中…"),
             Self::VersionCheck => pick(lang, "Check", "检查"),
             Self::VersionUpdateAndRestart => pick(lang, "Update and restart", "更新并重启"),
@@ -7046,8 +7070,21 @@ impl Text {
         Self::CodexHookPathBrackets,
     ];
 
+    /// The entries whose Chinese is owed, by column: the English stands in both until the
+    /// Chinese pass writes it (0.4.10 plan row 102 part 3).
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &{
+        use HostPlatform::{MacOs, OtherUnix, Windows};
+        use Text::{UpdateCardMayWarn, VersionNotSigned};
+        [
+            (UpdateCardMayWarn, Windows),
+            (UpdateCardMayWarn, MacOs),
+            (UpdateCardMayWarn, OtherUnix),
+            (VersionNotSigned, Windows),
+            (VersionNotSigned, MacOs),
+            (VersionNotSigned, OtherUnix),
+        ]
+    };
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -7201,6 +7238,16 @@ pub fn version_verifying_in(lang: Lang, version: &str) -> String {
     Text::VersionVerifying
         .in_lang(lang)
         .replace("{version}", version)
+}
+
+/// **Two sentences on one line** — `first`, then `second`, spaced as the language spaces them
+/// ([`Text::TwoSentences`]; 0.4.10 plan row 102 part 3).
+#[must_use]
+pub fn two_sentences(first: &str, second: &str) -> String {
+    Text::TwoSentences
+        .text()
+        .replace("{first}", first)
+        .replace("{second}", second)
 }
 
 #[must_use]

@@ -1196,6 +1196,7 @@ pub(crate) fn resumer_for_this_copy() -> Resumer {
             Ok(exe) => crate::update_prepare_windows::resumer(
                 exe,
                 crate::update_prepare::Vouching::of_this_copy(),
+                bt_platform::trust::Policy::System,
             ),
             Err(_) => crate::update_prepare::no_resume(),
         },
@@ -1221,11 +1222,14 @@ pub(crate) enum Landed {
     /// set's own version under the transaction's identity, and the staged
     /// transaction, lock held — the verified card, as if its download had just
     /// finished; `restart_missed` when Restart was pressed for it and the
-    /// restart did not happen (0.4.8 E3), which that card says.
+    /// restart did not happen (0.4.8 E3), which that card says; `note`, what
+    /// the card says of the set's signature, read again at this launch (row
+    /// 102 part 3).
     Resumed {
         offer: Offer,
         staged: Box<Staged>,
         restart_missed: bool,
+        note: SignatureNote,
     },
 }
 
@@ -1360,8 +1364,27 @@ pub(crate) fn evidence_landed() {
 }
 
 /// Where a driver leaves the staged transaction for the job, until the job
-/// reads its `Verified` report: the transaction it belongs to, and the value.
-type StagedSlot = Arc<Mutex<Option<(TxnId, Staged)>>>;
+/// reads its `Verified` report: the transaction it belongs to, the value, and
+/// what the Ready card says of the staged set's signature.
+type StagedSlot = Arc<Mutex<Option<(TxnId, Staged, SignatureNote)>>>;
+
+/// **What a surface says of a `folio.exe`'s signature** (0.4.10 plan row 102
+/// part 3, R4 and R5) — the updater's own reading of it, which decides no step:
+/// the Ready card of a staged set, and About → Version of this copy, add one
+/// sentence for [`Self::NotOurService`] and nothing otherwise.
+///
+/// Windows' answer is the reading (`update_prepare_windows::service_signature`):
+/// a valid signature by our signing service says nothing, and every other
+/// answer — another signer, none, revoked, offline, unknown — says the
+/// sentence. On macOS no Authenticode reading exists, and nothing is said.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SignatureNote {
+    /// Signed by our signing service, not read, or no such reading here.
+    #[default]
+    Nothing,
+    /// Windows' reading names no valid signature by our signing service.
+    NotOurService,
+}
 
 /// **A job's inbox**: the reports its drivers posted, waiting for the window
 /// thread, and the signal each post gives. The loop is woken through
@@ -1389,12 +1412,13 @@ impl Poster {
     /// **Report `Verified`, handing the job what Prepare leaves behind** —
     /// the home, the journal at `Prepared` and the transaction lock (U-21's
     /// seam for U-20 / U-27): the quit's hand-over writes `Handoff` from it,
-    /// under that lock, at the way out.
+    /// under that lock, at the way out. `note` is what the Ready card says of
+    /// the staged set's signature ([`SignatureNote`], row 102 part 3).
     ///
     /// # Errors
     /// The job was cancelled first: the staged transaction comes back, for the
     /// driver to abandon — a job that has moved on never holds it.
-    pub(crate) fn verified(&self, staged: Staged) -> Result<(), Box<Staged>> {
+    pub(crate) fn verified(&self, staged: Staged, note: SignatureNote) -> Result<(), Box<Staged>> {
         let mut slot = self
             .staged
             .lock()
@@ -1402,7 +1426,7 @@ impl Poster {
         if self.cancelled() {
             return Err(Box::new(staged));
         }
-        *slot = Some((self.txn, staged));
+        *slot = Some((self.txn, staged, note));
         drop(slot);
         self.post(Step::Verified);
         Ok(())
@@ -1516,6 +1540,10 @@ pub(crate) struct Job<W> {
     /// **The staged transaction** — its home, its journal and the lock O holds
     /// on it — from `Verified` until the process leaves (U-21).
     staged: Option<Staged>,
+    /// **What the Ready card says of the staged set's signature** (row 102
+    /// part 3), handed over with [`Self::staged`]: by the `Verified` report, or
+    /// by the launch that resumed the set.
+    staged_note: SignatureNote,
     /// Why the last quit gave the update up, while the card is back at
     /// `Verified` (U-21; U-19 names it).
     abandoned: Option<Abandon>,
@@ -1597,6 +1625,7 @@ impl<W: Copy + Eq> Job<W> {
             inbox: Arc::default(),
             staged_slot: Arc::new(Mutex::new(None)),
             staged: None,
+            staged_note: SignatureNote::Nothing,
             abandoned: None,
             running: None,
             launch: Launch::Done,
@@ -1872,6 +1901,7 @@ impl<W: Copy + Eq> Job<W> {
                 offer,
                 staged,
                 restart_missed,
+                note,
             } => {
                 let line = format!(
                     "Folio: update job — {} was prepared at an earlier launch and is verified again",
@@ -1883,6 +1913,7 @@ impl<W: Copy + Eq> Job<W> {
                     presenters.quake,
                 );
                 self.staged = Some(*staged);
+                self.staged_note = note;
                 self.state = State::Verified(offer);
                 self.restart_missed = restart_missed;
                 self.put_away = false;
@@ -1924,6 +1955,24 @@ impl<W: Copy + Eq> Job<W> {
     #[must_use]
     pub(crate) const fn staged(&self) -> Option<&Staged> {
         self.staged.as_ref()
+    }
+
+    /// **What the Ready card says of the staged set's signature** (row 102
+    /// part 3): the reading handed over with [`Self::staged`];
+    /// [`SignatureNote::Nothing`] before any was.
+    #[must_use]
+    pub(crate) const fn staged_note(&self) -> SignatureNote {
+        self.staged_note
+    }
+
+    /// A job standing at `Verified` with `offer`, whose staged set's
+    /// signature reads as `note` — a card test's way to the Ready card's
+    /// sentence without a driver.
+    #[cfg(test)]
+    pub(crate) fn verified_noting_for_test(offer: Offer, note: SignatureNote) -> Self {
+        let mut job = Self::verified_for_test(offer);
+        job.staged_note = note;
+        job
     }
 
     /// **A transaction staged as the `Verified` report leaves it**, for a test of the hand-over
@@ -2302,10 +2351,11 @@ impl<W: Copy + Eq> Job<W> {
                     .staged_slot
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take_if(|(txn, _)| *txn == offer.txn)
-                    .map(|(_, staged)| staged);
-                if staged.is_some() {
-                    self.staged = staged;
+                    .take_if(|(txn, _, _)| *txn == offer.txn)
+                    .map(|(_, staged, note)| (staged, note));
+                if let Some((staged, note)) = staged {
+                    self.staged = Some(staged);
+                    self.staged_note = note;
                 }
                 (State::Verified(offer), Applied::Moved)
             }
@@ -2495,7 +2545,7 @@ mod tests {
     use super::{
         Applied, Bytes, Driver, Effect, Evidence, Failure, Fetching, Gathered, Handling, Job, Kind,
         NotEligible, Offer, Pending, Poster, Presenters, Refused, Request, Route, SharedTransport,
-        State, Step, Stop, TABLE, Transport, Unsupported, Verb,
+        SignatureNote, State, Step, Stop, TABLE, Transport, Unsupported, Verb,
     };
     use crate::install_channel::{self, Channel, Manager};
     use crate::update_txn::TxnId;
@@ -2671,11 +2721,14 @@ mod tests {
             threads.spawn(|| {
                 post.post(Step::Staged);
                 assert!(
-                    post.verified(Staged {
-                        home: home.clone(),
-                        journal,
-                        lock,
-                    })
+                    post.verified(
+                        Staged {
+                            home: home.clone(),
+                            journal,
+                            lock,
+                        },
+                        SignatureNote::Nothing,
+                    )
                     .is_ok(),
                     "the job was not cancelled"
                 );
@@ -4186,6 +4239,7 @@ mod tests {
                     offer: Offer::mint(tx, "v0.4.9", HostPlatform::Windows).expect("a release"),
                     staged: Box::new(staged),
                     restart_missed,
+                    note: super::SignatureNote::Nothing,
                 }))),
                 check: Box::new(|| {}),
             };
@@ -4220,6 +4274,138 @@ mod tests {
                 assert_eq!(paint.detail, None);
             }
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.10 plan row 102 part 3) — **the `Verified` report hands the
+    /// job what the Ready card says of the staged set's signature**: a set the
+    /// driver read as not signed by our signing service reaches `Verified`
+    /// with that reading, and its card says *Windows may warn about this
+    /// update.* before Restart.
+    ///
+    /// MUTATION: in `Job::apply`'s `Verified` arm, take the staged transaction
+    /// and leave the note (`plant-102-3-verified-drops-the-note.py`).
+    #[test]
+    fn a_verified_report_hands_the_job_its_reading_of_the_signature() {
+        use bt_platform::install_txn::{self, Hold};
+
+        use crate::update_handoff::Staged;
+        use crate::update_txn::{Event, Home, Inventories, Journal, Layout};
+
+        let folder = bt_testpath::temp_path("bt-update-job-signature");
+        let home = Home::at(folder.join(".folio-update"));
+        std::fs::create_dir_all(home.root()).expect("the home");
+        let mut job = available("v0.4.7");
+        let driver = Starting::default();
+        job.answer_verb(Verb::Press, &driver, &Recording::default().shared())
+            .expect("the press is taken");
+        let offer = job.state().offer().cloned().expect("an offer");
+        let post = driver
+            .0
+            .borrow_mut()
+            .take()
+            .expect("the driver kept its poster");
+        let journal = Journal::allocate(
+            offer.txn(),
+            folder.join("rescue.exe").to_string_lossy().into_owned(),
+            Layout::Members(Inventories {
+                old_shipped: Vec::new(),
+                old_present: Vec::new(),
+                new: Vec::new(),
+            }),
+        )
+        .advance(&Event::Prepared)
+        .expect("Allocated → Prepared");
+        let lock = install_txn::try_hold(&home.lock(), Hold::Exclusive)
+            .expect("the lock file opens")
+            .expect("nobody else holds it");
+        post.post(Step::Staged);
+        assert!(
+            post.verified(
+                Staged {
+                    home: home.clone(),
+                    journal,
+                    lock,
+                },
+                SignatureNote::NotOurService,
+            )
+            .is_ok(),
+            "the job was not cancelled"
+        );
+        assert_eq!(job.drain_progress(), 0, "no report is stale");
+        assert!(matches!(job.state(), State::Verified(_)));
+        assert_eq!(job.staged_note(), SignatureNote::NotOurService);
+        assert_eq!(
+            crate::update_card::paint_of(&job)
+                .and_then(|paint| paint.detail)
+                .as_deref(),
+            Some("Windows may warn about this update.")
+        );
+        drop(job);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// RED (0.4.10 plan row 102 part 3) — **a resumed set not signed by our
+    /// signing service keeps both lines on its card**: the launch that resumes
+    /// a staged update whose restart did not happen says so in its heading,
+    /// then the Ready line, then *Windows may warn about this update.* — the
+    /// reading the launch made, handed over with the set.
+    ///
+    /// MUTATION: in `Job::launch_pass`'s `Resumed` arm, leave the note
+    /// (`plant-102-3-resumed-drops-the-note.py`); or let the signature
+    /// sentence replace the detail it follows
+    /// (`plant-102-3-warning-replaces-the-detail.py`).
+    #[test]
+    fn a_resumed_set_not_signed_by_our_service_keeps_both_lines_on_its_card() {
+        let root = bt_testpath::temp_path("bt-update-job-签名");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = crate::update_txn::Home::at(root.join("更新"));
+        std::fs::create_dir_all(home.root()).unwrap();
+        let tx = txn(0x4e);
+        let lock = bt_platform::install_txn::try_hold(
+            &home.lock(),
+            bt_platform::install_txn::Hold::Exclusive,
+        )
+        .unwrap()
+        .expect("the lock is free");
+        let staged = crate::update_handoff::Staged {
+            home: home.clone(),
+            journal: crate::update_txn::Journal::allocate(
+                tx,
+                "rescue".to_owned(),
+                crate::update_txn::Layout::Members(crate::update_txn::Inventories {
+                    old_shipped: vec!["folio.exe".to_owned()],
+                    old_present: Vec::new(),
+                    new: Vec::new(),
+                }),
+            ),
+            lock,
+        };
+        let mut job = job();
+        job.launch = super::Launch::Running {
+            landed: Arc::new(Mutex::new(Some(super::Landed::Resumed {
+                offer: Offer::mint(tx, "v0.4.10", HostPlatform::Windows).expect("a release"),
+                staged: Box::new(staged),
+                restart_missed: true,
+                note: SignatureNote::NotOurService,
+            }))),
+            check: Box::new(|| {}),
+        };
+        let _ = job.consider(
+            gathered("v0.4.10", None, Some(Channel::Ours)),
+            &one_window(),
+            || tx,
+        );
+        let paint = crate::update_card::paint_of(&job).expect("the Ready card");
+        assert_eq!(
+            paint.heading.as_deref(),
+            Some("The restart did not happen.")
+        );
+        assert_eq!(
+            paint.detail.as_deref(),
+            Some("Ready. Running programs will close. Windows may warn about this update.")
+        );
+        drop(job);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

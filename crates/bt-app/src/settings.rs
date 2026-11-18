@@ -7180,6 +7180,10 @@ pub struct SettingsPanel {
     /// **The General page's sign-in entry edge** (0.4.10 plan row 22a, R11): a change made in
     /// Task Manager while Folio runs is read when the reader looks, once per visit.
     general_visit_read: bool,
+    /// **The About page's signature edge** (0.4.10 plan row 102 part 3, R4): this copy's
+    /// signature is read again when the reader looks at About → Version, once per visit — a
+    /// certificate revoked while Folio runs shows there.
+    about_visit_read: bool,
     /// **The Profiles rows whose button the latest layout placed** ([`Self::note_placed`]) —
     /// what the keyboard walk is handed, so a button the layout did not place is not a stop.
     placed_buttons: Vec<usize>,
@@ -7579,6 +7583,16 @@ impl SettingsPanel {
         !std::mem::replace(&mut self.general_visit_read, true)
     }
 
+    /// Consume the first showing of About → Version on this visit to About (0.4.10 plan row
+    /// 102 part 3) — [`Self::take_agents_open_edge`]'s edge, reset by the same roads off the
+    /// page.
+    pub fn take_about_open_edge(&mut self, showing: bool) -> bool {
+        if !self.open || !showing {
+            return false;
+        }
+        !std::mem::replace(&mut self.about_visit_read, true)
+    }
+
     /// **The update row is being shown while the gear is `lit`** (0.4.6
     /// T-GEAR-MARK-LANDS): keep the mark on the row for the rest of this visit
     /// to `About`. Called on the door that answers the mark, just before it
@@ -7637,6 +7651,7 @@ impl SettingsPanel {
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
         self.general_visit_read = false;
+        self.about_visit_read = false;
         self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
@@ -7672,6 +7687,7 @@ impl SettingsPanel {
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
         self.general_visit_read = false;
+        self.about_visit_read = false;
         self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
@@ -7753,6 +7769,7 @@ impl SettingsPanel {
         self.agents_visit_read = false;
         self.profiles_visit_read = false;
         self.general_visit_read = false;
+        self.about_visit_read = false;
         self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
@@ -8088,6 +8105,7 @@ impl SettingsPanel {
             self.agents_visit_read = false;
             self.profiles_visit_read = false;
             self.general_visit_read = false;
+            self.about_visit_read = false;
             self.update_mark_carried = false;
             self.menu = None;
             self.recording = None;
@@ -17346,6 +17364,38 @@ mod tests {
         panel.toggle(content(&[], &[]));
         panel.select_category(SettingsCategory::Profiles);
         assert!(panel.take_profiles_open_edge(true));
+    }
+
+    /// RED (0.4.10 plan row 102 part 3, R4) — **this copy's signature is read again once per
+    /// visit to About, never once per frame**: a certificate revoked while Folio runs shows when
+    /// the reader looks, and two hundred layouts of the open page ask nothing more.
+    ///
+    /// MUTATION: return `self.open && showing` instead of consuming the visit latch
+    /// (`plant-102-3-about-reads-every-frame.py`).
+    #[test]
+    fn this_copys_signature_is_read_once_per_visit_to_about() {
+        let mut panel = SettingsPanel::default();
+        assert!(
+            !panel.take_about_open_edge(true),
+            "a shut dialog is no visit"
+        );
+        panel.toggle(content(&[], &[]));
+        panel.select_category(SettingsCategory::About);
+        assert!(panel.take_about_open_edge(true));
+        for _ in 0..200 {
+            assert!(!panel.take_about_open_edge(true));
+        }
+        panel.select_category(SettingsCategory::General);
+        assert!(!panel.take_about_open_edge(false));
+        panel.select_category(SettingsCategory::About);
+        assert!(panel.take_about_open_edge(true));
+        panel.close();
+        panel.toggle(content(&[], &[]));
+        panel.select_category(SettingsCategory::About);
+        assert!(
+            panel.take_about_open_edge(true),
+            "close and reopen is a new visit"
+        );
     }
 
     /// RED (0.4.10 plan row 22a, R11) — **the sign-in row is read again once per visit to

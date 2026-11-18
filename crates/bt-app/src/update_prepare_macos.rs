@@ -95,8 +95,8 @@ use crate::update_adapter::Layouts;
 use crate::update_archive;
 use crate::update_handoff::Staged;
 use crate::update_job::{
-    Driver, MACOS_ARCHITECTURE, NotEligible, Offer, Poster, Refused, SharedTransport, Step, Stop,
-    Transport, Unsupported,
+    Driver, MACOS_ARCHITECTURE, NotEligible, Offer, Poster, Refused, SharedTransport,
+    SignatureNote, Step, Stop, Transport, Unsupported,
 };
 use crate::update_prepare::{
     Vouching, WORKER, abandon, discard, fetch_vouched_asset, finish, journal_failed, journal_stop,
@@ -272,7 +272,13 @@ impl Driver for MacPrepare {
                     layouts: &layouts,
                     record: record.as_deref(),
                 };
-                finish(worker, &post, prepare_on(worker, &road));
+                // No Authenticode reading exists here: the Ready card says
+                // nothing of a signature (row 102 part 3).
+                finish(
+                    worker,
+                    &post,
+                    prepare_on(worker, &road).map(|staged| (staged, SignatureNote::Nothing)),
+                );
             },
         )
         .map(drop)
@@ -854,7 +860,8 @@ pub(crate) fn revalidate(
 /// **O's resume at a later launch** (U-33; `update_prepare::Resumer`):
 /// [`revalidate`], then the version the staged bundle installs — the one the
 /// journal recorded at `Prepared`, which the revalidation has just held the
-/// staged bundle to.
+/// staged bundle to — and [`SignatureNote::Nothing`]: no Authenticode reading
+/// exists here (row 102 part 3).
 ///
 /// # Errors
 /// The [`Stop`] that failed; the transaction is gone.
@@ -864,12 +871,12 @@ pub(crate) fn resume(
     bundle: &Path,
     tools: &dyn Tools,
     channel: Option<Channel>,
-) -> Result<(Staged, String), Stop> {
+) -> Result<(Staged, String, SignatureNote), Stop> {
     let staged = revalidate(worker, staged, bundle, tools, channel)?;
     match &staged.journal.body.layout {
         Layout::Bundle { new, .. } => {
             let version = new.version.clone();
-            Ok((staged, version))
+            Ok((staged, version, SignatureNote::Nothing))
         }
         _ => {
             let _ = discard(worker, staged, &Event::Discarded);

@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 use crate::i18n::{self, Lang, Text};
 use crate::update_job::{
-    Bytes, Effect, Failure, Job, NotEligible, Offer, State, Stop, TrialChanges, Verb,
+    Bytes, Effect, Failure, Job, NotEligible, Offer, SignatureNote, State, Stop, TrialChanges, Verb,
 };
 
 // ── the verbs ──────────────────────────────────────────────────────────────
@@ -397,15 +397,35 @@ pub(crate) fn paint(state: &State) -> Option<Paint> {
 /// card of a staged set whose restart did not happen (0.4.8 E3,
 /// `Job::restart_missed`): its heading is *The restart did not happen.*, the
 /// Ready line follows as its detail, and the same Restart · Later are offered.
+///
+/// **A Ready card whose staged set is not signed by our signing service says
+/// so before Restart** (0.4.10 plan row 102 part 3, R5; `Job::staged_note`):
+/// *Windows may warn about this update.* is its detail, or follows the detail
+/// it has. Restart is the one press that installs, so this card is where the
+/// reader is asked.
 #[must_use]
 pub(crate) fn paint_of<W: Copy + Eq>(job: &Job<W>) -> Option<Paint> {
     let paint = paint(job.state())?;
-    if !job.restart_missed() {
+    let paint = if job.restart_missed() {
+        Paint {
+            heading: Some(Text::UpdateCardRestartMissed.text().to_owned()),
+            detail: paint.heading,
+            ..paint
+        }
+    } else {
+        paint
+    };
+    if !matches!(job.state(), State::Verified(_))
+        || job.staged_note() != SignatureNote::NotOurService
+    {
         return Some(paint);
     }
+    let warning = Text::UpdateCardMayWarn.text();
     Some(Paint {
-        heading: Some(Text::UpdateCardRestartMissed.text().to_owned()),
-        detail: paint.heading,
+        detail: Some(match paint.detail {
+            Some(detail) => i18n::two_sentences(&detail, warning),
+            None => warning.to_owned(),
+        }),
         ..paint
     })
 }
@@ -862,6 +882,11 @@ impl Default for VersionRow {
 
 /// Derive the Version row from the existing check and job owners. No state is
 /// cached here: a frame that sees new evidence or progress sees new words.
+///
+/// **A copy not signed by our signing service says so on the line** (0.4.10
+/// plan row 102 part 3, R4): `this_copy`, the last reading of the running
+/// `folio.exe`'s signature (`update::this_copy_note`), adds *This copy is not
+/// signed by Microsoft's signing service.* after the state, whatever it is.
 #[must_use]
 pub(crate) fn version_row<W: Copy + Eq>(
     job: &Job<W>,
@@ -869,9 +894,17 @@ pub(crate) fn version_row<W: Copy + Eq>(
     offered: Option<&str>,
     now_ms: u64,
     lang: Lang,
+    this_copy: SignatureNote,
 ) -> VersionRow {
     let running = crate::version::VERSION;
-    let line = |state: String| format!("{} · {state}", crate::version::banner());
+    let line = |state: String| match this_copy {
+        SignatureNote::Nothing => format!("{} · {state}", crate::version::banner()),
+        SignatureNote::NotOurService => format!(
+            "{} · {state} · {}",
+            crate::version::banner(),
+            Text::VersionNotSigned.in_lang(lang)
+        ),
+    };
 
     if let Some((offer, outcome)) = version_failure(job) {
         let tag = offer
@@ -1169,7 +1202,7 @@ mod tests {
     use crate::install_channel::{Channel, Manager};
     use crate::update_job::{
         Bytes, Driver, Effect, Failure, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters,
-        Refused, SharedTransport, State, Step, Stop, Unsupported, Verb,
+        Refused, SharedTransport, SignatureNote, State, Step, Stop, Unsupported, Verb,
     };
 
     /// The transport the verbs below never ask for a file.
@@ -1340,7 +1373,14 @@ mod tests {
             ),
         ];
         for (name, job, check, offered, value, control) in rows {
-            let row = version_row(job, check, offered, now, Lang::English);
+            let row = version_row(
+                job,
+                check,
+                offered,
+                now,
+                Lang::English,
+                SignatureNote::Nothing,
+            );
             assert_eq!(row.value, value, "{name}");
             assert!(row.value.starts_with(&banner), "{name}: {}", row.value);
             assert_eq!(row.control.kind(), control, "{name}");
@@ -1537,7 +1577,14 @@ mod tests {
             ),
         ];
         for (name, job, check, offered, value, control) in &rows {
-            let row = version_row(job, *check, *offered, now, Lang::English);
+            let row = version_row(
+                job,
+                *check,
+                *offered,
+                now,
+                Lang::English,
+                SignatureNote::Nothing,
+            );
             assert_eq!(&row.value, value, "{name}");
             assert_eq!(row.control.kind(), *control, "{name}");
         }
@@ -1604,7 +1651,14 @@ mod tests {
         ];
         for (name, job, value, retry) in rows {
             assert!(matches!(job.state(), State::Failed(..)), "{name}");
-            let row = version_row(&job, CheckView::default(), Some("v0.4.7"), 0, Lang::English);
+            let row = version_row(
+                &job,
+                CheckView::default(),
+                Some("v0.4.7"),
+                0,
+                Lang::English,
+                SignatureNote::Nothing,
+            );
             assert_eq!(row.value, value, "{name}");
             assert_eq!(
                 row.control,
@@ -1658,6 +1712,7 @@ mod tests {
             Some("v0.4.7"),
             0,
             Lang::English,
+            SignatureNote::Nothing,
         );
         assert!(
             pending_row.value.ends_with(" · Checking…"),
@@ -1680,6 +1735,7 @@ mod tests {
             None,
             0,
             Lang::English,
+            SignatureNote::Nothing,
         );
         assert_eq!(in_flight.control, VersionControl::Check { enabled: false });
 
@@ -1723,7 +1779,14 @@ mod tests {
             let mut job = Job::with_offers(offers);
             job.consider(evidence, &windows(), || TxnId::new([9; 16]));
             assert!(matches!(job.state(), State::Idle), "{name}");
-            let row = version_row(&job, CheckView::default(), Some("v0.4.7"), 0, Lang::English);
+            let row = version_row(
+                &job,
+                CheckView::default(),
+                Some("v0.4.7"),
+                0,
+                Lang::English,
+                SignatureNote::Nothing,
+            );
             assert_eq!(row.control, VersionControl::OpenReleases, "{name}");
             assert!(row.control.leaves_window(), "{name}");
             assert_eq!(row.control.text(), "Open the release page", "{name}");
@@ -1758,6 +1821,7 @@ mod tests {
                 Some("v0.4.7"),
                 0,
                 Lang::English,
+                SignatureNote::Nothing,
             )
         };
         let (mut job, post) = downloading();
@@ -1847,7 +1911,14 @@ mod tests {
             )
         };
         let row = |job: &Job<u32>, offered: Option<&str>, check: CheckView, now: u64| {
-            version_row(job, check, offered, now, Lang::English)
+            version_row(
+                job,
+                check,
+                offered,
+                now,
+                Lang::English,
+                SignatureNote::Nothing,
+            )
         };
         let quiet = CheckView::default();
 
@@ -2474,6 +2545,7 @@ mod tests {
                 Some("v0.4.7"),
                 0,
                 Lang::English,
+                SignatureNote::Nothing,
             );
             assert!(row.value.contains(command), "{}", row.value);
             assert_eq!(row.control, VersionControl::CopyCommand { command });
@@ -2618,6 +2690,7 @@ mod tests {
                 Some("v0.4.7"),
                 0,
                 Lang::English,
+                SignatureNote::Nothing,
             );
             assert_eq!(
                 row.control,
@@ -2665,6 +2738,7 @@ mod tests {
                 Some("v0.4.7"),
                 0,
                 Lang::English,
+                SignatureNote::Nothing,
             )
         };
         assert_eq!(row(&job), row(&ours), "the About row is ours");
@@ -2741,6 +2815,7 @@ mod tests {
             Some("v0.4.7"),
             0,
             Lang::English,
+            SignatureNote::Nothing,
         );
         assert!(row.value.contains(command), "{}", row.value);
         assert_eq!(row.control, VersionControl::CopyCommand { command });
@@ -2905,5 +2980,81 @@ mod tests {
             Some(UninstallVerb::Cancel),
             "the first Tab lands on the leftmost button, Cancel"
         );
+    }
+
+    /// RED (0.4.10 plan row 102 part 3, R5) — **the Ready card says *Windows
+    /// may warn about this update.* before Restart, and only of a set not
+    /// signed by our signing service**: the same card, Restart · Later, with
+    /// the sentence as its detail; a set with nothing to say keeps the card
+    /// as it was.
+    ///
+    /// MUTATION: `paint_of` never adds the sentence
+    /// (`plant-102-3-ready-card-silent.py`).
+    #[test]
+    fn the_ready_card_says_windows_may_warn_only_of_a_set_not_signed_by_our_service() {
+        use super::paint_of;
+        let offer = Offer::mint(TxnId::new([0x66; 16]), "v0.4.10", HostPlatform::Windows)
+            .expect("a release");
+        let warned = paint_of(&Job::<u32>::verified_noting_for_test(
+            offer.clone(),
+            SignatureNote::NotOurService,
+        ))
+        .expect("the Ready card");
+        assert_eq!(
+            warned.heading.as_deref(),
+            Some("Ready. Running programs will close.")
+        );
+        assert_eq!(
+            warned.detail.as_deref(),
+            Some("Windows may warn about this update.")
+        );
+        assert_eq!(warned.verbs, vec![CardVerb::Restart, CardVerb::Later]);
+        let quiet = paint_of(&Job::<u32>::verified_noting_for_test(
+            offer,
+            SignatureNote::Nothing,
+        ))
+        .expect("the Ready card");
+        assert_eq!(
+            quiet.detail, None,
+            "a set signed by our service: no sentence"
+        );
+    }
+
+    /// RED (0.4.10 plan row 102 part 3, R4) — **About → Version's line says a
+    /// copy not signed by our signing service is not, whatever the state**:
+    /// the line as it would be, then *This copy is not signed by Microsoft's
+    /// signing service.*; the control and the link are the state's own.
+    ///
+    /// MUTATION: `version_row`'s line ignores `this_copy`
+    /// (`plant-102-3-version-line-silent.py`).
+    #[test]
+    fn the_version_line_of_a_copy_not_signed_by_our_service_says_so() {
+        use crate::update::CheckView;
+        let offer = Offer::mint(TxnId::new([0x67; 16]), "v0.4.10", HostPlatform::Windows)
+            .expect("a release");
+        for job in [Job::<u32>::verified_for_test(offer), Job::<u32>::default()] {
+            let row = |note| {
+                version_row(
+                    &job,
+                    CheckView::default(),
+                    Some("v0.4.10"),
+                    0,
+                    Lang::English,
+                    note,
+                )
+            };
+            let (said, plain) = (
+                row(SignatureNote::NotOurService),
+                row(SignatureNote::Nothing),
+            );
+            assert_eq!(
+                said.value,
+                format!(
+                    "{} · This copy is not signed by Microsoft's signing service.",
+                    plain.value
+                )
+            );
+            assert_eq!((said.control, said.link), (plain.control, plain.link));
+        }
     }
 }

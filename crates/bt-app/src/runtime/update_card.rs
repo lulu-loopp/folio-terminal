@@ -675,7 +675,7 @@ mod tests {
     use crate::update_card::{VersionControl, VersionRow, version_row};
     use crate::update_job::{
         Abandon, Driver, Failure, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters,
-        Progress, Refused, SharedTransport, State, Step, Stop, Verb,
+        Progress, Refused, SharedTransport, SignatureNote, State, Step, Stop, Verb,
     };
     use crate::update_txn::TxnId;
 
@@ -734,7 +734,14 @@ mod tests {
     }
 
     fn row(job: &Job<u32>, offered: &str) -> VersionRow {
-        version_row(job, CheckView::default(), Some(offered), 0, Lang::English)
+        version_row(
+            job,
+            CheckView::default(),
+            Some(offered),
+            0,
+            Lang::English,
+            SignatureNote::Nothing,
+        )
     }
 
     /// RED (T-UPDATE-ON-ABOUT round 2, R1) — **Available → Later → About →

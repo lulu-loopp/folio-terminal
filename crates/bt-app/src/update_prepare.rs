@@ -60,7 +60,9 @@ use crate::update_apply::{
     write_journal_on,
 };
 use crate::update_handoff::Staged;
-use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop, Transport};
+use crate::update_job::{
+    Bytes, Fetching, Landed, Offer, Poster, SignatureNote, Step, Stop, Transport,
+};
 use crate::update_txn::{
     Action, Actor, Asker, Disk, Effect, Event, Home, Journal, Located, PhaseKind, PreviousRun,
     Role, TxnId, decide, launch_event, may,
@@ -452,19 +454,24 @@ fn journal_written_by_the_owner(
 
 /// **End a Prepare's worker with its one last report**, posted only once the
 /// worker holds nothing of the transaction: `Verified` hands the staged
-/// transaction — lock and all — to the job; every other end has already let
+/// transaction — lock and all — to the job, with what the Ready card says of
+/// its signature ([`SignatureNote`]); every other end has already let
 /// the lock go (`abandon`, then the lock dropped, in `prepare_on`), and says
 /// [`Step::Stopped`] with why. A Cancel ends the same way, with
 /// [`Stop::Cancelled`]: the job has moved on, so the report is stale to it and
 /// revives nothing, but whoever reads it knows the transaction is gone and its
 /// lock free — the journal's removal is not that sign, since the lock is let
 /// go only after it (the journal goes last, under the lock).
-pub(crate) fn finish(worker: &WorkerCtx, post: &Poster, prepared: Result<Staged, Stop>) {
+pub(crate) fn finish(
+    worker: &WorkerCtx,
+    post: &Poster,
+    prepared: Result<(Staged, SignatureNote), Stop>,
+) {
     match prepared {
-        Ok(staged) => {
+        Ok((staged, note)) => {
             // Cancelled between the last look and the report: the job has
             // moved on, so the transaction is given up.
-            if let Err(staged) = post.verified(staged) {
+            if let Err(staged) = post.verified(staged, note) {
                 let _ = discard(worker, *staged, &Event::Discarded);
                 post.post(Step::Stopped(Stop::Cancelled));
             }
@@ -702,12 +709,16 @@ pub(crate) fn at_launch(
 /// (F-17), on the job's worker, given how this copy was installed: the staged
 /// transaction back with **the version its set installs**, read from what was
 /// verified — the kept release statement on Windows (0.4.10 plan row 102), the
-/// staged bundle's recorded version on macOS — never from a download. A
+/// staged bundle's recorded version on macOS — never from a download, and
+/// what the Ready card says of the set's signature, read again
+/// ([`SignatureNote`], row 102 part 3). A
 /// failure has already discarded the transaction (`Discarded`, then
 /// [`clear`]) and says why. `update_job::resumer_for_this_copy` is the
 /// product's; a test holds the real revalidation to its own trust root.
-pub(crate) type Resumer =
-    Box<dyn FnOnce(&WorkerCtx, Staged, Option<Channel>) -> Result<(Staged, String), Stop> + Send>;
+pub(crate) type Resumer = Box<
+    dyn FnOnce(&WorkerCtx, Staged, Option<Channel>) -> Result<(Staged, String, SignatureNote), Stop>
+        + Send,
+>;
 
 /// **The resumer of a copy that cannot revalidate** — a platform with no
 /// release, a copy that cannot name its own executable or bundle: whatever it
@@ -786,11 +797,12 @@ pub(crate) fn settle_at_launch(
     }
     let txn = staged.journal.txn;
     match resume(worker, *staged, channel) {
-        Ok((staged, version)) => match Offer::mint(txn, &format!("v{version}"), platform) {
+        Ok((staged, version, note)) => match Offer::mint(txn, &format!("v{version}"), platform) {
             Some(offer) => Landed::Resumed {
                 offer,
                 staged: Box::new(staged),
                 restart_missed,
+                note,
             },
             None => {
                 let _ = discard(worker, staged, &Event::Discarded);
@@ -1106,7 +1118,7 @@ mod tests {
                 worker,
                 &at,
                 true,
-                Box::new(|_, staged, _| Ok((staged, "0.4.9".to_owned()))),
+                Box::new(|_, staged, _| Ok((staged, "0.4.9".to_owned(), SignatureNote::Nothing))),
                 Some(Channel::Ours),
                 HostPlatform::Windows,
                 PreviousRun::Unfinished,

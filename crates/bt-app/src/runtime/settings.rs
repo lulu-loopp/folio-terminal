@@ -2286,6 +2286,16 @@ impl<B: Backend> Runtime<'_, B> {
         if general_opened {
             carry_pass::begin_carry_pass(carry_pass::CarryAsk::START_AT_SIGN_IN);
         }
+        // **About → Version's own edge** (0.4.10 plan row 102 part 3, R4): this copy's signature
+        // is read again when the reader looks at About, once per visit, on a worker; its answer
+        // redraws the page.
+        let about_opened = self.window.settings.take_about_open_edge(
+            self.window.settings.category() == settings::SettingsCategory::About
+                && rows.contains(&settings::SettingsRow::AboutVersion),
+        );
+        if about_opened {
+            update::read_this_copy_signature(bt_platform::host_platform());
+        }
         // The second probe on the same door and for the same argument: the page that prints which
         // copilot this machine has is the page that asks. Idempotent, and an atomic load after the
         // first call — see `attention_copilot::begin_probe`.
@@ -2663,6 +2673,7 @@ impl<B: Backend> Runtime<'_, B> {
                 update::offer().as_deref(),
                 update::unix_epoch_ms(),
                 i18n::current(),
+                update::this_copy_note(),
             ),
             update_mark: self
                 .window

@@ -98,6 +98,9 @@ use std::{
 };
 
 use bt_persist::UpdateCheckV1;
+use bt_platform::HostPlatform;
+
+use crate::update_job::SignatureNote;
 
 /// The host the question goes to.
 pub const RELEASES_HOST: &str = "api.github.com";
@@ -1658,6 +1661,87 @@ pub(crate) fn last_checked_deadline(now: Instant, now_ms: u64) -> Option<Instant
         .then(|| crate::i18n::LastChecked::next_change_in_ms(view.checked_at_ms, now_ms))
         .flatten()
         .and_then(|milliseconds| now.checked_add(Duration::from_millis(milliseconds)))
+}
+
+// ── this copy's signature, for About → Version ──────────────────────────────
+
+/// **The last reading of this copy's signature** (0.4.10 plan row 102 part 3,
+/// R4): [`THIS_COPY_UNREAD`] until a reading has answered, then
+/// [`THIS_COPY_OURS`] or [`THIS_COPY_NOT_OURS`].
+static THIS_COPY_SIGNATURE: AtomicU8 = AtomicU8::new(THIS_COPY_UNREAD);
+const THIS_COPY_UNREAD: u8 = 0;
+const THIS_COPY_OURS: u8 = 1;
+const THIS_COPY_NOT_OURS: u8 = 2;
+
+/// Whether a reading of this copy's signature is out: one at a time.
+static THIS_COPY_READING: AtomicBool = AtomicBool::new(false);
+
+/// **What About → Version says of this copy's signature** — the last
+/// reading's ([`read_this_copy_signature`]); [`SignatureNote::Nothing`]
+/// before any reading has answered.
+pub(crate) fn this_copy_note() -> SignatureNote {
+    if THIS_COPY_SIGNATURE.load(AtomicOrdering::Acquire) == THIS_COPY_NOT_OURS {
+        SignatureNote::NotOurService
+    } else {
+        SignatureNote::Nothing
+    }
+}
+
+/// **Read this copy's signature again, off the window thread** (0.4.10 plan
+/// row 102 part 3, R4): the About page asks once per visit
+/// (`settings::SettingsPanel::take_about_open_edge`), a certificate revoked
+/// while Folio runs included. The running `folio.exe`'s
+/// `update_prepare_windows::service_signature` under the system's policy, on
+/// a worker in the background band — Windows may ask the network whether the
+/// certificate is revoked; its answer is published, said in `diagnostics.log`
+/// the first time and whenever it changes, and wakes the loop. A reading already out answers this
+/// visit as well. On `platform`s other than Windows no Authenticode reading
+/// exists, and nothing starts. Answers whether a reading was started.
+pub(crate) fn read_this_copy_signature(platform: HostPlatform) -> bool {
+    if platform != HostPlatform::Windows
+        || THIS_COPY_READING
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .is_err()
+    {
+        return false;
+    }
+    let started = bt_platform::spawn_at_priority(
+        "bt-this-copy-signature",
+        bt_platform::ThreadPriority::BelowNormal,
+        |_ctx| {
+            let (note, said) = match std::env::current_exe() {
+                Ok(exe) => {
+                    let signed = crate::update_prepare_windows::service_signature(
+                        &exe,
+                        &bt_platform::trust::Policy::System,
+                        &crate::update_prepare_windows::OUR_SERVICE,
+                    );
+                    (signed.note(), signed.as_said())
+                }
+                Err(error) => (
+                    SignatureNote::NotOurService,
+                    format!("not read: its executable is not found ({error})"),
+                ),
+            };
+            let read = match note {
+                SignatureNote::Nothing => THIS_COPY_OURS,
+                SignatureNote::NotOurService => THIS_COPY_NOT_OURS,
+            };
+            if THIS_COPY_SIGNATURE.swap(read, AtomicOrdering::AcqRel) != read {
+                crate::diagnostics::note(&format!("Folio: this copy's folio.exe is {said}"));
+            }
+            THIS_COPY_READING.store(false, AtomicOrdering::Release);
+            if let Some(wake) = WAKE.get() {
+                wake();
+            }
+        },
+    );
+    if started.is_err() {
+        // The visit after this one asks again.
+        THIS_COPY_READING.store(false, AtomicOrdering::Release);
+        return false;
+    }
+    true
 }
 
 /// The wall clock, in milliseconds since the Unix epoch.
@@ -3584,5 +3668,46 @@ mod tests {
             assert!(!into.join(name).exists(), "{name}: nothing is left");
         }
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (0.4.10 plan row 102 part 3, R4) — **no reading of this copy's
+    /// signature starts off Windows**: macOS and the other Unixes have no
+    /// Authenticode reading, so About → Version says nothing of one there.
+    ///
+    /// MUTATION: drop the platform test in `read_this_copy_signature`
+    /// (`plant-102-3-reads-off-windows.py`).
+    #[test]
+    fn no_reading_of_this_copys_signature_starts_off_windows() {
+        use bt_platform::HostPlatform;
+        for platform in [HostPlatform::MacOs, HostPlatform::OtherUnix] {
+            assert!(
+                !super::read_this_copy_signature(platform),
+                "{platform:?} starts no reading"
+            );
+        }
+    }
+
+    /// RED (0.4.10 plan row 102 part 3, R4) — **About → Version is wired to
+    /// the reading**: the settings layout's About edge asks for this copy's
+    /// signature, and the line the page draws is given the last reading.
+    ///
+    /// MUTATION: delete the `read_this_copy_signature` call from
+    /// `Runtime::settings_layout` (`plant-102-3-about-asks-nothing.py`), or
+    /// hand `version_row` `SignatureNote::Nothing`
+    /// (`plant-102-3-line-given-nothing.py`).
+    #[test]
+    fn the_about_page_asks_for_this_copys_signature_and_draws_it() {
+        use crate::test_support::{squeezed, squeezed_body};
+        assert!(
+            squeezed_body("Runtime", "settings_layout").contains(&squeezed(
+                "if about_opened { update::read_this_copy_signature(bt_platform::host_platform()); }"
+            )),
+            "the About visit asks for the reading"
+        );
+        assert!(
+            squeezed_body("Runtime", "settings_values")
+                .contains(&squeezed("i18n::current(), update::this_copy_note(), ),")),
+            "the Version line is given the last reading"
+        );
     }
 }
