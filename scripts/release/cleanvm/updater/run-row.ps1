@@ -62,8 +62,10 @@
     The snapshot with the candidate installed (`install-candidate.ps1`).
 
 .PARAMETER Feed
-    The release feed on the host (clean-vm.md 4.4, precondition 3):
-    `releases.json` and the files it names as `file:///C:/feed/...`.
+    The release feed on the host (clean-vm.md 4.4, precondition 3), as
+    `make-feed.ps1` makes it: `releases.json` and the three files it names
+    as `file:///C:/feed/...`, the successor's archive, its release statement
+    and the statement's signature.
 
 .PARAMETER VmPassword
     The encryption password of a guest encrypted to carry a vTPM. A parameter,

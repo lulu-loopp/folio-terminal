@@ -67,6 +67,36 @@
     kept; screencapture is only asked for the window found (`-l`). MUTATION:
     drop the `rm -f "$out"`.
 
+    **the_mac_feed_is_the_statement_its_signature_and_the_image** (0.4.10
+    plan row 104) — `mac/setup.sh --feed-dry-run` under bash: an image its
+    statement lists is served with the statement and its signature under the
+    names the updater fetches, and nothing else, and `releases.json` lists the
+    three under the statement's tag; an image whose SHA-256 is not the
+    statement's `macos-arm64` line, and a statement of the Windows half alone,
+    are refused. MUTATION: in `serve_b`, drop the comparison of the image with
+    the statement's line.
+
+    **make_feed_lists_the_statement_its_signature_and_the_archive** (0.4.10
+    plan row 104) — `updater/make-feed.ps1` over a scratch checkout whose
+    `release-statement.ps1` is a stand-in that writes a statement of the
+    folder and records each call: the feed is the archive, the statement, its
+    signature and `releases.json`, which lists those three under the
+    statement's tag at `file:///C:/feed/`; the statement is composed, then
+    checked against the signature given or, without `-Signature`, the one that
+    appears in the folder; with `-Image` the statement states both halves and
+    the image is not left in the Windows feed; a successor whose patch number
+    is below 1000 is refused before the folder exists; a statement the check
+    refuses leaves no `releases.json`; `-Remove` deletes the statement and its
+    signature. MUTATION: list the package folder's files in `releases.json`
+    instead of the statement's archive line and the two statement files (the
+    signature drops out of the feed); or skip the wait for the signature.
+
+    **install_candidate_holds_the_archive_to_its_statement** (0.4.10 plan row
+    104) — `install-candidate.ps1 -Statement -WhatIf` takes an archive whose
+    name, size and SHA-256 are its statement's `windows-x64` line and prints
+    it, and refuses one the statement does not list before anything of the
+    guest is planned. MUTATION: drop the comparison with `$zipLine`.
+
     **the_host_reports_what_the_guest_saw** (H6) — `rows.ps1`
     `Get-RowVerdict`: a cut row's marker of FAILED, MISSED or NOT_REACHED, a
     cut row with no marker, and a `ROW <row> FAILED:` line in a live row's
@@ -230,6 +260,116 @@ try {
     Check ($install.Exit -eq 0 -and $install.Text -match 'snapshot x\.vmx a-installed' -and $install.Text -match '-Phase unpack') `
         "install-candidate.ps1 -WhatIf plans the unpack phase and the snapshot (exit $($install.Exit))"
 
+    # ── make_feed_lists_the_statement_its_signature_and_the_archive ───────────
+    $feedTree = Join-Path $scratch 'feed-checkout'
+    [IO.Directory]::CreateDirectory((Join-Path $feedTree 'scripts\release\cleanvm\updater')) | Out-Null
+    [IO.File]::Copy((Join-Path $root 'scripts\release\cleanvm\updater\make-feed.ps1'), (Join-Path $feedTree 'scripts\release\cleanvm\updater\make-feed.ps1'))
+    # The stand-in: a statement of the folder's archive (and image, unless -WindowsOnly) in the
+    # grammar's order, and one line a call in STUB_CALLS; STUB_REFUSE makes the check refuse.
+    [IO.File]::WriteAllText((Join-Path $feedTree 'scripts\release\release-statement.ps1'), (@(
+                'param([string] $PackageDirectory, [switch] $WindowsOnly, [string] $Signature, [string] $CheckBinary)',
+                '$ErrorActionPreference = ''Stop''',
+                'if ($Signature) {',
+                '    Add-Content -LiteralPath $env:STUB_CALLS "verify $([IO.Path]::GetFileName($Signature)) $((Get-Item -LiteralPath $Signature).Length)"',
+                '    if ($env:STUB_REFUSE) { throw ''check-release-statement refused the release'' }',
+                '    return',
+                '}',
+                '$files = @(Get-ChildItem -LiteralPath $PackageDirectory -File | Where-Object { $_.Name -match ''\.(zip|dmg)$'' } | Sort-Object Name -Descending)',
+                '$lines = foreach ($f in $files) { $platform = if ($f.Extension -eq ''.zip'') { ''windows-x64'' } else { ''macos-arm64'' }; ''{0} {1} {2} {3}'' -f (Get-FileHash -LiteralPath $f.FullName).Hash.ToLowerInvariant(), $f.Length, $platform, $f.Name }',
+                '$text = (@(''folio-release-statement 1'', ''product folio'', ''version 0.4.1010'', ''tag v0.4.1010-preview'', "assets $($files.Count)") + @($lines) + @(''members windows-x64 0'')) -join "`n"',
+                '[IO.File]::WriteAllText((Join-Path $PackageDirectory ''RELEASE-STATEMENT.txt''), "$text`n")',
+                'Add-Content -LiteralPath $env:STUB_CALLS "compose windows-only=$([bool] $WindowsOnly) $($files.Count)"',
+                'Write-Host ''  openssl pkeyutl -sign ...''') -join "`n") + "`n")
+    $feedPackage = Join-Path $feedTree 'target\release-package'
+    [IO.Directory]::CreateDirectory($feedPackage) | Out-Null
+    $feedArchive = 'folio-0.4.1010-windows-x64-unsigned.zip'
+    [IO.File]::Copy($zip, (Join-Path $feedPackage $feedArchive))
+    [IO.File]::Copy($zip, (Join-Path $feedPackage 'folio-windows-x64.zip'))
+    $feedSig = Join-Path $scratch 'feed.sig'
+    [IO.File]::WriteAllBytes($feedSig, [byte[]]::new(64))
+    $makeFeed = Join-Path $feedTree 'scripts\release\cleanvm\updater\make-feed.ps1'
+    function Invoke-MakeFeed([string] $name, [string[]] $more) {
+        $env:STUB_CALLS = Join-Path $scratch "$name-calls.txt"
+        try {
+            $r = Invoke-Plan $makeFeed (@('-Out', (Join-Path $scratch $name)) + $more)
+            $r.Calls = @(if (Test-Path -LiteralPath $env:STUB_CALLS) { Get-Content -LiteralPath $env:STUB_CALLS })
+            return $r
+        }
+        finally { Remove-Item Env:STUB_CALLS }
+    }
+    function Get-FeedNames([string] $folder) {
+        [string[]] $names = @(Get-ChildItem -LiteralPath $folder -File | ForEach-Object { $_.Name })
+        [Array]::Sort($names, [StringComparer]::Ordinal)
+        return ($names -join ',')
+    }
+
+    $made = Invoke-MakeFeed 'feed-given' @('-Signature', $feedSig)
+    $given = Join-Path $scratch 'feed-given'
+    Check ($made.Exit -eq 0 -and $made.Text -match 'FEED_DONE') "make-feed.ps1 makes a feed with the signature given (exit $($made.Exit))"
+    Check ((Get-FeedNames $given) -ceq "RELEASE-STATEMENT.txt,RELEASE-STATEMENT.txt.sig,$feedArchive,releases.json") `
+        "the feed is the archive, the statement, its signature and releases.json ($(Get-FeedNames $given))"
+    Check (($made.Calls -join '|') -ceq 'compose windows-only=True 1|verify RELEASE-STATEMENT.txt.sig 64') "the statement is composed of the Windows half, then checked against the signature ($($made.Calls -join ' | '))"
+    $feedList = [IO.File]::ReadAllText((Join-Path $given 'releases.json')) | ConvertFrom-Json
+    Check (@($feedList).Count -eq 1 -and $feedList[0].tag_name -ceq 'v0.4.1010-preview') "releases.json lists one release under the statement's tag ($(@($feedList).tag_name -join ', '))"
+    $feedAssets = @($feedList[0].assets | ForEach-Object { '{0}={1}={2}' -f $_.name, $_.size, $_.browser_download_url })
+    $expectedAssets = @($feedArchive, 'RELEASE-STATEMENT.txt', 'RELEASE-STATEMENT.txt.sig') | ForEach-Object {
+        '{0}={1}=file:///C:/feed/{0}' -f $_, (Get-Item -LiteralPath (Join-Path $given $_)).Length }
+    Check (($feedAssets -join ',') -ceq ($expectedAssets -join ',')) "releases.json lists the statement's archive, the statement and its signature ($($feedAssets -join ', '))"
+
+    $waitDir = Join-Path $scratch 'feed-waited'
+    $signer = Start-ThreadJob -ArgumentList $waitDir -ScriptBlock {
+        param($dir)
+        $statement = Join-Path $dir 'RELEASE-STATEMENT.txt'
+        for ($i = 0; $i -lt 600 -and -not (Test-Path -LiteralPath $statement); $i++) { Start-Sleep -Milliseconds 100 }
+        Start-Sleep -Milliseconds 300
+        [IO.File]::WriteAllBytes((Join-Path $dir 'RELEASE-STATEMENT.txt.sig'), [byte[]]::new(64))
+    }
+    $made = Invoke-MakeFeed 'feed-waited' @('-WaitSeconds', '60')
+    $null = Wait-Job $signer; Remove-Job $signer
+    Check ($made.Exit -eq 0 -and $made.Text -match 'waiting up to 60 s' -and ($made.Calls -join '|') -ceq 'compose windows-only=True 1|verify RELEASE-STATEMENT.txt.sig 64') `
+        "without -Signature, make-feed.ps1 waits for the signature to appear and checks it (exit $($made.Exit): $($made.Calls -join ' | '))"
+
+    $feedImage = Join-Path $scratch 'Folio-0.4.1010-macos-arm64.dmg'
+    [IO.File]::WriteAllBytes($feedImage, [byte[]](1..50))
+    $made = Invoke-MakeFeed 'feed-both' @('-Signature', $feedSig, '-Image', $feedImage)
+    $both = Join-Path $scratch 'feed-both'
+    Check ($made.Exit -eq 0 -and ($made.Calls -join '|') -ceq 'compose windows-only=False 2|verify RELEASE-STATEMENT.txt.sig 64' -and
+        ([IO.File]::ReadAllText((Join-Path $both 'RELEASE-STATEMENT.txt')) -match ' 50 macos-arm64 Folio-0\.4\.1010-macos-arm64\.dmg')) `
+        "with -Image the statement states both halves (exit $($made.Exit): $($made.Calls -join ' | '))"
+    Check ((Get-FeedNames $both) -ceq "RELEASE-STATEMENT.txt,RELEASE-STATEMENT.txt.sig,$feedArchive,releases.json") "the image is not left in the Windows feed ($(Get-FeedNames $both))"
+
+    $env:STUB_REFUSE = '1'
+    try { $made = Invoke-MakeFeed 'feed-refused' @('-Signature', $feedSig) }
+    finally { Remove-Item Env:STUB_REFUSE }
+    Check ($made.Exit -ne 0 -and -not (Test-Path -LiteralPath (Join-Path $scratch 'feed-refused\releases.json'))) "a statement the check refuses leaves no releases.json (exit $($made.Exit))"
+
+    [IO.File]::Move((Join-Path $feedPackage $feedArchive), (Join-Path $feedPackage 'folio-0.4.11-windows-x64-unsigned.zip'))
+    $made = Invoke-MakeFeed 'feed-release-number' @('-Signature', $feedSig)
+    Check ($made.Exit -ne 0 -and $made.Text -match 'which a release may carry' -and
+        -not (Test-Path -LiteralPath (Join-Path $scratch 'feed-release-number')) -and $made.Calls.Count -eq 0) `
+        "a successor numbered as a release could be is refused before anything is written (exit $($made.Exit))"
+
+    $removed = Invoke-Plan $makeFeed @('-Out', $given, '-Remove')
+    Check ($removed.Exit -eq 0 -and $removed.Text -match 'FEED_STATEMENT_REMOVED' -and (Get-FeedNames $given) -ceq "$feedArchive,releases.json") `
+        "-Remove deletes the statement and its signature ($(Get-FeedNames $given))"
+
+    # ── install_candidate_holds_the_archive_to_its_statement ──────────────────
+    $zipLine = '{0} {1} windows-x64 {2}' -f (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant(), (Get-Item -LiteralPath $zip).Length, [IO.Path]::GetFileName($zip)
+    function Write-WindowsStatement([string] $path, [string] $line) {
+        [IO.File]::WriteAllText($path, ((@('folio-release-statement 1', 'product folio', 'version 9.8.7', 'tag v9.8.7-preview', 'assets 1', $line, 'members windows-x64 0') -join "`n") + "`n"))
+    }
+    $listing = Join-Path $scratch 'install-statement.txt'
+    Write-WindowsStatement $listing $zipLine
+    $install = Invoke-Plan (Join-Path $root 'scripts\release\cleanvm\updater\install-candidate.ps1') @(
+        '-Vmx', 'x.vmx', '-Zip', $zip, '-Statement', $listing, '-Snapshot', 'a-installed', '-VmrunPath', $stub, '-WhatIf')
+    Check ($install.Exit -eq 0 -and $install.Text.Contains("statement: $zipLine")) "install-candidate.ps1 -Statement takes an archive its statement lists (exit $($install.Exit))"
+    $stranger = Join-Path $scratch 'install-stranger.txt'
+    Write-WindowsStatement $stranger ($zipLine -replace '^[0-9a-f]{64}', ('cd' * 32))
+    $install = Invoke-Plan (Join-Path $root 'scripts\release\cleanvm\updater\install-candidate.ps1') @(
+        '-Vmx', 'x.vmx', '-Zip', $zip, '-Statement', $stranger, '-Snapshot', 'a-installed', '-VmrunPath', $stub, '-WhatIf')
+    Check ($install.Exit -ne 0 -and $install.Text -match 'the archive is not the one .* lists' -and $install.Text -notmatch 'revertToSnapshot') `
+        "an archive its statement does not list is refused before the guest is planned (exit $($install.Exit))"
+
     # ── update_and_restart_are_shift_tab ──────────────────────────────────────
     $keys = [IO.File]::ReadAllText((Join-Path $root 'scripts\release\cleanvm\updater\guest\keys.ps1'))
     foreach ($verb in 'update', 'restart') {
@@ -356,6 +496,61 @@ try {
     Check ($r.Exit -eq 0 -and $r.Text -eq 'screenshot shot-ok.png (window 812)' -and (Test-Path -LiteralPath $png)) "an image written is kept (exit $($r.Exit): $($r.Text))"
     $args812 = @(Get-Content -LiteralPath $called)
     Check ($args812.Count -eq 3 -and @($args812 | Where-Object { $_ -notmatch '^-x -o -l 812 ' }).Count -eq 0) "screencapture is only ever asked for window 812 ($($args812 -join ' | '))"
+
+    # ── the_mac_feed_is_the_statement_its_signature_and_the_image ─────────────
+    $setupSh = Join-Path $root 'scripts\release\cleanvm\updater\mac\setup.sh'
+    $macRehearsal = Join-Path $scratch 'mac-rehearsal'
+    $macInputs = Join-Path $scratch 'mac-inputs'
+    [IO.Directory]::CreateDirectory($macInputs) | Out-Null
+    $dmgName = 'Folio-0.4.1010-macos-arm64.dmg'
+    $dmg = Join-Path $macInputs $dmgName
+    [IO.File]::WriteAllBytes($dmg, [byte[]](1..200))
+    $dmgSha = (Get-FileHash -LiteralPath $dmg -Algorithm SHA256).Hash.ToLowerInvariant()
+    $otherSha = 'ab' * 32
+    function Write-MacStatement([string] $path, [string[]] $assetLines) {
+        $text = (@('folio-release-statement 1', 'product folio', 'version 0.4.1010', 'tag v0.4.1010-preview',
+                'date 2026-11-18', 'key 0123456789abcdef', 'min_from 0.4.6', 'authenticode false', 'retires 0',
+                "assets $(1 + $assetLines.Count)", "$otherSha 10 windows-x64 folio-0.4.1010-windows-x64-unsigned.zip") +
+            $assetLines + @('members windows-x64 1', "$otherSha 10 folio.exe")) -join "`n"
+        [IO.File]::WriteAllText($path, "$text`n", (New-Object Text.UTF8Encoding $false))
+    }
+    $macSig = Join-Path $macInputs 'statement.sig'
+    [IO.File]::WriteAllBytes($macSig, [byte[]]::new(64))
+    function Invoke-MacFeed([string] $statementPath) {
+        $env:FOLIO_REHEARSAL = ConvertTo-Posix $macRehearsal
+        try {
+            $said = & $bash (ConvertTo-Posix $setupSh) --feed-dry-run (ConvertTo-Posix $dmg) (ConvertTo-Posix $statementPath) (ConvertTo-Posix $macSig) 2>&1 | Out-String
+            return @{ Exit = $LASTEXITCODE; Text = $said.Trim() }
+        }
+        finally { Remove-Item Env:FOLIO_REHEARSAL }
+    }
+    $macStatement = Join-Path $macInputs 'statement.txt'
+    Write-MacStatement $macStatement @("$dmgSha 200 macos-arm64 $dmgName")
+    $served = Invoke-MacFeed $macStatement
+    Check ($served.Exit -eq 0 -and $served.Text -match 'FEED DRY RUN DONE') "setup.sh serves an image its statement lists (exit $($served.Exit): $($served.Text))"
+    $macFeed = Join-Path $macRehearsal 'feed'
+    [string[]] $servedNames = @(Get-ChildItem -LiteralPath $macFeed -File | ForEach-Object { $_.Name })
+    [Array]::Sort($servedNames, [StringComparer]::Ordinal)
+    Check (($servedNames -join ',') -ceq "$dmgName,RELEASE-STATEMENT.txt,RELEASE-STATEMENT.txt.sig,releases.json") `
+        "the Mac feed holds the image, the statement, its signature and releases.json only ($($servedNames -join ', '))"
+    Check (([IO.File]::ReadAllText((Join-Path $macFeed 'RELEASE-STATEMENT.txt'))) -ceq [IO.File]::ReadAllText($macStatement)) 'the statement is served byte for byte'
+    $macList = [IO.File]::ReadAllText((Join-Path $macFeed 'releases.json')) | ConvertFrom-Json
+    $prefix = 'file://' + (ConvertTo-Posix $macRehearsal) + '/feed/'
+    Check (@($macList).Count -eq 1 -and $macList[0].tag_name -ceq 'v0.4.1010-preview') "releases.json lists one release under the statement's tag ($(@($macList).tag_name -join ', '))"
+    $listedAssets = @($macList[0].assets | ForEach-Object { '{0}={1}' -f $_.name, $_.size })
+    Check (($listedAssets -join ',') -ceq "$dmgName=200,RELEASE-STATEMENT.txt=$((Get-Item -LiteralPath $macStatement).Length),RELEASE-STATEMENT.txt.sig=64") `
+        "releases.json lists the image, the statement and the signature with their sizes ($($listedAssets -join ', '))"
+    Check (@($macList[0].assets | Where-Object { $_.browser_download_url -cne ($prefix + $_.name) }).Count -eq 0) "every asset's URL is the feed folder's ($prefix)"
+    $otherImage = Join-Path $macInputs 'other.txt'
+    Write-MacStatement $otherImage @("$otherSha 200 macos-arm64 $dmgName")
+    $refused = Invoke-MacFeed $otherImage
+    Check ($refused.Exit -ne 0 -and $refused.Text -match "SETUP STOPPED: B's image is not the one the statement lists") `
+        "an image whose digest is not the statement's is refused (exit $($refused.Exit): $($refused.Text))"
+    $windowsOnly = Join-Path $macInputs 'windows-only.txt'
+    Write-MacStatement $windowsOnly @()
+    $refused = Invoke-MacFeed $windowsOnly
+    Check ($refused.Exit -ne 0 -and $refused.Text -match 'SETUP STOPPED: the statement has no single macos-arm64 line') `
+        "a statement of the Windows half alone is refused (exit $($refused.Exit): $($refused.Text))"
 
     # ── the_host_reports_what_the_guest_saw ───────────────────────────────────
     $v = Get-RowVerdict -Cut -Marker "row=W4 phase=FAILED at=10:00:01.250`r`n" -WatchLog @()
