@@ -1883,6 +1883,28 @@ impl<B: Backend> Runtime<'_, B> {
         self.window.close_asked = Some(crate::exit_diagnostics::CloseAsked { arrival, pointer });
     }
 
+    /// **The held close's arrival, spent by the close it belongs to** (0.4.10 plan row 103, R7):
+    /// `FolioApp::close` takes it when the close is performed. Every write of
+    /// `WindowRuntime::close_asked` is in this module, with [`Self::note_close_arrival`].
+    pub(crate) fn take_close_asked(&mut self) -> Option<crate::exit_diagnostics::CloseAsked> {
+        self.window.close_asked.take()
+    }
+
+    /// **The next `CloseRequested` is (or is not) the wait's re-run of a held close** —
+    /// `FolioApp::settle_close_waits` says which before it re-runs one (0.4.10 plan row 103, R7).
+    pub(crate) fn mark_close_rerun(&mut self, rerun: bool) {
+        self.window.close_rerun = rerun;
+    }
+
+    /// **The showing summoned terminal's `×` is a hide, not a close**: the close witness's record
+    /// of the request is spent and nothing is held; a wait's re-run brought no record of its own
+    /// (0.4.10 plan row 103).
+    pub(crate) fn spend_close_arrival(&mut self) {
+        if !std::mem::take(&mut self.window.close_rerun) {
+            let _ = self.window.window.take_close_arrival();
+        }
+    }
+
     /// **What this window is as it closes** (0.4.10 plan row 103): ordinary or the summoned
     /// terminal (`summon`), its id, how many tabs and panes it holds, and the ordinary windows
     /// left when the run goes on.

@@ -47942,7 +47942,7 @@ impl<B: Backend> FolioApp<B> {
         };
         // **The window's one close line** (0.4.10 plan row 103): which window, by which road,
         // and what it held — read before it is taken apart.
-        let how = exit_diagnostics::ClosedHow::Asked(runtime.window.close_asked.take().unwrap_or(
+        let how = exit_diagnostics::ClosedHow::Asked(runtime.take_close_asked().unwrap_or(
             exit_diagnostics::CloseAsked {
                 arrival: None,
                 pointer: exit_diagnostics::PointerAtClose::Unread,
@@ -49659,7 +49659,7 @@ impl<B: Backend> FolioApp<B> {
             let requested = runtime.take_close_request();
             // **The wait's re-run is not a request** (0.4.10 plan row 103, R7): the event below
             // keeps the arrival of the close it re-runs.
-            runtime.window.close_rerun = after == runtime::AfterTheWait::Shut;
+            runtime.mark_close_rerun(after == runtime::AfterTheWait::Shut);
             match after {
                 runtime::AfterTheWait::Nothing => {}
                 runtime::AfterTheWait::Shut => {
@@ -52010,10 +52010,8 @@ impl<B: Backend> FolioApp<B> {
                     if runtime.is_quake_window() && runtime.app.quake.is_showing() =>
                 {
                     // The witness's record of this request is spent: a hide is not a close
-                    // (0.4.10 plan row 103). A wait's re-run brought no record of its own.
-                    if !std::mem::take(&mut runtime.window.close_rerun) {
-                        let _ = runtime.window.window.take_close_arrival();
-                    }
+                    // (0.4.10 plan row 103).
+                    runtime.spend_close_arrival();
                     runtime.app.quake.press();
                     Ok(())
                 }
