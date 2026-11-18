@@ -59634,6 +59634,8 @@ mod foreground_program_app_tests;
 #[cfg(test)]
 mod formula_tools_app_tests;
 #[cfg(test)]
+mod full_scrollback_app_tests;
+#[cfg(test)]
 mod git_app_tests;
 #[cfg(test)]
 mod input_app_tests;

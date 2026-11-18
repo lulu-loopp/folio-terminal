@@ -409,6 +409,24 @@ thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
     /// How many this thread made while counting.
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    /// The bytes this thread has allocated and not yet freed, always counted (0.4.10 plan row
+    /// 105): what a test reads with [`held_bytes`] to ask whether a pane's heap holds still.
+    static HELD: Cell<i64> = const { Cell::new(0) };
+}
+
+/// `delta` bytes more held by this thread (negative: freed).
+fn note_held(delta: i64) {
+    let _ = HELD.try_with(|held| held.set(held.get().wrapping_add(delta)));
+}
+
+fn signed(bytes: usize) -> i64 {
+    i64::try_from(bytes).unwrap_or(i64::MAX)
+}
+
+/// The heap this thread is holding, counted at the test build's allocator: every allocation
+/// added and every free taken away, since the thread began.
+pub(crate) fn held_bytes() -> i64 {
+    HELD.with(Cell::get)
 }
 
 /// **The test build's allocator: the system's, counting what one thread asks
@@ -435,23 +453,27 @@ fn note_an_allocation() {
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         note_an_allocation();
+        note_held(signed(layout.size()));
         // SAFETY: the caller's contract for `alloc` is `System`'s.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         note_an_allocation();
+        note_held(signed(layout.size()));
         // SAFETY: as `alloc`.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         note_an_allocation();
+        note_held(signed(size).wrapping_sub(signed(layout.size())));
         // SAFETY: as `alloc`; `pointer` came from this allocator, which is `System`.
         unsafe { System.realloc(pointer, layout, size) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        note_held(signed(layout.size()).wrapping_neg());
         // SAFETY: `pointer` came from this allocator, which is `System`.
         unsafe { System.dealloc(pointer, layout) }
     }
