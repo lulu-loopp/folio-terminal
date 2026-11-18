@@ -411,12 +411,12 @@ thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
     /// The bytes this thread has allocated and not yet freed, always counted (0.4.10 plan row
     /// 105): what a test reads with [`held_bytes`] to ask whether a pane's heap holds still.
-    static HELD: Cell<i64> = const { Cell::new(0) };
+    static HELD_ON_THIS_THREAD: Cell<i64> = const { Cell::new(0) };
 }
 
 /// `delta` bytes more held by this thread (negative: freed).
 fn note_held(delta: i64) {
-    let _ = HELD.try_with(|held| held.set(held.get().wrapping_add(delta)));
+    let _ = HELD_ON_THIS_THREAD.try_with(|held| held.set(held.get().wrapping_add(delta)));
 }
 
 fn signed(bytes: usize) -> i64 {
@@ -426,7 +426,7 @@ fn signed(bytes: usize) -> i64 {
 /// The heap this thread is holding, counted at the test build's allocator: every allocation
 /// added and every free taken away, since the thread began.
 pub(crate) fn held_bytes() -> i64 {
-    HELD.with(Cell::get)
+    HELD_ON_THIS_THREAD.with(Cell::get)
 }
 
 /// **The test build's allocator: the system's, counting what one thread asks
