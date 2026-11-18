@@ -248,12 +248,19 @@ Test-Case 'a_signed_name_needs_one_certificate_naming_the_publisher' {
     $ours = New-TestCertificate 'CN=Folio Test,O=Folio Test,C=US'
     $twin = New-TestCertificate 'CN=Folio Test,O=Folio Test,C=US'
     $stranger = New-TestCertificate 'CN=Someone Else'
-    $one = Get-OneSignerRefusal -Executable $ours -Package $ours -Publisher $publisher
+    $one = Get-OneSignerRefusal -Executable $ours -Package $ours -Publisher $publisher -Ours $publisher
     if ($null -ne $one) { throw "one certificate naming the Publisher was refused: $one" }
-    $two = Get-OneSignerRefusal -Executable $ours -Package $twin -Publisher $publisher
+    $two = Get-OneSignerRefusal -Executable $ours -Package $twin -Publisher $publisher -Ours $publisher
     if ($two -notmatch 'one certificate') { throw "two certificates of one subject were not refused: $two" }
-    $named = Get-OneSignerRefusal -Executable $stranger -Package $stranger -Publisher $publisher
+    $named = Get-OneSignerRefusal -Executable $stranger -Package $stranger -Publisher $publisher -Ours $publisher
     if ($named -notmatch 'Publisher=') { throw "a signer the package does not name was not refused: $named" }
+    # N20: a package consistent with itself but declaring another Publisher
+    # than Folio's own manifest is not ours.
+    $strangerPublisher = 'CN=Someone Else'
+    $theirs = Get-OneSignerRefusal -Executable $stranger -Package $stranger -Publisher $strangerPublisher -Ours $publisher
+    if ($theirs -notmatch 'is not ours') { throw "a package declaring another Publisher than ours was not refused: $theirs" }
+    $checkout = Get-CheckoutPublisher -Root $root
+    if (-not $checkout -or $checkout -notmatch '^CN=') { throw "the checkout's Publisher was not read: '$checkout'" }
 }
 
 # RED (part 2) — **a release states both halves**: without the macOS image the

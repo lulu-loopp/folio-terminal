@@ -25,7 +25,9 @@
        for an archive named `-unsigned`, and `true` only for an archive whose
        `folio.exe` and `folio.msix` `sign.ps1 -VerifyOnly` accepts and that
        carry one certificate whose subject is the Publisher the package
-       declares (`signer-names.ps1`) — a signed name on files that are not
+       declares, which must be the one this checkout's
+       `packaging/msix/AppxManifest.xml` declares (`signer-names.ps1`) — a
+       signed name on files that are not
        signed, or not signed by the one signer, is refused. The text itself is
        written by `check-release-statement compose`, which is the product's
        own grammar (`bt_winres::release_statement`), so there is no second
@@ -230,7 +232,8 @@ try {
     # true for everyone else who reads it). `-VerifyOnly` asks for a valid,
     # time-stamped signature and not whose; the line says our signing
     # service's, so both files must also carry one certificate whose subject is
-    # the Publisher the package declares (the 1b+2 review's P2-7).
+    # the Publisher the package declares (the 1b+2 review's P2-7), and that
+    # Publisher must be Folio's own (the part 3 review's N20).
     if ($unsigned) {
         $authenticode = 'false'
     }
@@ -242,7 +245,8 @@ try {
         $refusal = Get-OneSignerRefusal `
             -Executable (Get-AuthenticodeSignature -LiteralPath $exePath).SignerCertificate `
             -Package (Get-AuthenticodeSignature -LiteralPath $msixPath).SignerCertificate `
-            -Publisher (Get-PackagePublisher -Msix $msixPath)
+            -Publisher (Get-PackagePublisher -Msix $msixPath) `
+            -Ours (Get-CheckoutPublisher -Root $root)
         if ($refusal) { throw "$($archive.Name) is named as signed, but $refusal" }
         $authenticode = 'true'
     }

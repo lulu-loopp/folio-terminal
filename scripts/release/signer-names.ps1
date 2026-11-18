@@ -100,10 +100,21 @@ function Get-PackagePublisher {
     return ([xml] $manifestText).Package.Identity.Publisher
 }
 
+# **The `Publisher` Folio's packages are built with**: the one this checkout's
+# `packaging/msix/AppxManifest.xml` declares (the part 3 review's N20).
+function Get-CheckoutPublisher {
+    param([Parameter(Mandatory)] [string] $Root)
+
+    $manifestPath = Join-Path $Root 'packaging\msix\AppxManifest.xml'
+    return ([xml] (Get-Content -LiteralPath $manifestPath -Raw)).Package.Identity.Publisher
+}
+
 # **Why a release's two signed files are not one signer's**, or `$null` when
 # they are (0.4.10 plan row 102, the 1b+2 review's P2-7): `folio.exe` and
 # `folio.msix` carry one certificate (the same thumbprint), and its subject is
-# the `Publisher` the package declares, compared as a name. This is the half
+# the `Publisher` the package declares, compared as a name; and that Publisher
+# is `$Ours`, the one Folio's own manifest declares (N20), so a package that
+# is only consistent with itself is not taken for ours. This is the half
 # of the updater's own reading of a signature (`service_signature`: our
 # service's subject and its profile) that a script can ask without Rust, and
 # what a statement's `authenticode true` says.
@@ -111,7 +122,8 @@ function Get-OneSignerRefusal {
     param(
         [System.Security.Cryptography.X509Certificates.X509Certificate2] $Executable,
         [System.Security.Cryptography.X509Certificates.X509Certificate2] $Package,
-        [Parameter(Mandatory)] [string] $Publisher
+        [Parameter(Mandatory)] [string] $Publisher,
+        [Parameter(Mandatory)] [string] $Ours
     )
 
     if (-not $Executable) { return 'folio.exe carries no signer certificate' }
@@ -123,6 +135,10 @@ function Get-OneSignerRefusal {
     if (-not (Test-SameDistinguishedName -Left $Publisher -Right $Executable.Subject)) {
         return ("both files are signed by ""$($Executable.Subject)"" and the package declares " +
                 "Publisher=""$Publisher"": the signature is not the one the package names")
+    }
+    if (-not (Test-SameDistinguishedName -Left $Ours -Right $Publisher)) {
+        return ("the package declares Publisher=""$Publisher"" and Folio's own " +
+                "packaging/msix/AppxManifest.xml declares ""$Ours"": the package is not ours")
     }
     return $null
 }
