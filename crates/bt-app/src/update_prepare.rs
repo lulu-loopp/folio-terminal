@@ -238,19 +238,23 @@ impl Remembered {
     }
 }
 
-/// **The bytes of a statement's file, refused on its size first**: a server
-/// that answers a statement with an archive is not read whole.
+/// **The bytes of a statement's file, at most `most` of them**: one open and
+/// one read bounded on the bytes themselves (`most + 1` asked for, more than
+/// `most` refused), so a server that answers a statement with an archive is
+/// not read whole — nor a link in the file's place, whose own size says
+/// nothing of its target's (the 1b+2 review's N11).
 fn statement_file_bytes(path: &Path, most: u64) -> Result<Vec<u8>, Stop> {
-    let size = std::fs::symlink_metadata(path)
-        .map_err(|error| refused_with(&format!("its file is not there: {error}")))?
-        .len();
-    if size > most {
-        return Err(refused_with(&format!(
-            "its file is {size} bytes, more than {most}"
-        )));
+    use std::io::Read as _;
+    let file = file_reads::open(Lane::Update, path)
+        .map_err(|error| refused_with(&format!("its file is not there: {error}")))?;
+    let mut bytes = Vec::new();
+    file.take(most + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| refused_with(&format!("its file was not read: {error}")))?;
+    if bytes.len() as u64 > most {
+        return Err(refused_with(&format!("its file is more than {most} bytes")));
     }
-    file_reads::read(Lane::Update, path)
-        .map_err(|error| refused_with(&format!("its file was not read: {error}")))
+    Ok(bytes)
 }
 
 /// [`Stop::StatementRefused`], and its line.
@@ -1415,7 +1419,8 @@ mod tests {
     }
 
     /// RED (0.4.10 plan row 102, part 1b) — **a statement file longer than any
-    /// statement is refused on its size**, before it is read.
+    /// statement is refused on its size**, read no further than one byte past
+    /// the bound (the 1b+2 review's N11).
     ///
     /// MUTATION: drop the size check in `statement_file_bytes`
     /// (`plant-102-1b-unbounded.py`).
