@@ -3396,10 +3396,18 @@ mod tests {
             }
         }
 
-        // And the round trip's defaults say the same: the document the step leaves reads as on,
-        // the product's own default is on, and a v41 document that omits the line means on.
+        // And the round trip's defaults say the same: a whole v40 document the step carries reads
+        // as on, the product's own default is on, and a v41 document that omits the line means on.
+        let mut whole = serde_json::to_value(crate::SettingsV1::default())
+            .expect("a settings document serialises");
+        let fields = whole
+            .as_object_mut()
+            .expect("a settings document is an object");
+        fields.remove("close_keeps_running");
+        fields.insert("schema_version".to_owned(), json!(40));
+        let carried = migrate_value(whole, 40, 41, SETTINGS_MIGRATIONS).unwrap();
         let read: crate::SettingsV1 =
-            serde_json::from_value(migrated).expect("the migrated document reads");
+            serde_json::from_value(carried).expect("the migrated document reads");
         assert!(read.close_keeps_running);
         assert!(crate::SettingsV1::default().close_keeps_running);
         let mut written = serde_json::to_value(crate::SettingsV1 {
