@@ -762,9 +762,9 @@ impl<B: Backend> Runtime<'_, B> {
         // window off the glass (gate 1), not the next turn's.
         self.observe_window_place();
         self.mark_session_dirty(Instant::now());
-        crate::diagnostics::note(
-            "BT_PUT_AWAY the last window's close put it away; the run keeps going",
-        );
+        self.window
+            .window
+            .note("BT_PUT_AWAY the last window's close put it away; the run keeps going");
         Ok(())
     }
 

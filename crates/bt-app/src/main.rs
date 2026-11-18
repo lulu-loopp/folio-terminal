@@ -10148,8 +10148,9 @@ enum CloseRoad {
 /// per run, in `diagnostics.log`, so that a tool which closes every top-level window it finds is
 /// seen once and not once a minute.
 fn a_close_reached_a_put_away_window() {
-    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    static A_PUT_AWAY_CLOSE_SAID: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !A_PUT_AWAY_CLOSE_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
         diagnostics::note(
             "BT_PUT_AWAY a close reached the put-away window and was ignored; said once per run",
         );
@@ -60067,7 +60068,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 46] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 47] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -60140,6 +60141,10 @@ mod platform_gate_tests {
         // A test re-export gated as its only test caller is: a share handed over, which
         // only Windows names by its own spelling (`tests.rs`).
         "runtime/mod.rs",
+        // The put-away tests' module, gated to Windows (0.4.10 plan row 87, part 87a): on macOS an
+        // application outlives its last window, so their close neither puts away nor ends the run;
+        // 87c writes the macOS arms and the gate goes.
+        "runtime/windows.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
         // Windows-only test fixtures: real Windows PowerShell 5.1 panes running Folio's
