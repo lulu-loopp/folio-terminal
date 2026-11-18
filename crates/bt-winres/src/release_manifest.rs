@@ -285,7 +285,7 @@ fn keyed(line: &str, key: &str) -> Result<String, ManifestError> {
 }
 
 /// A decimal number of digits and nothing else.
-fn number(text: &str, what: &str) -> Result<u64, ManifestError> {
+pub(crate) fn number(text: &str, what: &str) -> Result<u64, ManifestError> {
     if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ManifestError::Malformed(format!(
             "{what} is `{text}`, not a number"
@@ -296,7 +296,7 @@ fn number(text: &str, what: &str) -> Result<u64, ManifestError> {
 }
 
 /// `<sha256> <size> <name>`.
-fn member_line(line: &str) -> Result<Member, ManifestError> {
+pub(crate) fn member_line(line: &str) -> Result<Member, ManifestError> {
     let mut fields = line.splitn(3, ' ');
     let (Some(sha256), Some(size), Some(name)) = (fields.next(), fields.next(), fields.next())
     else {
@@ -323,7 +323,7 @@ fn member_line(line: &str) -> Result<Member, ManifestError> {
 }
 
 /// One printable ASCII word: no space, no control character, not empty.
-fn is_word(text: &str) -> bool {
+pub(crate) fn is_word(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_graphic())
 }
 

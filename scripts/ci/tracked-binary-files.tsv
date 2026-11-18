@@ -13,6 +13,10 @@ crates/bt-render/tests/fonts/Test-Escape700.ttf	binary format contains NUL bytes
 crates/bt-render/tests/fonts/Test-Other400.ttf	binary format contains NUL bytes
 crates/bt-render/tests/fonts/Test-Sans400.ttf	binary format contains NUL bytes
 crates/bt-render/tests/fonts/Test-Strokes400.ttf	binary format contains NUL bytes
+crates/bt-winres/fixtures/release-key/statement-live.txt.sig	a raw 64-byte Ed25519 signature, not UTF-8 text
+crates/bt-winres/fixtures/release-key/statement-spare.txt.sig	a raw 64-byte Ed25519 signature, not UTF-8 text
+crates/bt-winres/fixtures/release-key/statement-test-live.txt.sig	a raw 64-byte Ed25519 signature, not UTF-8 text
+crates/bt-winres/fixtures/release-key/statement-test-spare.txt.sig	a raw 64-byte Ed25519 signature, not UTF-8 text
 docs/design/app-icon/candidates-2026-08-28.png	binary format contains NUL bytes
 docs/design/app-icon/candidates/a.ico	binary format contains NUL bytes
 docs/design/app-icon/candidates/b.ico	binary format contains NUL bytes

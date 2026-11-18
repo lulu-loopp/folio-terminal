@@ -60,7 +60,12 @@ bt-unicode = { path = "../bt-unicode" }
 # workspace has, `bt_winres::digest` — a dependency-free first-party crate
 # already this package's build dependency, so `folio.exe` gains no package.
 # `version.rs`'s tests read its `plist` and `release_manifest` through it too.
-bt-winres = { path = "../bt-winres" }
+# **And the release statement's verification** (`release-key`, 0.4.10 plan row 102,
+# T-UPDATES-TRUST-OUR-OWN-KEY): the updater trusts a release by a statement signed with our own
+# Ed25519 key, verified against the keys `bt_winres::release_statement` embeds, through the one
+# package that feature adds (`ed25519-compact`, no dependency of its own). Part 1a turns it on
+# here so the notices and the lock name it from the first commit; part 1b's update roads call it.
+bt-winres = { path = "../bt-winres", features = ["release-key"] }
 bt-viewport = { path = "../bt-viewport" }
 # **The release manifest, SHA-256 and the zip records** (`update_archive`, 0.4.6
 # ticket U-14). The updater's archive reader parses the manifest a new

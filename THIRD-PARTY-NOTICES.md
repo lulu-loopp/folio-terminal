@@ -3664,7 +3664,7 @@ of what has to be said about a modified copy.
 
 | Licence | Packages |
 |---|---:|
-| MIT License | 477 |
+| MIT License | 478 |
 | Apache License 2.0 | 38 |
 | Unicode License v3 | 26 |
 | BSD 2-Clause "Simplified" License | 6 |
@@ -9550,6 +9550,37 @@ SOFTWARE.
 
 Used by 1 package(s):
 
+- **ed25519-compact 2.6.0** — <https://github.com/jedisct1/rust-ed25519-compact>
+
+````````text
+MIT License
+
+Copyright (c) 2020-2026 Frank Denis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
 - **sys-locale 0.3.2** — <https://github.com/1Password/sys-locale>
 
 ````````text
@@ -12223,7 +12254,7 @@ the following restrictions:
 
 ## In the lock file, not in any resolved build
 
-`Cargo.lock` pins 574 packages from crates.io. 538 of them are in the
+`Cargo.lock` pins 575 packages from crates.io. 539 of them are in the
 dependency graph this workspace resolves, and are attributed above with their
 licence texts. The 36 below are optional or platform-specific entries
 that no feature resolution here reaches: nothing links them, so nothing

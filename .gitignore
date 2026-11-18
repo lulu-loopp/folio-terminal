@@ -70,6 +70,10 @@ __pycache__/
 *.p12
 *.pem
 *.key
+# The one exception: the throwaway Ed25519 pair the release-statement tests sign with (0.4.10
+# plan row 102). Committed on purpose - it protects nothing, no release is signed with it, and
+# `bt_winres::release_statement::embeds_test_keys` refuses a build that embeds it.
+!crates/bt-winres/fixtures/release-key/TEST-ONLY-*.pem
 
 # The Artifact Signing client, when it is fetched into the checkout rather than
 # into `%LOCALAPPDATA%`, which is where `scripts/release/sign.ps1` puts it by

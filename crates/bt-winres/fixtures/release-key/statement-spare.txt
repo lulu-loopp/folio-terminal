@@ -1,0 +1,14 @@
+folio-release-statement 1
+product folio
+version 0.0.1
+tag v0.0.1-preview
+date 2026-11-18
+key 2802fa4fe65b594a
+min_from 0.0.1
+authenticode false
+retires 0
+assets 2
+36816cf687451625ba979d303f23f65aabded6722fbe76273d33e51e3cc15b92 29 windows-x64 folio-0.0.1-windows-x64-unsigned.zip
+4b64855773440406890f84b6be538804415b75f404a004b32b1af719b10cdde3 25 macos-arm64 Folio-0.0.1-macos-arm64.dmg
+members windows-x64 1
+575f3e43a936efb794372b3f6dc213ec5b34b8d20d1b6b425dbaa9e710ec0c3b 23 folio.exe

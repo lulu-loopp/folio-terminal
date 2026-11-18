@@ -13,7 +13,8 @@ publish.workspace = true
 # depend on finding `rc.exe` on the machine. The RES container and the
 # `VS_VERSIONINFO` block are two documented layouts of about two hundred lines;
 # `docs/DESIGN.md` §8's bar says a dependency has to be worth more than the code
-# it replaces, and these are not.
+# it replaces, and these are not. The two optional dependencies below are each
+# behind a feature that the one caller that needs it turns on.
 
 [dependencies]
 # **Optional, and off unless a caller asks for `inflate`** (T-INTEGRATION-INJECT-2-BUILD):
@@ -24,9 +25,19 @@ publish.workspace = true
 # is already in `Cargo.lock` through `flate2` and `png`, at this version, so the feature
 # costs no new package.
 miniz_oxide = { version = "=0.8.9", optional = true }
+# **Optional, and off unless a caller asks for `release-key`** (0.4.10 plan row 102,
+# T-UPDATES-TRUST-OUR-OWN-KEY, ruling R1): the Ed25519 verification of a release statement
+# against the public keys this crate embeds (`release_statement`). One package and no more:
+# with `default-features = false` it has no dependency of its own (no `getrandom`, no
+# `ct-codecs`), and it is MIT. The product verifies only; its deterministic signing is used by
+# this crate's tests alone, and every real release is signed outside the repository with
+# OpenSSL. A vendored verifier would have been about 650 lines of curve arithmetic owned here,
+# where a subtle mistake accepts a forgery rather than failing to build.
+ed25519-compact = { version = "=2.6.0", default-features = false, optional = true }
 
 [features]
 inflate = ["dep:miniz_oxide"]
+release-key = ["dep:ed25519-compact"]
 
 # **The one thing in this workspace a shell script on the Mac has to be able to
 # run.** M5-3's bundle script needs `Info.plist` with the workspace version in
@@ -37,6 +48,16 @@ inflate = ["dep:miniz_oxide"]
 [[bin]]
 name = "render-info-plist"
 path = "src/bin/render-info-plist.rs"
+
+# **The release statement's check, for the two places a release is checked before and after it
+# is published** (0.4.10 plan row 102): the release script runs it over the package directory
+# before the upload, and the release workflow over the assets it downloads from the published
+# page. It is the product's own grammar and embedded keys, compiled without the window.
+#   cargo run -q -p bt-winres --features release-key,inflate --bin check-release-statement -- verify <folder> <version>
+[[bin]]
+name = "check-release-statement"
+path = "src/bin/check-release-statement.rs"
+required-features = ["release-key", "inflate"]
 
 [lints]
 workspace = true

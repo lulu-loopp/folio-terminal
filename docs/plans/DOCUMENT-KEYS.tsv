@@ -9,7 +9,8 @@
 #
 # One row per type a document's root reaches (the root, then the types its fields and its variants'
 # payloads name, walked to a fixed point among its own crate's types), per version. Columns:
-#   document  session, settings, keybindings, profiles, pins and update-check (bt-persist);
+#   document  session, settings, keybindings, profiles, pins, update-check and release-keys
+#             (bt-persist);
 #             integration-marks, integration-profile-files and update-homes (bt-app's records)
 #   version   the document's version the row holds at (its *_SCHEMA_VERSION, or the record's)
 #   type      the type's name
@@ -95,3 +96,4 @@ integration-profile-files	1	PowerShellEdition	#[derive(Clone,Copy,Debug,Eq,Ord,P
 integration-profile-files	1	ProfileFile	#[derive(Clone,Debug,Serialize,Deserialize,PartialEq,Eq)]#[serde(deny_unknown_fields)]pubstructProfileFile{pubprofile:PathBuf,#[serde(default)]pubedition:Option<PowerShellEdition>,#[serde(default)]pubcreated_file:bool,#[serde(default)]pubcreated_folders:Vec<PathBuf>,#[serde(default)]pubbackup:Option<PathBuf>,#[serde(default)]pubbackup_sha256:Option<String>,}	2026-11-14: T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK (0.4.10 plan row 68d); first rows
 integration-profile-files	1	ProfileFiles	#[derive(Clone,Debug,Serialize,Deserialize,PartialEq,Eq)]#[serde(deny_unknown_fields)]pubstructProfileFiles{pubversion:u32,pubprofiles:Vec<ProfileFile>,}	2026-11-14: T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK (0.4.10 plan row 68d); first rows
 update-homes	1	UpdateHomesRecord	#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]#[serde(deny_unknown_fields)]pub(crate)structUpdateHomesRecord{version:u32,homes:Vec<PathBuf>,}	2026-11-14: T-DOWNGRADE-SAYS-SO-AND-OFFERS-THE-COPY-BACK (0.4.10 plan row 68d); first rows
+release-keys	1	ReleaseKeysV1	#[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize)]pubstructReleaseKeysV1{pubschema_version:u32,#[serde(default)]pubretired:Vec<String>,#[serde(flatten)]pubextra:Map<String,Value>,}	2026-11-18: T-UPDATES-TRUST-OUR-OWN-KEY (0.4.10 plan row 102); first rows

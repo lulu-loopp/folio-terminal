@@ -939,6 +939,9 @@ pub const PINS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 /// of the releases page and nothing else.
 pub const UPDATE_CHECK_MIGRATIONS: &[(u32, MigrationStep)] = &[(1, migrate_update_check_v1_to_v2)];
 
+/// Migration table for `release-keys.json` (0.4.10 plan row 102). Empty: v1 is the first version.
+pub const RELEASE_KEYS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
+
 /// v1 -> v2: the version the reader skipped, written **`null`**.
 ///
 /// [`migrate_settings_v3_to_v4`]'s shape — the absence of a choice — for its

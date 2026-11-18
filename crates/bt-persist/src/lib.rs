@@ -31,6 +31,8 @@
 //!   URLs the user said to keep.
 //! - [`update`] / [`UpdateCheckV1`] — `update-check.json`, when the releases
 //!   page was last asked and what it said.
+//! - [`release_keys`] / [`ReleaseKeysV1`] — `release-keys.json`, the release keys a verified
+//!   release statement has retired.
 //! - [`export`] — the one-file settings export (`folio_export`), whose parts
 //!   are read back through the same chain their own files are.
 //! - [`scheme`] — one Windows Terminal colour-scheme object, parsed. The one
@@ -55,6 +57,7 @@ mod layout;
 mod migrate;
 mod pins;
 mod profiles;
+mod release_keys;
 mod scheme;
 mod sentinel;
 mod session;
@@ -82,8 +85,8 @@ pub use layout::{
 };
 pub use migrate::{
     DocumentBytes, FallbackReason, KEYBINDINGS_MIGRATIONS, Keeping, MAX_DOCUMENT_BYTES,
-    MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS, ReadReport, RejectedStamp,
-    SESSION_MIGRATIONS, SETTINGS_MIGRATIONS, StableRead, UPDATE_CHECK_MIGRATIONS,
+    MigrationStep, PINS_MIGRATIONS, PROFILES_MIGRATIONS, RELEASE_KEYS_MIGRATIONS, ReadReport,
+    RejectedStamp, SESSION_MIGRATIONS, SETTINGS_MIGRATIONS, StableRead, UPDATE_CHECK_MIGRATIONS,
     keep_beside_as_rejected, read_kept_copy, read_stable, read_stable_between, rejected_stamp_of,
     schema_version_of,
 };
@@ -92,6 +95,7 @@ pub use profiles::{
     CandidateV1, MarkV1, NamedStartAtV1, NamedStartingDirV1, PROFILES_SCHEMA_VERSION,
     ProfileEntryV1, ProfilesV1, ProgramV1, ResolutionV1, StartAtV1, StartingDirV1,
 };
+pub use release_keys::{RELEASE_KEYS_SCHEMA_VERSION, ReleaseKeysV1};
 pub use scheme::{SchemeFileV1, SchemeParseError, parse_scheme, write_scheme};
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
 pub use session::{
@@ -397,6 +401,34 @@ pub fn read_update_check_keeping(path: &Path, keeping: Keeping) -> (UpdateCheckV
 pub fn write_update_check_atomic(path: &Path, state: &UpdateCheckV1) -> Result<(), WriteError> {
     let bytes = serde_json::to_vec_pretty(state).map_err(|source| WriteError::Serialize {
         what: "UpdateCheckV1",
+        source,
+    })?;
+    atomic_write(path, &bytes)
+}
+
+/// Reads `release-keys.json` from `path`, on the same §5.4 fallback chain as the rest (0.4.10
+/// plan row 102). A missing file is [`ReadReport::NotFound`] and is what every machine reads until
+/// a release retires a key; a damaged one falls back to the default, which remembers nothing
+/// retired, and is kept beside itself.
+pub fn read_release_keys(path: &Path) -> (ReleaseKeysV1, ReadReport) {
+    read_release_keys_keeping(path, Keeping::Now)
+}
+
+/// [`read_release_keys`], with the keeping of a refused file the caller's to choose ([`Keeping`]).
+pub fn read_release_keys_keeping(path: &Path, keeping: Keeping) -> (ReleaseKeysV1, ReadReport) {
+    migrate::read_with_fallback(
+        path,
+        RELEASE_KEYS_SCHEMA_VERSION,
+        RELEASE_KEYS_MIGRATIONS,
+        keeping,
+    )
+}
+
+/// Serializes `keys` and writes it to `path` via [`atomic_write`]: a half-written list read by
+/// the next start would forget a retire.
+pub fn write_release_keys_atomic(path: &Path, keys: &ReleaseKeysV1) -> Result<(), WriteError> {
+    let bytes = serde_json::to_vec_pretty(keys).map_err(|source| WriteError::Serialize {
+        what: "ReleaseKeysV1",
         source,
     })?;
     atomic_write(path, &bytes)
