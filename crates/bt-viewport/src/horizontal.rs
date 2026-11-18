@@ -827,6 +827,15 @@ impl HorizontalIndexStore {
         self.release(|key| key.names(id));
     }
 
+    /// Release every index for a history line older than `first` — the lines that left the front
+    /// of history together — or for every history line when `first` is `None`, history being
+    /// empty. One sweep however many left (0.4.10 plan row 105).
+    pub fn release_history_before(&mut self, first: Option<TranscriptId>) {
+        self.release(
+            |key| matches!(key, LineKey::History(id, _) if first.is_none_or(|first| *id < first)),
+        );
+    }
+
     /// Release every index built against a superseded source generation.
     pub fn retain_generation(&mut self, current: SourceGeneration) {
         self.release(|key| key.generation() != current);
