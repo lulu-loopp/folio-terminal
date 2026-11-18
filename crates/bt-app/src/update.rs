@@ -3714,6 +3714,25 @@ mod tests {
         );
     }
 
+    /// RED (0.4.10 plan row 102, the part 3 review's P2-12 and N21) — **the
+    /// readings nothing was pressed for ask the network nothing**: About's
+    /// reading of this copy and the resumer of this copy read the signature
+    /// under `Policy::SystemCacheOnly`; only the Prepare's, right after a press
+    /// of Update, keeps `Policy::System`.
+    ///
+    /// MUTATION: read this copy under `Policy::System` again
+    /// (`plant-102-3-about-asks-the-network.py`), or resume under it
+    /// (`plant-102-3-resume-asks-the-network.py`).
+    #[test]
+    fn the_readings_nothing_was_pressed_for_read_the_cache_only() {
+        use crate::test_support::{free_fn_body, squeezed};
+        for reading in ["read_this_copy_signature", "resumer_for_this_copy"] {
+            let body = squeezed(free_fn_body(reading));
+            assert!(body.contains("Policy::SystemCacheOnly,"), "{reading}");
+            assert!(!body.contains("Policy::System,"), "{reading}");
+        }
+    }
+
     /// RED (0.4.10 plan row 102, the 1b+2 review's N12) — **a feed's file
     /// larger than its request may hold is refused before it is copied**: a
     /// statement the list gives as one byte over 64 KiB leaves nothing behind.
