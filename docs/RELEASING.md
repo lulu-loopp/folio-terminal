@@ -269,11 +269,13 @@ check** (0.4.10 plan row 102). A running Folio takes an update only when the
 release's statement verifies with a release key it embeds (**The release
 statement**, below); Authenticode is never a condition of it. What the Windows
 identity still decides is what Windows does with the program — SmartScreen,
-Smart App Control, and whether `folio.msix` can be registered — and one
-sentence on the update card: a copy whose staged `folio.exe` is not signed by
-this subject through this certificate profile says *This version is not signed
-by Microsoft's signing service; Windows may warn when it starts* before
-**Restart** installs it. So renaming the subject, recreating the certificate
+Smart App Control, and whether `folio.msix` can be registered — and two
+sentences. The Ready card of an update whose staged `folio.exe` is not signed by
+this subject through this certificate profile says *Windows may warn about this
+update.* before **Restart** installs it; and Settings > About → Version of a
+running copy that Windows reads as not so signed says *This copy is not signed
+by Microsoft's signing service.* (nothing, when this machine cannot establish
+the certificate's revocation). So renaming the subject, recreating the certificate
 profile, or a suspended or revoked signing account no longer stops an update
 anywhere. **Copies from 0.4.6 to 0.4.9 still check the identity**: they accept a
 downloaded `folio.exe` or `folio.msix` only from the same subject and the same
