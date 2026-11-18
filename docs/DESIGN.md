@@ -16922,3 +16922,34 @@ The flags are a debt and never a liveness: `Runtime::turn_facts` counts them as 
 **The ask set.** `CarryAsk` is a `u16` now: 68f's member took the eighth and last bit of the `u8`.
 
 **Proof.** `rejected_copies::tests::{a_newer_document_refused_is_said_once, a_copy_newer_than_the_older_builds_write_is_offered, the_offer_reads_the_version_the_start_read, the_window_thread_lists_no_rejected_copy}`, `copy_back::tests::{bringing_back_keeps_the_older_builds_write_as_a_copy, a_bring_back_over_a_file_changed_since_is_refused, keeping_current_writes_this_builds_version, the_offer_heading_names_every_offered_document, the_notice_names_the_document_and_its_copy, an_untaken_notice_is_said_after_a_newer_round}`, `runtime::update_card::copy_back_card_tests::{bringing_back_the_layout_opens_its_windows_beside_the_open_ones, the_copy_back_card_asks_once_for_every_document}`, and the plants `plant-68d-*.py` in the row's report.
+
+### 2026-11-18 — A full scrollback costs the same to feed and to publish however long it is, and holds still (T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS, 0.4.10 plan row 105; the coordinator's rulings R1–R9 of 2026-11-18; 87a's deviation 1)
+
+**What it met.** On the clean VM (87a's M3 run) a flood into a pane whose history had reached its 100 000 lines slowed from about 10 000 lines a second to 143, and the process grew by about 5.7 KB a line for as long as it ran. Three causes, each counted:
+
+- **Feed.** Every line frozen past the cap evicts one, and `HistoryDocument::delete_transaction` found the evicted line's staging relocations with a `retain` over all of them, one per frozen physical row: 500 000–800 000 entries per evicted line.
+- **Publish.** `ViewportProjection::project` kept its layout only when the old id list was a prefix of the new one. An eviction makes that false, so every publish of a full pane walked and rebuilt all of history.
+- **Growth.** Three holders gained an entry per line and never lost it: the transcript's and the document's tombstone lists, and the layout cache, which was keyed by the whole layout key and so kept a slot for every line ever measured, at every width the pane had been laid out at. Counted at the allocator (T3, before the fixes): about 153 bytes a line in a session and its projection, with the layout cache gaining exactly one slot per line.
+
+**Relocations (R2).** A history entry carries `relocated_from`, the staging rows it was frozen from: the keys of its own relocations. Every mapping of a frozen line names that line, and a relocation is only ever written from a mapping, so these are exactly the relocations naming the line. Deletion removes those and visits nothing else: O(rows of the line) per evicted line at any depth. The relocations still live as long as their line, because a scroll anchor that still names a staging row resolves through one. `HistoryDocument::relocation_visits` counts the visits (hidden; a measurement).
+
+**Tombstones (R3).** Both lists are gone. Nothing in the product read them. The ids a deletion removes are what `take_evictions` and `clear_history` return.
+
+**The layout cache (R4).** One slot per line, `BTreeMap<TranscriptId, (LayoutCacheKey, MeasuredLayout)>`: a hit only when the stored key is the asked one, and a miss overwrites. A slot leaves with its line: at a front eviction (`split_off` below the document's first line), and at a rebuild (only lines the document still holds keep theirs, so a block's swallowed lines keep theirs and a toggle back to source measures only its opener again). The price, as ruled: a width the pane comes back to is measured again.
+
+**The publish (Fix B, R9).** `HistoryDocument::interior_edits` counts lines that entered or left anywhere but at the two ends: a line frozen at or below the newest id, or a line deleted while an older one stays. A running pane never does either. While that number is unchanged and nothing is owed (`projection_dirty`), `project` follows the two ends (`follow_the_ends`):
+
+- it drops the projected lines older than the document's first, together with their widths, slots, horizontal indexes and inferences;
+- it appends what follows the last projected line (`entries().range` after it), with the last line's block still suppressing what it swallows.
+
+That is work proportional to the change. Anything else is `rebuild_projection`, the old road: a layout, a detection revision, an artifact that changes which lines are projected, a line gone from the middle, and a departing block opener whose swallowed lines stay (only a walk from the front hands those back, so that refusal is checked before anything is changed). `ordered_ids` and `visual_rows` are deques. `HeightTree` drops its front as a dead prefix: the dropped heights are set to zero, every index is counted from the first living item, and the tree is rebuilt from the living part once the dead part is more than half of what is stored. That is O(log n) amortized per dropped line, with storage under twice the items. `projected_history_index` is a binary search, where it used to walk every projected line per anchor asked.
+
+**Left out.** The frozen-detection frontier (`frozen_certified_through`) is still reset by every eviction, as the ruling leaves it (ledger line).
+
+**Proof.**
+- `bt_doc` `document::tests::{an_eviction_visits_only_its_own_rows, a_line_from_the_middle_is_an_interior_edit}`.
+- bt-term `full_scrollback_feed::the_feed_costs_the_same_before_and_after_the_cap` (5 visits per evicted line at capacities 1 000 and 10 000).
+- bt-term `full_scrollback_residency::history_holds_still_once_the_scrollback_is_full` (a thread-local net-bytes allocator; the heap after 2 000 and after 10 000 lines past the cap differs by under 16 KiB).
+- `bt_viewport` `tests::{a_front_eviction_is_not_a_rebuild, a_front_eviction_keeps_the_trees_within_twice_the_history, a_block_leaving_by_its_opener_hands_its_lines_back}` and `height_tree::tests::dropping_the_front_answers_as_a_tree_built_from_the_rest`.
+- bt-app `full_scrollback_app_tests::a_full_scrollback_holds_still_in_the_window` (the same claim through a headless window's publish and glass, counted by the test build's allocator, now also counting net bytes).
+- Plants P1–P6 are in the row's report. The VM proof is 87a's M3 re-run.
