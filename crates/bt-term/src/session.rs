@@ -11490,7 +11490,20 @@ impl DualPlaneSession {
             }
         }
 
-        for (start, record) in &self.decorations {
+        // **The records of the lines this frame draws, not of every line there is.** Each loop
+        // below finds its record's line on the frame (`frame_row_for_history`,
+        // `frozen_fragment_cells`) and passes over one it does not find, so a walk of all of
+        // `decorations` was a walk of every frozen line's record on every frame: about 4 ms a
+        // frame at a full 100 000-line history, for the two dozen lines on screen (0.4.10 plan
+        // row 107, R9).
+        let frame_history = frame_history_ids(frame);
+        let on_frame = || {
+            frame_history
+                .clone()
+                .into_iter()
+                .flat_map(|ids| self.decorations.range(ids))
+        };
+        for (start, record) in on_frame() {
             if !record.show_source {
                 continue;
             }
@@ -11663,7 +11676,7 @@ impl DualPlaneSession {
             });
         }
 
-        for (start, record) in &self.decorations {
+        for (start, record) in on_frame() {
             let Some(span) = record
                 .span
                 .as_ref()
@@ -11865,7 +11878,7 @@ impl DualPlaneSession {
             }
         }
 
-        for (start, record) in &self.decorations {
+        for (start, record) in on_frame() {
             let Some(reason) = record.failure_reason.as_ref() else {
                 continue;
             };
@@ -16898,6 +16911,29 @@ fn frame_rows_width_cells_in(
         .map(bt_viewport::row_width_cells)
         .max()
         .unwrap_or(0)
+}
+
+/// The ids of the history lines `frame` draws, lowest to highest, read off every drawable cell's
+/// anchor: the only frozen lines a frame decoration can be placed on. `None` when the frame draws
+/// no history.
+fn frame_history_ids(frame: &ViewportFrame) -> Option<RangeInclusive<TranscriptId>> {
+    let cells = frame
+        .drawable_rows()
+        .saturating_mul(frame.columns.get() as usize);
+    let mut ids =
+        frame
+            .cell_anchors
+            .iter()
+            .take(cells)
+            .filter_map(|anchors| match &anchors.start {
+                ContentAnchor::History { id, .. } => Some(*id),
+                _ => None,
+            });
+    let first = ids.next()?;
+    let (low, high) = ids.fold((first, first), |(low, high), id| {
+        (low.min(id), high.max(id))
+    });
+    Some(low..=high)
 }
 
 fn frame_row_for_history(frame: &ViewportFrame, id: TranscriptId) -> Option<u32> {
