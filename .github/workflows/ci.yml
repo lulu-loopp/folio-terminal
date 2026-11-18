@@ -1374,6 +1374,13 @@ jobs:
       # process, so upstream's hundred parse snapshots are how we know the bound
       # changed nothing else.
       #
+      # **winit is the one vendored crate that is not a member** (0.4.10 plan row 87, part 87a;
+      # R11): Folio changes one arm of a Windows window procedure there, upstream's own suite
+      # is three compile-time assertions, and membership would pull its examples' and
+      # doctests' dev-dependencies into the lock and its upstream code under this workspace's
+      # clippy. See vendor/winit/CHANGES-FOLIO.md; the copy goes when a winit release carries
+      # the arm.
+      #
       # Asked of cargo, not of a grep: the manifest mentions each path twice
       # (members and [patch.crates-io]), so grepping it passes even with the
       # member deleted.
