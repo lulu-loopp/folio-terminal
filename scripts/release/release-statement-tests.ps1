@@ -225,6 +225,37 @@ Test-Case 'a_signed_name_on_unsigned_files_is_refused' {
     if (Test-Path -LiteralPath (Join-Path $copy 'RELEASE-STATEMENT.txt')) { throw 'a statement was written anyway' }
 }
 
+# RED (the 1b+2 review's P2-7) — **`authenticode true` needs one signer, and
+# the one the package names**: a release's two files signed with one
+# certificate whose subject is the package's Publisher (written with other
+# spacing) pass; two certificates of the same subject are refused, and so is
+# one certificate the package does not name. Asked of `signer-names.ps1`'s
+# `Get-OneSignerRefusal` with certificates made here, since no machine trusts
+# a signature this case could make.
+#
+# MUTATION: compare only the thumbprints in `Get-OneSignerRefusal`
+# (`plant-102-p27-one-signer-ignores-the-publisher`): the stranger passes.
+Test-Case 'a_signed_name_needs_one_certificate_naming_the_publisher' {
+    . (Join-Path $here 'signer-names.ps1')
+    function New-TestCertificate([string] $subject) {
+        $key = [System.Security.Cryptography.RSA]::Create(2048)
+        $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+            $subject, $key, [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+            [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        return $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(1))
+    }
+    $publisher = 'CN=Folio Test, O=Folio Test, C=US'
+    $ours = New-TestCertificate 'CN=Folio Test,O=Folio Test,C=US'
+    $twin = New-TestCertificate 'CN=Folio Test,O=Folio Test,C=US'
+    $stranger = New-TestCertificate 'CN=Someone Else'
+    $one = Get-OneSignerRefusal -Executable $ours -Package $ours -Publisher $publisher
+    if ($null -ne $one) { throw "one certificate naming the Publisher was refused: $one" }
+    $two = Get-OneSignerRefusal -Executable $ours -Package $twin -Publisher $publisher
+    if ($two -notmatch 'one certificate') { throw "two certificates of one subject were not refused: $two" }
+    $named = Get-OneSignerRefusal -Executable $stranger -Package $stranger -Publisher $publisher
+    if ($named -notmatch 'Publisher=') { throw "a signer the package does not name was not refused: $named" }
+}
+
 # RED (part 2) — **a release states both halves**: without the macOS image the
 # statement is refused, unless `-WindowsOnly` says the feed carries none, and
 # then the statement lists the Windows archive alone.

@@ -23,8 +23,10 @@
        workspace's; `min_from` is the `min_updater` the archive's own
        `folio.exe` carries in its release manifest; `authenticode` is `false`
        for an archive named `-unsigned`, and `true` only for an archive whose
-       `folio.exe` and `folio.msix` `sign.ps1 -VerifyOnly` accepts — a signed
-       name on files that are not signed is refused. The text itself is
+       `folio.exe` and `folio.msix` `sign.ps1 -VerifyOnly` accepts and that
+       carry one certificate whose subject is the Publisher the package
+       declares (`signer-names.ps1`) — a signed name on files that are not
+       signed, or not signed by the one signer, is refused. The text itself is
        written by `check-release-statement compose`, which is the product's
        own grammar (`bt_winres::release_statement`), so there is no second
        spelling of it here. A `RELEASE-STATEMENT.txt.sig` left from an earlier
@@ -111,6 +113,7 @@ if (Test-Path -LiteralPath 'Variable:PSNativeCommandUseErrorActionPreference') {
 $here = $PSScriptRoot
 $root = (Resolve-Path (Join-Path (Join-Path $here '..') '..')).Path
 . (Join-Path $here 'release-manifest.ps1')
+. (Join-Path $here 'signer-names.ps1')
 
 $statementName = 'RELEASE-STATEMENT.txt'
 $signatureName = 'RELEASE-STATEMENT.txt.sig'
@@ -224,13 +227,23 @@ try {
 
     # **A signed name is a claim, and it is checked** (R4: the updater reads the
     # signature itself and never takes this line's word; this keeps the line
-    # true for everyone else who reads it).
+    # true for everyone else who reads it). `-VerifyOnly` asks for a valid,
+    # time-stamped signature and not whose; the line says our signing
+    # service's, so both files must also carry one certificate whose subject is
+    # the Publisher the package declares (the 1b+2 review's P2-7).
     if ($unsigned) {
         $authenticode = 'false'
     }
     else {
         Write-Host "$($archive.Name) carries no -unsigned, so its two files must be signed:"
-        & (Join-Path $here 'sign.ps1') -VerifyOnly -Files @((Join-Path $scratch 'folio.exe'), (Join-Path $scratch 'folio.msix'))
+        $exePath = Join-Path $scratch 'folio.exe'
+        $msixPath = Join-Path $scratch 'folio.msix'
+        & (Join-Path $here 'sign.ps1') -VerifyOnly -Files @($exePath, $msixPath)
+        $refusal = Get-OneSignerRefusal `
+            -Executable (Get-AuthenticodeSignature -LiteralPath $exePath).SignerCertificate `
+            -Package (Get-AuthenticodeSignature -LiteralPath $msixPath).SignerCertificate `
+            -Publisher (Get-PackagePublisher -Msix $msixPath)
+        if ($refusal) { throw "$($archive.Name) is named as signed, but $refusal" }
         $authenticode = 'true'
     }
 }

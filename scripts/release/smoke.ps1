@@ -174,6 +174,8 @@ if (-not $here) {
 $root = (Resolve-Path (Join-Path (Join-Path $here '..') '..')).Path
 # The archive's member list and the manifest `folio.exe` carries of it.
 . (Join-Path $here 'release-manifest.ps1')
+# How two distinguished names are compared: as names, not as strings.
+. (Join-Path $here 'signer-names.ps1')
 
 # **Every path this script was handed is made absolute here, before anything
 # reads it.** A relative path has two answers on Windows and they are allowed to
@@ -605,73 +607,6 @@ if ($ExpectSigned) {
 # It is asked of the package that shipped rather than of `packaging/msix/`: the
 # file in the tree is an input, the copy in the package is what a user registers,
 # and the version injected between them proves the two are not the same bytes.
-
-# **A distinguished name is compared as a name and not as a string.**
-# `CN=Weiyi Shi, O=Weiyi Shi` and `CN=Weiyi Shi,O=Weiyi Shi` are the same name
-# written twice: the space after a separating comma is spelling and not content,
-# and which of the two a certificate authority, a Windows API and a person
-# editing XML each produce is not something this check gets to decide. Compared
-# as text they differ, and the failure sends somebody to edit a file that was
-# already correct — which is worse than not checking at all, because it teaches
-# people to distrust the check.
-#
-# So each side is cut into its relative names at the commas that separate them,
-# and only at those: a comma inside a value is written `\,` or sits inside a
-# quoted value, and neither of those separates anything. Attribute types are
-# compared without case, because `cn` and `CN` are one attribute. Values are
-# compared with it, because `CN=Weiyi Shi` and `CN=WEIYI SHI` are two things a
-# certificate authority issued on purpose and this is not the place to decide
-# they are one person. Order is kept, because the order of the relative names is
-# part of the name.
-function Split-DistinguishedName {
-    param([string] $Name)
-
-    $parts = @()
-    $current = New-Object System.Text.StringBuilder
-    $quoted = $false
-    for ($i = 0; $i -lt $Name.Length; $i++) {
-        $character = $Name[$i]
-        # A backslash spells the next character literally. It is how a comma, a
-        # plus or a quotation mark appears inside a value, and the character it
-        # protects is kept while the backslash itself is not — the two sides are
-        # then comparable however each of them chose to write it.
-        if ($character -eq '\' -and $i + 1 -lt $Name.Length) {
-            [void] $current.Append($Name[$i + 1])
-            $i++
-            continue
-        }
-        if ($character -eq '"') { $quoted = -not $quoted; continue }
-        if ($character -eq ',' -and -not $quoted) {
-            $parts += $current.ToString()
-            [void] $current.Clear()
-            continue
-        }
-        [void] $current.Append($character)
-    }
-    $parts += $current.ToString()
-
-    return @($parts | ForEach-Object {
-        $rdn = $_.Trim()
-        $equals = $rdn.IndexOf('=')
-        if ($equals -lt 0) { return $rdn }
-        '{0}={1}' -f $rdn.Substring(0, $equals).Trim().ToUpperInvariant(), $rdn.Substring($equals + 1).Trim()
-    })
-}
-
-function Test-SameDistinguishedName {
-    param([string] $Left, [string] $Right)
-
-    # Named apart from the parameters on purpose: PowerShell's variable names do
-    # not distinguish case, so a `$left` here would be the `$Left` above, and the
-    # second line would be splitting an array it had already replaced.
-    $first = Split-DistinguishedName -Name $Left
-    $second = Split-DistinguishedName -Name $Right
-    if ($first.Count -ne $second.Count) { return $false }
-    for ($i = 0; $i -lt $first.Count; $i++) {
-        if ($first[$i] -cne $second[$i]) { return $false }
-    }
-    return $true
-}
 
 if ($ExpectSigned) {
     # **That there is a package here at all was settled at the door**, for

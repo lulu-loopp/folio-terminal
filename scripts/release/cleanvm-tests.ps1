@@ -106,7 +106,7 @@ $bom = [byte[]](0xEF, 0xBB, 0xBF)
 function New-ScratchTree([string] $name) {
     $tree = Join-Path $scratch $name
     foreach ($rel in @('scripts\release\smoke.ps1', 'scripts\release\release-manifest.ps1',
-            'scripts\release\archive-members.txt', 'scripts\release\cleanvm\run-smoke-in-vm.ps1',
+            'scripts\release\signer-names.ps1', 'scripts\release\archive-members.txt', 'scripts\release\cleanvm\run-smoke-in-vm.ps1',
             'scripts\release\cleanvm\guest-files.ps1', 'scripts\release\cleanvm\in-guest.ps1')) {
         $to = Join-Path $tree $rel
         [IO.Directory]::CreateDirectory((Split-Path -Parent $to)) | Out-Null
@@ -223,7 +223,8 @@ try {
     foreach ($rel in @('scripts\release\cleanvm\updater\guest\watch.ps1', 'scripts\release\cleanvm\updater\guest\waits.ps1',
             'scripts\release\cleanvm\updater\guest\keys.ps1',
             'scripts\release\cleanvm\updater\guest\collect.ps1', 'scripts\dev\ui-probe.ps1',
-            'scripts\release\release-manifest.ps1', 'scripts\release\smoke.ps1', 'scripts\release\cleanvm\in-guest.ps1')) {
+            'scripts\release\release-manifest.ps1', 'scripts\release\signer-names.ps1',
+            'scripts\release\smoke.ps1', 'scripts\release\cleanvm\in-guest.ps1')) {
         $head = [IO.File]::ReadAllBytes((Join-Path $root $rel))
         Check ($head.Length -ge 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF) "$rel starts with a UTF-8 byte-order mark"
     }
