@@ -2658,8 +2658,9 @@ fn the_prepare_hands_the_job_its_reading_of_the_staged_exe() {
 
 /// RED (0.4.10 plan row 102 part 3, R5) — **a launch that resumes a staged
 /// set reads its `folio.exe` again for the Ready card**: after "download,
-/// Later, close", the next launch's card carries the reading that launch
-/// made of the staged set.
+/// Later, close", the next launch's pass (`settle_at_launch`, run on a worker
+/// and joined) resumes the set with the reading that launch made of it, which
+/// the job hands its card (`Landed::Resumed`'s `note`).
 ///
 /// MUTATION: `resumer` answers `SignatureNote::Nothing` without reading
 /// (`plant-102-3-resume-reads-nothing.py`).
@@ -2668,11 +2669,25 @@ fn the_prepare_hands_the_job_its_reading_of_the_staged_exe() {
 fn a_resume_reads_the_staged_exe_again_for_its_card() {
     let scene = Scene::new("resume-note");
     prepared_and_closed(&scene);
-    let launched = launch(&scene.exe, resumer_of(&scene), &at_launch_gathered(false));
-    assert!(
-        matches!(launched.job.state(), State::Verified(_)),
-        "{:?}",
-        launched.job.state()
-    );
-    assert_eq!(launched.job.staged_note(), SignatureNote::NotOurService);
+    let (home, resume) = (scene.home(), resumer_of(&scene));
+    let note = bt_platform::spawn_at_priority(
+        "bt-update-prepare-test",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |worker| match crate::update_prepare::settle_at_launch(
+            worker,
+            &home,
+            true,
+            resume,
+            Some(Channel::Ours),
+            HostPlatform::Windows,
+            crate::update_txn::PreviousRun::Orderly,
+        ) {
+            crate::update_job::Landed::Resumed { note, .. } => Some(note),
+            _ => None,
+        },
+    )
+    .unwrap()
+    .join()
+    .unwrap();
+    assert_eq!(note, Some(SignatureNote::NotOurService));
 }

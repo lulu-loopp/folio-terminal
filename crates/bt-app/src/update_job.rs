@@ -1416,8 +1416,9 @@ struct ProgressInbox {
     report_posted: Condvar,
     /// **How many [`Poster`]s of this inbox are alive** (the 1b+2 review's
     /// N14): made or cloned, one more; dropped — a worker's that ended, or
-    /// unwound — one fewer, said on `report_posted`. Changed under `reports`'
-    /// lock, so a waiter that reads it there misses no drop.
+    /// unwound — one fewer, said on `report_posted`. A drop takes `reports`'
+    /// lock to count down, so a waiter that reads the count there misses no
+    /// drop.
     posters: AtomicUsize,
 }
 
@@ -1457,20 +1458,17 @@ impl Drop for Poster {
 }
 
 impl Poster {
-    /// **A poster of `inbox`, counted among its live ones** (N14).
+    /// **A poster of `inbox`, counted among its live ones** (N14). The count
+    /// goes up without the inbox's lock: a poster is made by a press, on the
+    /// thread that would wait, or cloned from a live one, so the count is
+    /// never 0 while a waiter could see this one coming.
     fn counted(
         txn: TxnId,
         inbox: Arc<ProgressInbox>,
         staged: StagedSlot,
         cancelled: Arc<AtomicBool>,
     ) -> Self {
-        {
-            let _reports = inbox
-                .reports
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            inbox.posters.fetch_add(1, Ordering::SeqCst);
-        }
+        inbox.posters.fetch_add(1, Ordering::SeqCst);
         Self {
             txn,
             inbox,
