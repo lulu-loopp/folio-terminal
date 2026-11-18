@@ -276,11 +276,25 @@ impl HistoryDocument {
                 .all(|mapping| mapping.transcript_id == transcript_id),
             "a finalized line's mappings name that line"
         );
-        let relocated_from = finalized
+        let mut relocated_from = finalized
             .mappings
             .iter()
             .map(|mapping| mapping.staging_id)
-            .collect();
+            .collect::<Vec<_>>();
+        // A freeze over an id the document already holds replaces that entry. Its relocations
+        // still name this line, so the new entry keeps their keys too, or deleting the line could
+        // no longer find them. A key a later line has taken over is skipped at deletion by the
+        // relocation's own `transcript_id`.
+        if let Some(previous) = self.entries.get(&transcript_id) {
+            let kept = previous
+                .relocated_from
+                .iter()
+                .filter(|staging| !relocated_from.contains(staging))
+                .copied()
+                .collect::<Vec<_>>();
+            relocated_from.extend(kept);
+        }
+        let relocated_from = relocated_from.into_boxed_slice();
         for mapping in &finalized.mappings {
             self.staging_relocations.insert(
                 mapping.staging_id,
@@ -621,5 +635,105 @@ mod tests {
         assert_eq!(document.interior_edits(), 1, "the middle line went");
         document.delete_transaction(&[ids[0], ids[2]], false, GridGeneration(1));
         assert_eq!(document.interior_edits(), 1, "each went as the oldest");
+
+        print_line(&mut store, &mut document);
+        assert_eq!(
+            document.interior_edits(),
+            1,
+            "the next line freezes past the newest"
+        );
+        let newest = *document.entries().keys().next_back().unwrap();
+        document.finalize_transaction(frozen_again(ids[2], &store));
+        assert_eq!(
+            document.interior_edits(),
+            2,
+            "a line frozen below the newest one entered in the middle"
+        );
+        document.finalize_transaction(frozen_again(newest, &store));
+        assert_eq!(
+            document.interior_edits(),
+            3,
+            "and one frozen over the newest replaced it"
+        );
+    }
+
+    /// A line frozen by hand over `id`, with no mappings and a newer source generation, as a
+    /// rewrite in place builds one (the public API admits it; the product's freezes always take
+    /// the store's next id).
+    fn frozen_again(id: TranscriptId, store: &TranscriptStore) -> FinalizedLine {
+        let text = "again".to_owned();
+        FinalizedLine {
+            line: FrozenLine {
+                id,
+                source_generation: SourceGeneration(store.source_generation().0 + 1),
+                grapheme_boundaries: (0..=text.len() as u32).collect(),
+                text,
+                styles: Vec::new(),
+                fragments: Vec::new(),
+                shell_marks: Vec::new(),
+                wrap_split: false,
+                command_output_write: false,
+            },
+            mappings: Vec::new(),
+        }
+    }
+
+    /// **A line frozen again over its own id keeps the staging rows it was first frozen from, and
+    /// deleting it then removes their relocations too** (0.4.10 plan row 105, review P2-1).
+    ///
+    /// The second freeze brings no mappings of its own, so a line that carried only the new
+    /// freeze's keys would leave its first rows' relocations behind for good: a staging anchor
+    /// would still resolve into a line the document no longer holds.
+    #[test]
+    fn a_line_frozen_again_takes_its_first_rows_with_it() {
+        let mut store = store();
+        let mut document = HistoryDocument::default();
+        let mut rows_of = BTreeMap::<TranscriptId, Vec<StagingId>>::new();
+        for row in 0..3 {
+            for finalized in store
+                .capture(CapturedRow::plain(&format!("line {row}"), false))
+                .finalized
+            {
+                rows_of.insert(
+                    finalized.line.id,
+                    finalized.mappings.iter().map(|m| m.staging_id).collect(),
+                );
+                document.finalize_transaction(finalized);
+            }
+        }
+        let ids = document.entries().keys().copied().collect::<Vec<_>>();
+        assert!(ids.len() >= 2, "the fixture froze lines: {ids:?}");
+        let middle = ids[ids.len() - 2];
+        let first_rows = rows_of[&middle].clone();
+        assert!(!first_rows.is_empty(), "the line was frozen from rows");
+        let staged = |id: StagingId| ContentAnchor::Staging {
+            id,
+            offset: GraphemeOffset(0),
+            bias: Bias::After,
+            generation: SourceGeneration(0),
+        };
+        for row in &first_rows {
+            assert!(
+                matches!(document.resolve_anchor(&staged(*row)), ContentAnchor::History { id, .. } if id == middle),
+                "a row of the line resolves into it"
+            );
+        }
+
+        document.finalize_transaction(frozen_again(middle, &store));
+        for row in &first_rows {
+            assert!(
+                matches!(document.resolve_anchor(&staged(*row)), ContentAnchor::History { id, .. } if id == middle),
+                "frozen again, the line is still where its first rows went"
+            );
+        }
+
+        document.delete_transaction(&[middle], false, GridGeneration(1));
+        for row in &first_rows {
+            assert_eq!(
+                document.resolve_anchor(&staged(*row)),
+                staged(*row),
+                "the line is gone, and a row it was first frozen from still resolves into it"
+            );
+        }
     }
 }
