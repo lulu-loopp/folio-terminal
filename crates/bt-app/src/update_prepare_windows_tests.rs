@@ -549,18 +549,12 @@ fn press_with(driver: &WinPrepare, transport: SharedTransport, txn: u8) -> Job<u
     let mut job = offered(txn);
     job.answer_verb(Verb::Press, driver, &transport)
         .expect("the press is taken");
-    let deadline = Instant::now() + Duration::from_secs(300);
     loop {
+        job.await_reports();
         job.drain_progress();
         if matches!(job.state(), State::Verified(_) | State::Failed(..)) {
             return job;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the Prepare did not finish: {:?}",
-            job.state()
-        );
-        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -1350,8 +1344,10 @@ fn the_statement_is_kept_beside_the_staged_set() {
 
 /// RED (0.4.10 plan row 102 part 1b) — **a staged set without a kept
 /// statement is discarded**: a transaction folder an older build prepared,
-/// with nothing beside `set\` to verify it by, is refused at the next
-/// launch's resume and nothing of it is left — the launch checks as usual.
+/// with nothing beside `set\` to verify it by, is refused by the next
+/// launch's pass (`settle_at_launch`, run on a worker and joined) and nothing
+/// of it is left — the launch lands `Ordinary`, which checks and offers as
+/// usual.
 ///
 /// MUTATION: in `staged_as_verified`, pass a set whose statement is not there
 /// (`plant-102-1b-no-statement-passes.py`).
@@ -1364,11 +1360,28 @@ fn a_staged_set_without_a_kept_statement_is_discarded() {
     for kept in crate::update_prepare::kept_statement(&scene.home(), TxnId::new([1; 16])) {
         std::fs::remove_file(kept).unwrap();
     }
-    let launched = launch(&scene.exe, resumer_of(&scene), &at_launch_gathered(false));
-    assert!(launched.job.staged().is_none(), "nothing is resumed");
+    let (home, resume) = (scene.home(), resumer_of(&scene));
+    let landed = bt_platform::spawn_at_priority(
+        "bt-update-prepare-test",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |worker| {
+            crate::update_prepare::settle_at_launch(
+                worker,
+                &home,
+                true,
+                resume,
+                Some(Channel::Ours),
+                HostPlatform::Windows,
+                crate::update_txn::PreviousRun::Orderly,
+            )
+        },
+    )
+    .unwrap()
+    .join()
+    .unwrap();
     assert!(
-        launched.checked.load(std::sync::atomic::Ordering::SeqCst),
-        "a launch that discarded checks as usual"
+        matches!(landed, crate::update_job::Landed::Ordinary),
+        "nothing is resumed; the launch checks as usual"
     );
     scene.left_nothing(1);
     assert_eq!(scene.installed(), before, "nothing installed was changed");

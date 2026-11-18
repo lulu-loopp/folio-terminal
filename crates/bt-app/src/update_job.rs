@@ -74,7 +74,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use bt_persist::UpdateCheckV1;
 use bt_platform::HostPlatform;
@@ -1363,12 +1363,22 @@ pub(crate) fn evidence_landed() {
 /// reads its `Verified` report: the transaction it belongs to, and the value.
 type StagedSlot = Arc<Mutex<Option<(TxnId, Staged)>>>;
 
+/// **A job's inbox**: the reports its drivers posted, waiting for the window
+/// thread, and the signal each post gives. The loop is woken through
+/// `PROGRESS_WAKE`; a test that drives a job with no loop waits on `report_posted`
+/// for the next report (`Job::await_reports`) instead of reading a clock.
+#[derive(Default)]
+struct ProgressInbox {
+    reports: Mutex<Vec<Progress>>,
+    report_posted: Condvar,
+}
+
 /// **A driver's way back to the job**: reports carry the transaction they
 /// belong to, wait in the job's inbox, and wake the loop.
 #[derive(Clone)]
 pub(crate) struct Poster {
     txn: TxnId,
-    inbox: Arc<Mutex<Vec<Progress>>>,
+    inbox: Arc<ProgressInbox>,
     staged: StagedSlot,
     /// Set by the job when the reader cancels this transaction's download: the
     /// driver stops at its next step.
@@ -1427,12 +1437,14 @@ impl Poster {
     /// Report `step` for this poster's transaction.
     pub(crate) fn post(&self, step: Step) {
         self.inbox
+            .reports
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(Progress {
                 txn: self.txn,
                 step,
             });
+        self.inbox.report_posted.notify_all();
         if let Some(wake) = PROGRESS_WAKE.get() {
             wake();
         }
@@ -1498,7 +1510,7 @@ pub(crate) struct Job<W> {
     /// [`Job::offers_enabled`] in the product.
     offers: bool,
     /// Reports from a driver, waiting for the window thread.
-    inbox: Arc<Mutex<Vec<Progress>>>,
+    inbox: Arc<ProgressInbox>,
     /// What a driver left with its `Verified` report, until the job takes it.
     staged_slot: StagedSlot,
     /// **The staged transaction** — its home, its journal and the lock O holds
@@ -1582,7 +1594,7 @@ impl<W: Copy + Eq> Job<W> {
             last_failure: None,
             said: false,
             offers,
-            inbox: Arc::new(Mutex::new(Vec::new())),
+            inbox: Arc::default(),
             staged_slot: Arc::new(Mutex::new(None)),
             staged: None,
             abandoned: None,
@@ -2231,9 +2243,30 @@ impl<W: Copy + Eq> Job<W> {
         std::mem::take(
             &mut *self
                 .inbox
+                .reports
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    /// **Wait until a driver has reported**, without applying it — a test's
+    /// way to drive a job with no loop to wake: it returns once the inbox
+    /// holds a report, at once if it already does, and reads no clock (the
+    /// test's watchdog bounds a driver that never reports).
+    #[cfg(test)]
+    pub(crate) fn await_reports(&self) {
+        let mut reports = self
+            .inbox
+            .reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while reports.is_empty() {
+            reports = self
+                .inbox
+                .report_posted
+                .wait(reports)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
     }
 
     /// **Apply what the drivers reported**, in order — the handler of
@@ -2242,6 +2275,7 @@ impl<W: Copy + Eq> Job<W> {
         let reports = std::mem::take(
             &mut *self
                 .inbox
+                .reports
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
