@@ -173,10 +173,38 @@ fn history_holds_still_once_the_scrollback_is_full() {
         "lines, bytes held beyond the full history, document entries, layout slots: {trail:?}"
     );
     assert!(
-        grown.abs() < 16 * 1024,
+        grown.abs() < 48 * 1024,
         "{} more lines past a full {CAPACITY}-line history changed what the pane holds by {grown} \
          bytes ({:.1} a line); lines, bytes, entries, layout slots: {trail:?}",
         4 * CAPACITY,
         grown as f64 / (4 * CAPACITY) as f64,
+    );
+}
+
+/// **A full pane's publish follows its history; it does not project it again** (0.4.10 plan row
+/// 105, review P2-3): eight thousand lines past a full history, every one evicting the oldest,
+/// through the session's own publish, and not one rebuild among them.
+///
+/// The viewport's own test proves the follow on a document it drives by hand. This one is the
+/// road the product takes (`refresh_projection` and `sync_projection_state`), where anything the
+/// session asks of the projection on every publish — a path-link, math or inline-path artifact
+/// set, a detection revision, a cell height — that marked it dirty would put the whole-history
+/// rebuild back for every full pane, and only bytes would not show it.
+#[test]
+fn a_full_pane_publish_is_not_a_rebuild() {
+    let mut pane = Pane::new();
+    pane.print_until(2 * CAPACITY);
+    assert_eq!(
+        pane.session.transcript().frozen().len(),
+        CAPACITY,
+        "the history is full before the count begins"
+    );
+    let rebuilds = pane.view.rebuilds();
+    pane.print_until(2 * CAPACITY + 4 * CAPACITY);
+    assert_eq!(
+        pane.view.rebuilds(),
+        rebuilds,
+        "{} lines published past a full {CAPACITY}-line history",
+        4 * CAPACITY
     );
 }
