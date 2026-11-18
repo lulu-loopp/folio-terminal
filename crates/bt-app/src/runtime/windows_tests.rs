@@ -3492,7 +3492,8 @@ fn a_reaped_window_leaves_the_close_witness() {
 
 /// RED (mutation: drop the `say_window_closed` call from `FolioApp::transfer_tab`) — **a window
 /// emptied by its last tab moving out says so on its close line** (R4, row 14; review P2-4), with
-/// the counts it held before the move took the tab and the window the run goes on with.
+/// what it holds as it shuts, after the move took its tab (`tabs=0; panes=0`; re-review R-N4),
+/// and the window the run goes on with.
 #[test]
 fn a_window_whose_last_tab_moved_out_says_so() {
     let mut application = two_open_windows("close-road-moved-out");
@@ -3517,5 +3518,44 @@ fn a_window_whose_last_tab_moved_out_says_so() {
           road=tab-moved-out; delivery=unread; foreground=unread; pointer=unread; tabs=0; \
           panes=0; windows left=1"
         ]
+    );
+}
+
+/// RED (mutation: `end_capture` reading the tab in front through the facade again, `Some(self.id)`
+/// — a panic) — **a refused tear-out shuts the window it opened, which nothing arrived in, without
+/// a fault, and the close witness forgets it** (re-review R-N2). `FolioApp::settle_tear_out`
+/// empties that window (`abandon_a_window_nothing_arrived_in`) and shuts it through
+/// `close_window`, the road the tabless crash also sat on. The refusal here is the tab gone before
+/// the settle (`TransferRefusal::NoSuchTab`): `PageKept` needs a live page's handover refused,
+/// which no headless window holds, and every refusal takes the same road after `transfer_tab`.
+#[test]
+fn a_refused_tear_out_shuts_its_empty_window_and_the_witness_forgets_it() {
+    let mut application = two_open_windows("close-road-refused-tear-out");
+    application
+        .folio
+        .settle_tear_out(
+            crate::TearOut {
+                tab: crate::TabId(99),
+                from: WindowId::from(1),
+                promoted: false,
+                at: None,
+            },
+            WindowId::from(2),
+        )
+        .expect("the refusal is settled");
+    assert!(
+        !application.folio.windows.contains(WindowId::from(2)),
+        "the window nothing arrived in is gone"
+    );
+    assert_eq!(
+        application
+            .event_loop
+            .ledger
+            .take()
+            .into_iter()
+            .filter(|effect| *effect == WindowEffect::ClosesUnwatched)
+            .count(),
+        1,
+        "the witness forgets it, once"
     );
 }

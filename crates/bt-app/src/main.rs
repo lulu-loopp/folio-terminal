@@ -47222,6 +47222,11 @@ impl<B: Backend> FolioApp<B> {
                 into,
             )));
         }
+        // **The gestures the tab takes with it end before it goes** (R-9; re-review R-N3): read
+        // while the tab is still in the window it is leaving.
+        if let Some(mut runtime) = self.runtime(from) {
+            runtime.let_go_of_a_tab_moving_out(tab)?;
+        }
         let Some((source, target)) = self.windows.two_mut(from, into) else {
             // `from != into`, both were open a statement ago, and nothing between
             // here and there can close a window.

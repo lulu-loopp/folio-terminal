@@ -1274,7 +1274,7 @@ fn a_divider_released_anywhere_commits_through_the_whole_dispatch() {
 /// the capture before it changes what the owner names. The resize door's sample is its own item
 /// (the divider's, generalised), so its row names that call; every other door calls
 /// `end_capture` itself.
-const LIFECYCLE_DOORS: [(&str, &str); 15] = [
+const LIFECYCLE_DOORS: [(&str, &str); 16] = [
     ("window_blurred", "end_capture"),
     (
         "flush_pending_pty_resize",
@@ -1285,6 +1285,7 @@ const LIFECYCLE_DOORS: [(&str, &str); 15] = [
     ("close_window", "end_capture"),
     ("activate_tab", "end_capture"),
     ("close_tab_by", "end_capture"),
+    ("let_go_of_a_tab_moving_out", "end_capture"),
     ("close_pane", "end_capture"),
     ("toggle_pane_zoom", "end_capture"),
     ("sweep_preview_panes", "end_capture"),

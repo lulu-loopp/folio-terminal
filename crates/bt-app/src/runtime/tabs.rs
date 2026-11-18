@@ -441,6 +441,27 @@ impl<B: Backend> Runtime<'_, B> {
         self.close_tab_by(index, bt_platform::close_road::OwnCloseRoad::FinalTab)
     }
 
+    /// **A tab leaving this window for another ends the gestures it takes with it**
+    /// (T-POINTER-CAPTURE R-9; 0.4.10 plan row 103, re-review R-N3), before
+    /// `FolioApp::transfer_tab` takes it out and while it is still here to be read, as every door
+    /// that changes the tab ends the capture first.
+    ///
+    /// The window's only tab takes the window with it: the move empties it and shuts it, so every
+    /// gesture it holds is cancelled now, the cancel `close_window` would say — said while there is
+    /// still a tab in front for a divider's ratio, a floating window's cursor or a drag's way home
+    /// to be read on, which the emptied window no longer has. Any other tab takes what was about
+    /// it (owner gone): its press, the tab itself in the hand, or anything held on one of its
+    /// panes.
+    pub(crate) fn let_go_of_a_tab_moving_out(&mut self, tab: TabId) -> Result<()> {
+        let empties_the_window = self.window.tabs.iter().all(|open| open.id == tab);
+        if empties_the_window {
+            self.end_capture(Ending::Cancel)
+        } else {
+            self.end_capture(OwnerGone(Gone::Tab(tab)));
+            Ok(())
+        }
+    }
+
     /// Close the tab at `index`; when it is the window's only tab, the window's close is asked as
     /// Folio's own request by `road`, which rides in the message (0.4.10 plan row 103) — the
     /// shells' exit asks as [`OwnCloseRoad::ShellsExited`](bt_platform::close_road::OwnCloseRoad).

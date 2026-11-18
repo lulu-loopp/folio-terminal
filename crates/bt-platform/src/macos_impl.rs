@@ -855,7 +855,8 @@ pub fn request_window_close(
 thread_local! {
     /// **The key or left-button event AppKit is dispatching now**, or `None` (0.4.10 plan row
     /// 103, review P1-1): recorded by the local monitor as the event goes through
-    /// `-[NSApplication sendEvent:]`, and dropped when the main run loop next waits.
+    /// `-[NSApplication sendEvent:]`, and dropped when the main run loop next waits or when a
+    /// close's road is read off it (re-review R-N5: one event is the road of one close).
     static DISPATCHED: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
     /// The monitor and the observer, kept for the life of the process once installed.
     static DISPATCH_WATCH: OnceCell<(Retained<AnyObject>, CFRetained<CFRunLoopObserver>)> =
@@ -1054,8 +1055,10 @@ pub(crate) fn close_context(
     };
     let road = match own {
         Some(own) => CloseRoad::Own(own),
+        // Taken, not read: a second close in the same pass of the run loop (an accessibility
+        // press, a script) finds no record and is `outside`, never the first close's road.
         None => DISPATCHED
-            .with(|dispatched| dispatched.borrow().clone())
+            .with(|dispatched| dispatched.borrow_mut().take())
             .map_or(CloseRoad::Outside, |event| {
                 road_of_the_dispatched_event(&event, &ns_window, on_close_button, mtm)
             }),
