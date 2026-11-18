@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1819. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1821. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_deref	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_str	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
@@ -2314,6 +2314,8 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::announce_recovered_edits	Ambig
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::announce_recovered_edits	Ambiguous	then_some	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::announce_recovered_edits	Dynamic	oldest_standing	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::answer_a_menu_row	Ambiguous	map	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::bring_the_window_back	Ambiguous	is_some	1	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); `brought.is_some()` on the Option the door's own loop over the windows fills; an in-memory read, no wait
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::bring_the_window_back	Dynamic	(value)	1	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); the application's `carry_ask` (an fn pointer: carry_pass::begin_carry_pass in the product, which hands one HOOKS round to the below-normal carry worker and returns; a counter in the tests); no wait
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::deliver_the_quits_update_report	Ambiguous	why	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::drain_git_answers	Ambiguous	collect	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::drain_git_answers	Ambiguous	filter_map	1	
@@ -5848,7 +5850,7 @@ crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_setting
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Ambiguous	on	1	
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Ambiguous	partition	1	
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Ambiguous	row	1	
-crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Dynamic	offer	44	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the resume switch is one more setting the bundle plans (the offer closure of its row); an in-memory read of values the call already holds, no wait
+crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::plan_settings	Dynamic	offer	45	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the resume switch is one more setting the bundle plans (the offer closure of its row); an in-memory read of values the call already holds, no wait; grown 44 -> 45 by T-TRAY-87A-WINDOWS-PUT-AWAY (2026-11-18, plan row 87, part 87a): close_keeps_running is one more setting the bundle plans, the same in-memory read, no wait
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::read_keybindings	Ambiguous	clone	2	
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::read_keybindings	Ambiguous	map	1	
 crates/bt-app/src/settings_bundle.rs	bt-app crate::settings_bundle::read_keybindings	Ambiguous	to_owned	1	
@@ -7338,6 +7340,7 @@ crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Dynamic	cloc
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::paint_bar	Dynamic	tag	2	2026-10-23: T-VIDEO-POINTER-AND-KEYS; paint_bar's local `tag` closure, which pushes a label's panel and its figures into the bar's layer and reaches no door
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::player_key	Ambiguous	as_str	2	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/video_seat.rs	bt-app crate::video_seat::seek_label	Ambiguous	count	1	2026-10-23: T-VIDEO-POINTER-AND-KEYS; a standard-library method (Option, bool, Iterator, Result, str, f32/f64) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/wake_owner.rs	bt-app crate::wake_owner::unbook_the_pictures	Ambiguous	zip	1	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); zips the turn's deadline owners with their deadlines, two arrays the fold already holds (gate 2); no wait
 crates/bt-app/src/watch_steward.rs	bt-app crate::watch_steward::<EarHandle as std::fmt::Debug>::fmt	Ambiguous	field	1	
 crates/bt-app/src/watch_steward.rs	bt-app crate::watch_steward::<EarHandle as std::fmt::Debug>::fmt	Ambiguous	finish	1	
 crates/bt-app/src/watch_steward.rs	bt-app crate::watch_steward::EarHandle::take_reports	Ambiguous	clone	1	
@@ -8162,6 +8165,7 @@ crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v38
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v38_to_v39	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v39_to_v40	Ambiguous	insert	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the settings migration writes resume_agents' default and its new schema number into the JSON object (Map::insert); a value rewrite in memory, no wait
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v3_to_v4	Ambiguous	insert	2	
+crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v40_to_v41	Ambiguous	insert	2	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); serde_json's Map::insert of the version and close_keeps_running, as every settings step writes its key; no wait
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v4_to_v5	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v5_to_v6	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v6_to_v7	Ambiguous	insert	2	
@@ -8914,11 +8918,6 @@ crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::arg
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::arguments_of	Ambiguous	truncate	1	
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::bsd_info	Ambiguous	cast	1	2026-11-07: T-RESUME-CARRIES-THE-AGENTS-LAUNCH-ARGUMENTS (0.4.10 plan row 74, review fold); one proc_pidinfo(PROC_PIDTBSDINFO) read on macOS, shared by the start time and the parent pid (c_int::try_from, Result::ok, pointer cast, bool::then_some; review N1); one syscall about a pid, no wait
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::bsd_info	Ambiguous	ok	2	2026-11-07: T-RESUME-CARRIES-THE-AGENTS-LAUNCH-ARGUMENTS (0.4.10 plan row 74, review fold); one proc_pidinfo(PROC_PIDTBSDINFO) read on macOS, shared by the start time and the parent pid (c_int::try_from, Result::ok, pointer cast, bool::then_some; review N1); one syscall about a pid, no wait
-crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::closable_windows_of	Ambiguous	as_bool	1	
-crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::closable_windows_of	Ambiguous	cast_signed	1	
-crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::closable_windows_of	Ambiguous	is_invalid	1	
-crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::closable_windows_of	Ambiguous	is_ok_and	1	
-crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::closable_windows_of	Ambiguous	push	1	
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::creation_of	Ambiguous	ok	1	
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::held_open	Ambiguous	cast_signed	1	
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::held_open	Ambiguous	open	1	
@@ -8949,6 +8948,11 @@ crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::sig
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::signal	Ambiguous	to_hresult	1	
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::started_of	Ambiguous	as_raw_handle	1	
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::started_of	Ambiguous	ok	1	
+crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::top_level_windows_of	Ambiguous	as_bool	1	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); closable_windows_of became top_level_windows_of(pid, reach) so the outside quit (R9) reaches every top-level window of the process; the same EnumWindows callback's in-memory calls (BOOL::as_bool, cast_signed, HWND::is_invalid, is_ok_and, Vec::push - two pushes now, one per reach); no wait
+crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::top_level_windows_of	Ambiguous	cast_signed	1	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); closable_windows_of became top_level_windows_of(pid, reach) so the outside quit (R9) reaches every top-level window of the process; the same EnumWindows callback's in-memory calls (BOOL::as_bool, cast_signed, HWND::is_invalid, is_ok_and, Vec::push - two pushes now, one per reach); no wait
+crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::top_level_windows_of	Ambiguous	is_invalid	1	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); closable_windows_of became top_level_windows_of(pid, reach) so the outside quit (R9) reaches every top-level window of the process; the same EnumWindows callback's in-memory calls (BOOL::as_bool, cast_signed, HWND::is_invalid, is_ok_and, Vec::push - two pushes now, one per reach); no wait
+crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::top_level_windows_of	Ambiguous	is_ok_and	1	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); closable_windows_of became top_level_windows_of(pid, reach) so the outside quit (R9) reaches every top-level window of the process; the same EnumWindows callback's in-memory calls (BOOL::as_bool, cast_signed, HWND::is_invalid, is_ok_and, Vec::push - two pushes now, one per reach); no wait
+crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::imp::top_level_windows_of	Ambiguous	push	2	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); closable_windows_of became top_level_windows_of(pid, reach) so the outside quit (R9) reaches every top-level window of the process; the same EnumWindows callback's in-memory calls (BOOL::as_bool, cast_signed, HWND::is_invalid, is_ok_and, Vec::push - two pushes now, one per reach); no wait
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::procargs2_arguments	Ambiguous	iter	3	
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::procargs2_arguments	Ambiguous	len	1	
 crates/bt-platform/src/install_flip.rs	bt-platform crate::install_flip::procargs2_arguments	Ambiguous	ok	1	
@@ -10490,6 +10494,7 @@ crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_disp
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_dispatch	Dynamic	(value)	2	
 crates/bt-platform/src/pump.rs	bt-platform crate::pump::windows_pump::timed_dispatch	Dynamic	inner	1	
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::answer	Dynamic	hear	1	
+crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::answer_outside_quit	Dynamic	hear	2	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); the session-end hearer handed in (bt-app's session_end::hear, the subclass's own), called for the question and then the close of Folio's quit from outside (R9); it queues the SessionEnd and returns, no wait
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::arrival_line	Ambiguous	collect	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); Iterator::map / Iterator::collect over a fixed array of (flag, word) pairs in arrival_line, a pure formatter of the session-end message: no door
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::arrival_line	Ambiguous	map	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); Iterator::map / Iterator::collect over a fixed array of (flag, word) pairs in arrival_line, a pure formatter of the session-end message: no door
 crates/bt-platform/src/session_end.rs	bt-platform crate::session_end::ask_to_be_ended_first	Ambiguous	map_err	1	2026-11-03: T-SHUTDOWN-KILLS-SHELLS-BEFORE-THE-LAYOUT-IS-SAVED (plan row 191); Result::map_err on SetProcessShutdownParameters' answer, a kernel32 call that returns at once; no door
