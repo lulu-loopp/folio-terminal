@@ -16,6 +16,13 @@
     So: one command, and it prints. `-Apply` is the only way anything is
     written, and it is never the default — see **What `-Apply` does**.
 
+    **The assets' names come out of the release statement**
+    (`RELEASE-STATEMENT.txt`, written by `release-statement.ps1`; 0.4.10 plan
+    row 102, ruling R6), because a release packed without a signature names its
+    Windows archive `folio-<version>-windows-x64-unsigned.zip` and a name
+    composed here would be the other one. The statement's line for each asset
+    must agree with the checksum file's, hash for hash, or nothing is printed.
+
     **Every value comes out of the checksum files the release page publishes**,
     which are the hashes taken over the bytes that were uploaded.
     `docs/RELEASING.md` says the same thing about winget's `InstallerSha256` and
@@ -40,7 +47,10 @@
     version — `.../v$version-preview/folio-$version-windows-x64.zip` — so this
     substitutes into those templates rather than writing a second copy of the
     shape. `checkver -u` does exactly that, and the release machine has no
-    scoop. The cask builds its own URL out of `#{version}` and needs no URL
+    scoop. **The template spells the signed name**; for a release whose archive
+    is called something else (`-unsigned`) the URL is the template's directory
+    — the tag's download path, which it still has to name — with the
+    statement's file name in it, and the template itself is left as it is. The cask builds its own URL out of `#{version}` and needs no URL
     line changed at all.
 
 .PARAMETER Version
@@ -54,12 +64,12 @@
     than published with a URL that answers 404.
 
 .PARAMETER PackageDirectory
-    Where `SHA256SUMS.txt` and `SHA256SUMS-macos.txt` are. Defaults to
+    Where `SHA256SUMS.txt`, `SHA256SUMS-macos.txt` and `RELEASE-STATEMENT.txt` are. Defaults to
     `target/release-package`, which is the directory the release page was made
     out of.
 
 .PARAMETER FromRelease
-    Fetch those two files from the release page instead, with `gh release
+    Fetch those three files from the release page instead, with `gh release
     download`. For a machine that no longer has the package directory — and for
     checking that what is on the page is what this would have written.
 
@@ -377,14 +387,16 @@ if ($FromRelease) {
     [System.IO.Directory]::CreateDirectory($into) | Out-Null
     Write-Host "reading the checksum files from $Repository at $Tag"
     & gh release download $Tag --repo $Repository --dir $into --clobber `
-        --pattern 'SHA256SUMS.txt' --pattern 'SHA256SUMS-macos.txt'
+        --pattern 'SHA256SUMS.txt' --pattern 'SHA256SUMS-macos.txt' --pattern 'RELEASE-STATEMENT.txt'
     if ($LASTEXITCODE -ne 0) { throw "gh release download exited $LASTEXITCODE" }
     $sums = Join-Path $into 'SHA256SUMS.txt'
     $macSums = Join-Path $into 'SHA256SUMS-macos.txt'
+    $statementFile = Join-Path $into 'RELEASE-STATEMENT.txt'
 }
 else {
     $sums = Join-Path $PackageDirectory 'SHA256SUMS.txt'
     $macSums = Join-Path $PackageDirectory 'SHA256SUMS-macos.txt'
+    $statementFile = Join-Path $PackageDirectory 'RELEASE-STATEMENT.txt'
 }
 foreach ($file in @($sums, $macSums)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
@@ -392,11 +404,58 @@ foreach ($file in @($sums, $macSums)) {
                'release page; -FromRelease fetches them from there.')
     }
 }
+if (-not (Test-Path -LiteralPath $statementFile -PathType Leaf)) {
+    throw ("there is no $statementFile. release-statement.ps1 writes it once both halves are in " +
+           'the package directory, and it is what names the assets; -FromRelease fetches it from the page.')
+}
 
-$archiveName = "folio-$Version-windows-x64.zip"
-$imageName = "Folio-$Version-macos-arm64.dmg"
+# **Each asset's name, out of the release statement** (ruling R6). Only the
+# `assets` block is read here, and only after the first line and the version
+# line say which statement this is: the grammar's owner is
+# `bt-winres::release_statement`, and `release-statement.ps1` has had the whole
+# statement checked by it before this runs. Answers platform -> hash and name.
+function Read-StatementAssets {
+    param([string] $Path, [string] $Version)
+
+    $lines = [System.IO.File]::ReadAllText($Path) -split "`n"
+    if ($lines[0] -cne 'folio-release-statement 1') {
+        throw "$Path is not a release statement this script reads (its first line is '$($lines[0])')"
+    }
+    if (-not ($lines -ccontains "version $Version")) {
+        throw "$Path is not the statement of Folio ${Version}: it has no line 'version $Version'"
+    }
+    $at = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -cmatch '^assets (\d+)$') { $at = $i; break }
+    }
+    if ($at -lt 0) { throw "$Path has no assets line" }
+    $count = [int]$Matches[1]
+    $assets = @{}
+    for ($i = $at + 1; $i -le $at + $count; $i++) {
+        $line = if ($i -lt $lines.Count) { $lines[$i] } else { '' }
+        if ($line -cnotmatch '^([0-9a-f]{64}) (\d+) ([a-z0-9-]+) (\S+)$') {
+            throw "$Path has an asset line this script cannot read: '$line'"
+        }
+        $assets[$Matches[3]] = [pscustomobject]@{ Hash = $Matches[1]; Name = $Matches[4] }
+    }
+    return $assets
+}
+
+$listed = Read-StatementAssets -Path $statementFile -Version $Version
+foreach ($platform in @('windows-x64', 'macos-arm64')) {
+    if (-not $listed.ContainsKey($platform)) { throw "$statementFile lists no $platform asset" }
+}
+$archiveName = $listed['windows-x64'].Name
+$imageName = $listed['macos-arm64'].Name
 $archiveHash = Get-Sum -Path $sums -Name $archiveName
 $imageHash = Get-Sum -Path $macSums -Name $imageName
+foreach ($pair in @(@($archiveName, $archiveHash, $listed['windows-x64'].Hash, $sums),
+                    @($imageName, $imageHash, $listed['macos-arm64'].Hash, $macSums))) {
+    if ($pair[1] -cne $pair[2]) {
+        throw ("$statementFile says $($pair[0]) is $($pair[2]) and $($pair[3]) says $($pair[1]): " +
+               'the statement and the checksum file are about two different files.')
+    }
+}
 
 Write-Host ''
 Write-Host "Folio $Version, tagged $Tag"
@@ -476,6 +535,14 @@ $caskText = Set-Once -Text $caskText -Pattern '(?m)^([ \t]*version )"[^"]*"' `
     -Replacement "`${1}`"$Version`"" -What 'version' -Where $cask.Source
 $caskText = Set-Once -Text $caskText -Pattern '(?m)^([ \t]*sha256 )"[^"]*"' `
     -Replacement "`${1}`"$imageHash`"" -What 'sha256' -Where $cask.Source
+# The cask spells its URL out of `#{version}`, so the image's name is one it
+# can describe only if it is the name that URL renders.
+$caskUrl = [regex]::Match($caskText, '(?m)^[ \t]*url "([^"]*)"')
+if (-not $caskUrl.Success -or
+    -not $caskUrl.Groups[1].Value.Replace('#{version}', $Version).EndsWith("/$imageName")) {
+    throw ("the statement names the macOS image $imageName, and the cask's URL in $($cask.Source) " +
+           'does not render that name')
+}
 
 # ── the bucket file: four values, three of them rendered from its own templates
 
@@ -489,20 +556,28 @@ $template = $current.autoupdate.architecture.'64bit'
 # `$version` is scoop's own placeholder and is substituted literally, not by
 # PowerShell: these strings come out of a JSON document and nothing in them is
 # an expression.
-$newUrl = $template.url.Replace('$version', $Version)
+$templateUrl = $template.url.Replace('$version', $Version)
 $newExtract = $template.extract_dir.Replace('$version', $Version)
 
 # The tag is the one thing the templates cannot check about themselves: it is
 # written into the URL as `v$version-preview`, and a release tagged otherwise
 # would be described by a manifest pointing at a page that is not there.
-if ($newUrl -notmatch [regex]::Escape("/download/$Tag/")) {
-    throw ("the bucket file's autoupdate URL renders as $newUrl, which does not name the tag " +
+if ($templateUrl -notmatch [regex]::Escape("/download/$Tag/")) {
+    throw ("the bucket file's autoupdate URL renders as $templateUrl, which does not name the tag " +
            "$Tag. The tag and the manifest are one claim; change the template in " +
            "$($scoop.Source), once, rather than this release's copy of it.")
 }
-if ($newUrl -notmatch [regex]::Escape("/$archiveName")) {
-    throw "the bucket file's autoupdate URL renders as $newUrl, which does not name $archiveName"
+# **The URL is the template's, with the statement's file name** (ruling R6):
+# the template spells the signed name, `folio-$version-windows-x64.zip`, and a
+# release packed without a signature names its archive with `-unsigned` after
+# it. Any other name is not one this template describes, and is refused.
+$templateName = $templateUrl.Substring($templateUrl.LastIndexOf('/') + 1)
+if ($archiveName -cne $templateName -and
+    $archiveName -cne ($templateName -replace '\.zip$', '-unsigned.zip')) {
+    throw ("the statement names the Windows archive $archiveName, and the bucket file's autoupdate " +
+           "URL renders as $templateUrl, which names neither it nor its unsigned spelling")
 }
+$newUrl = $templateUrl.Substring(0, $templateUrl.LastIndexOf('/') + 1) + $archiveName
 
 $scoopText = Set-Once -Text $scoopText -Pattern '(?m)^([ \t]*"version":[ \t]*)"[^"]*"' `
     -Replacement "`${1}`"$Version`"" -What 'version' -Where $scoop.Source

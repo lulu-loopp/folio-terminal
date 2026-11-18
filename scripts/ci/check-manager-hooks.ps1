@@ -141,6 +141,14 @@ try {
     $dmgHash = 'b' * 64
     [IO.File]::WriteAllText((Join-Path $package 'SHA256SUMS.txt'), "$zipHash  folio-9.8.7-windows-x64.zip`n")
     [IO.File]::WriteAllText((Join-Path $package 'SHA256SUMS-macos.txt'), "$dmgHash  Folio-9.8.7-macos-arm64.dmg`n")
+    # The release statement names the assets (0.4.10 plan row 102, ruling R6);
+    # `update-manifests.ps1` reads its `assets` block and nothing else of it.
+    [IO.File]::WriteAllText((Join-Path $package 'RELEASE-STATEMENT.txt'), ((@(
+                'folio-release-statement 1', 'product folio', 'version 9.8.7', 'tag v9.8.7-preview',
+                'date 2026-11-18', 'key 0123456789abcdef', 'min_from 0.4.6', 'authenticode true', 'retires 0',
+                'assets 2', "$zipHash 10 windows-x64 folio-9.8.7-windows-x64.zip",
+                "$dmgHash 10 macos-arm64 Folio-9.8.7-macos-arm64.dmg",
+                'members windows-x64 1', "$('c' * 64) 3 folio.exe") -join "`n") + "`n"))
     $said = & $pwsh -NoProfile -NonInteractive -File $renderer -Version 9.8.7 -PackageDirectory $package `
         -CaskFile $caskPath -ScoopFile $scoopPath -OutDirectory $rendered 2>&1
     Check ($LASTEXITCODE -eq 0) "update-manifests.ps1 renders the two sources ($(@($said)[-1]))"
