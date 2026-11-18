@@ -7862,6 +7862,9 @@ crates/bt-detect/src/table.rs	bt-detect crate::table::strip_edge_pipes	Ambiguous
 crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::delete_transaction	Ambiguous	and_then	1	
 crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::delete_transaction	Ambiguous	contains	1	
 crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::delete_transaction	Ambiguous	map_or	1	
+crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::finalize_transaction	Ambiguous	contains	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105, review fold P2-1); a freeze over an id the document already holds keeps the replaced entry's staging keys beside its own: slice::contains, Vec::extend and Vec::into_boxed_slice (std); in memory, no door
+crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::finalize_transaction	Ambiguous	extend	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105, review fold P2-1); a freeze over an id the document already holds keeps the replaced entry's staging keys beside its own: slice::contains, Vec::extend and Vec::into_boxed_slice (std); in memory, no door
+crates/bt-doc/src/document.rs	bt-doc crate::document::HistoryDocument::finalize_transaction	Ambiguous	into_boxed_slice	1	2026-11-18: T-FULL-SCROLLBACK-FEEDS-SLOW-AND-GROWS (0.4.10 plan row 105, review fold P2-1); a freeze over an id the document already holds keeps the replaced entry's staging keys beside its own: slice::contains, Vec::extend and Vec::into_boxed_slice (std); in memory, no door
 crates/bt-effects/src/admission.rs	bt-effects crate::admission::admitted	Ambiguous	contains	1	
 crates/bt-effects/src/admission.rs	bt-effects crate::admission::admitted	Ambiguous	with	1	
 crates/bt-effects/src/admission.rs	bt-effects crate::admission::admitted	Dynamic	(value)	2	
