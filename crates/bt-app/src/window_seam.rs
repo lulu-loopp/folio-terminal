@@ -308,8 +308,18 @@ pub(crate) trait WindowHost {
     /// The keyboard focus taken back into the window from whatever child holds it (a page) —
     /// `bt_platform::take_keyboard_focus`.
     fn take_keyboard_focus(&self) -> Result<(), String>;
-    /// The window asked to close, as its own close button asks — `bt_platform::request_window_close`.
-    fn request_close(&self) -> Result<(), String>;
+    /// The window asked to close, as Folio's own request by `road` —
+    /// `bt_platform::request_window_close`, which carries the road in the message (0.4.10 plan
+    /// row 103).
+    fn request_close(&self, road: bt_platform::close_road::OwnCloseRoad) -> Result<(), String>;
+    /// **Folio's window from now on, to the close witness**: every close the window thread's hooks
+    /// see reach it is kept for its `CloseRequested` — `bt_platform::close_road::watch_closes`.
+    fn watch_closes(&self);
+    /// **What the platform saw of the close request this window has just received**, taken —
+    /// `bt_platform::close_road::take_close_arrival`; `None` when nothing was witnessed.
+    fn take_close_arrival(&self) -> Option<bt_platform::close_road::CloseArrival>;
+    /// The window has gone: the close witness forgets it — `bt_platform::close_road::unwatch_closes`.
+    fn unwatch_closes(&self);
     /// The taskbar button flashed for attention — `bt_platform::flash_window`.
     fn flash(&self);
     /// The taskbar button's flash stopped — `bt_platform::stop_flashing_window`.
@@ -521,8 +531,23 @@ impl WindowHost for Arc<Window> {
     fn take_keyboard_focus(&self) -> Result<(), String> {
         bt_platform::take_keyboard_focus(native_or_say(self)?)
     }
-    fn request_close(&self) -> Result<(), String> {
-        bt_platform::request_window_close(native_or_say(self)?)
+    fn request_close(&self, road: bt_platform::close_road::OwnCloseRoad) -> Result<(), String> {
+        bt_platform::request_window_close(native_or_say(self)?, road)
+    }
+    fn watch_closes(&self) {
+        if let Ok(native) = crate::native_window_of(self) {
+            bt_platform::close_road::watch_closes(native);
+        }
+    }
+    fn take_close_arrival(&self) -> Option<bt_platform::close_road::CloseArrival> {
+        crate::native_window_of(self)
+            .ok()
+            .and_then(bt_platform::close_road::take_close_arrival)
+    }
+    fn unwatch_closes(&self) {
+        if let Ok(native) = crate::native_window_of(self) {
+            bt_platform::close_road::unwatch_closes(native);
+        }
     }
     fn flash(&self) {
         if let Ok(native) = crate::native_window_of(self) {

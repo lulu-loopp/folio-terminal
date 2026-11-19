@@ -391,11 +391,52 @@ pub fn is_storage_writer() -> bool {
 pub(crate) fn is_writer_of(directory: &Path) -> bool {
     let name = bt_platform::instance::claim_name(directory);
     let mut table = claim_table();
-    if let Some(answer) = table.get(&name) {
-        return answer.is_some();
+    if let Some(row) = table.get(&name) {
+        return row.claim.is_some();
     }
+    #[cfg(test)]
+    let_go_of_the_claims_on_removed_directories(&mut table);
     let answer = bt_platform::instance::try_claim_data_directory(directory);
-    remember_claim_answer(&mut table, name, answer)
+    remember_claim_answer(&mut table, name, directory, answer)
+}
+
+/// **One row of the claim table**: the claim this process took on a directory (it is the writer,
+/// and the guard lives here), or `None` (it asked and was refused) — and, in a test build, the
+/// directory it was asked of, which is how the test build's
+/// `let_go_of_the_claims_on_removed_directories` knows a test's directory is gone.
+struct ClaimRow {
+    claim: Option<bt_platform::instance::DataDirectoryClaim>,
+    #[cfg(test)]
+    directory: PathBuf,
+}
+
+impl ClaimRow {
+    fn of(directory: &Path, claim: Option<bt_platform::instance::DataDirectoryClaim>) -> Self {
+        #[cfg(not(test))]
+        let _ = directory;
+        Self {
+            claim,
+            #[cfg(test)]
+            directory: directory.to_path_buf(),
+        }
+    }
+}
+
+/// **A test's data directory, once removed, is nobody's**, so the claim this process holds on it
+/// is let go: the lock's descriptor closed and its file unlinked (`DataDirectoryClaim`'s drop),
+/// and a refusal of it forgotten (0.4.10 plan row 103, the Mac filter's two reds).
+///
+/// The product has one data directory and holds its claim for the life of the process. A test
+/// process opens a store in a scratch directory of its own for nearly every test — each one asks
+/// [`is_writer_of`], each claim holds a descriptor — and removes the directory when the test is
+/// done. Kept for the life of the process, those claims were a descriptor per test ever run: 266
+/// of the 338 the bt-app test binary held open under row 103's filter on macOS, where a process
+/// starts with 256, so whichever test opened a file next past that was refused "Too many open
+/// files" — which tests ran beside it decided which test failed. Asked before each new claim, so
+/// the table holds the claims of the directories that are still there.
+#[cfg(test)]
+fn let_go_of_the_claims_on_removed_directories(table: &mut HashMap<String, ClaimRow>) {
+    table.retain(|_, row| row.directory.exists());
 }
 
 /// Keep a settled claim answer for this process. `Sweeping` is not an answer
@@ -403,13 +444,14 @@ pub(crate) fn is_writer_of(directory: &Path) -> bool {
 /// the next [`is_writer_of`] ask goes to the platform again instead of
 /// inheriting a refusal from the sweep.
 fn remember_claim_answer(
-    table: &mut HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>,
+    table: &mut HashMap<String, ClaimRow>,
     name: String,
+    directory: &Path,
     answer: Result<bt_platform::instance::DataDirectoryClaim, bt_platform::instance::ClaimRefusal>,
 ) -> bool {
     match answer {
         Ok(claim) => {
-            table.insert(name, Some(claim));
+            table.insert(name, ClaimRow::of(directory, Some(claim)));
             true
         }
         Err(bt_platform::instance::ClaimRefusal::Sweeping) => false,
@@ -417,7 +459,7 @@ fn remember_claim_answer(
             bt_platform::instance::ClaimRefusal::Held
             | bt_platform::instance::ClaimRefusal::QueryDenied(_),
         ) => {
-            table.insert(name, None);
+            table.insert(name, ClaimRow::of(directory, None));
             false
         }
     }
@@ -438,7 +480,7 @@ pub(crate) fn let_go_of_every_claim() {
         Err(std::sync::TryLockError::WouldBlock) => return,
     };
     for row in table.values_mut() {
-        *row = None;
+        row.claim = None;
     }
 }
 
@@ -447,20 +489,15 @@ pub(crate) fn let_go_of_every_claim() {
 /// the process) or `None` (it asked and was refused). Written by
 /// [`is_writer_of`] on a first settled ask and by [`adopt_claim`]; a transient
 /// sweep leaves no row. Read by nothing else.
-fn claim_table() -> std::sync::MutexGuard<
-    'static,
-    HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>,
-> {
+fn claim_table() -> std::sync::MutexGuard<'static, HashMap<String, ClaimRow>> {
     claims()
         .lock()
         .expect("the claim table is locked to read or take one entry and nothing else")
 }
 
 /// The table [`claim_table`] locks.
-fn claims() -> &'static Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>> {
-    static CLAIMS: OnceLock<
-        Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>>,
-    > = OnceLock::new();
+fn claims() -> &'static Mutex<HashMap<String, ClaimRow>> {
+    static CLAIMS: OnceLock<Mutex<HashMap<String, ClaimRow>>> = OnceLock::new();
     CLAIMS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -507,10 +544,10 @@ pub(crate) fn adopt_claim(directory: &Path, claim: bt_platform::instance::DataDi
     // after it, so that a debug stop never leaves the table poisoned.
     let earlier = match claim_table().entry(name.clone()) {
         std::collections::hash_map::Entry::Vacant(row) => {
-            row.insert(Some(claim));
+            row.insert(ClaimRow::of(directory, Some(claim)));
             None
         }
-        std::collections::hash_map::Entry::Occupied(row) => Some(row.get().is_some()),
+        std::collections::hash_map::Entry::Occupied(row) => Some(row.get().claim.is_some()),
     };
     if let Some(was_writer) = earlier {
         crate::diagnostics::stderr_line(format!(
@@ -6377,6 +6414,38 @@ pub(crate) mod tests {
         claim_table().contains_key(&bt_platform::instance::claim_name(directory))
     }
 
+    /// RED (mutation: drop the `let_go_of_the_claims_on_removed_directories` call from
+    /// `is_writer_of`) — **a test's data directory, once removed, leaves the claim table, and the
+    /// claim on it is let go** (0.4.10 plan row 103): the next directory claimed finds no row for
+    /// the first, so the test process holds a claim, and its descriptor, only for the directories
+    /// that are still there — not one for every test it ever ran, which on macOS ran out at 256.
+    #[test]
+    fn a_removed_directorys_claim_is_let_go_at_the_next_claim() {
+        let first = bt_testpath::temp_path("claim-removed-first");
+        let second = bt_testpath::temp_path("claim-removed-second");
+        std::fs::create_dir_all(&first).expect("the first directory");
+        std::fs::create_dir_all(&second).expect("the second directory");
+        assert!(
+            is_writer_of(&first),
+            "the first directory is this process's"
+        );
+        let first_name = bt_platform::instance::claim_name(&first);
+        std::fs::remove_dir_all(&first).expect("the first directory is removed");
+        assert!(
+            is_writer_of(&second),
+            "the second directory is this process's"
+        );
+        assert!(
+            !claim_table().contains_key(&first_name),
+            "the removed directory's claim is let go"
+        );
+        assert!(
+            the_claim_table_has_answered_for(&second),
+            "the directory still there keeps its claim"
+        );
+        let _ = std::fs::remove_dir_all(&second);
+    }
+
     /// RED (B-EXPLORER-CLAIM) — **`--explorer-command`'s language lookup reads
     /// the language and leaves the data directory's claim free, with no answer
     /// remembered in this process's claim table and nothing written in the
@@ -6594,6 +6663,7 @@ pub(crate) mod tests {
         assert!(!remember_claim_answer(
             &mut table,
             name.clone(),
+            Path::new("swept-directory"),
             Err(bt_platform::instance::ClaimRefusal::Sweeping),
         ));
         assert!(

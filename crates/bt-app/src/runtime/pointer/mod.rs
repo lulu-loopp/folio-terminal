@@ -188,6 +188,30 @@ impl<B: Backend> Runtime<'_, B> {
         crate::platform_pointer_of(self.window.window.pointer_in_window())
     }
 
+    /// **Where the pointer was when a close request arrived, named by this window's chrome**
+    /// (0.4.10 plan row 103): the close witness's reading, in this window's own physical pixels,
+    /// asked of the chrome here, where every pointer read belongs. The window's `×` is the close
+    /// button whether the system's caption or Folio's chrome drew it.
+    pub(in crate::runtime) fn pointer_at_close(
+        &mut self,
+        pointer: Option<bt_platform::close_road::ClosePointer>,
+    ) -> crate::exit_diagnostics::PointerAtClose {
+        use crate::exit_diagnostics::PointerAtClose;
+        use bt_platform::close_road::ClosePointer;
+        match pointer {
+            None | Some(ClosePointer::Unread) => PointerAtClose::Unread,
+            Some(ClosePointer::Outside) => PointerAtClose::Outside,
+            Some(ClosePointer::OnCloseButton) => PointerAtClose::CloseButton,
+            Some(ClosePointer::InWindow { x, y }) => {
+                match self.chrome_target_at(PhysicalPosition::new(f64::from(x), f64::from(y))) {
+                    Some(seats::ChromeTarget::CloseWindow) => PointerAtClose::CloseButton,
+                    Some(_) => PointerAtClose::Chrome,
+                    None => PointerAtClose::Window,
+                }
+            }
+        }
+    }
+
     /// **The one door every pointer event of a window comes through**
     /// (T-POINTER-CAPTURE cut 1). The dispatcher hands over each event
     /// [`is_pointer_event`] names; a pointer entering the window asks nothing,

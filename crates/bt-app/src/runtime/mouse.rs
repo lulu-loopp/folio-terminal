@@ -4134,7 +4134,7 @@ impl<B: Backend> Runtime<'_, B> {
                     .set_maximized(!self.window.window.is_maximized());
             }
             seats::ChromeTarget::CloseWindow => {
-                self.request_window_close()
+                self.request_window_close(bt_platform::close_road::OwnCloseRoad::CaptionButton)
                     .context("request self-drawn caption close")?;
             }
             // **The rail, on none of its controls.** Nothing happens, and the

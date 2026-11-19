@@ -303,12 +303,16 @@ fn registered_name(_id: u32) -> Option<String> {
 }
 
 /// **Start timing every message the calling thread's window procedures are
-/// sent**, and give [`timed_dispatch`] the pair to time posted ones with.
+/// sent**, give [`timed_dispatch`] the pair to time posted ones with, and start
+/// the close witness ([`crate::close_road`]) on this thread.
 ///
-/// Called once, on the window thread, before the event loop is built: the two
+/// Called once, on the window thread, before the event loop is built: the three
 /// hooks are this thread's (`SetWindowsHookEx` with this thread's id and no
 /// module), so they see this thread's windows and nobody else's, and they end
-/// with the thread.
+/// with the thread. `WH_CALLWNDPROC` and `WH_CALLWNDPROCRET` time every sent
+/// message and tell the witness of a sent close; `WH_GETMESSAGE` is the
+/// witness's alone and hears every posted message the thread takes, from any
+/// pump (0.4.10 plan row 103).
 ///
 /// # Errors
 ///
@@ -330,6 +334,8 @@ pub fn time_messages(_timing: Timing) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(all(windows, test))]
+pub(crate) use windows_pump::install_witness;
 #[cfg(windows)]
 pub use windows_pump::timed_dispatch;
 
@@ -341,9 +347,11 @@ mod windows_pump {
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CWPSTRUCT, CallNextHookEx, DispatchMessageW, MSG, SetWindowsHookExW, TranslateMessage,
-        WH_CALLWNDPROC, WH_CALLWNDPROCRET,
+        CWPRETSTRUCT, CWPSTRUCT, CallNextHookEx, DispatchMessageW, MSG, PM_REMOVE,
+        SetWindowsHookExW, TranslateMessage, WH_CALLWNDPROC, WH_CALLWNDPROCRET, WH_GETMESSAGE,
     };
+
+    use crate::close_road::{is_close_message, windows_close_road};
 
     use super::Timing;
 
@@ -351,19 +359,52 @@ mod windows_pump {
     /// [`timed_dispatch`], on the window thread.
     static TIMING: OnceLock<Timing> = OnceLock::new();
 
+    thread_local! {
+        /// Whether this thread's hooks time what they see: set by [`install`], and never by
+        /// [`install_witness`], whose thread is not the window thread.
+        static TIMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
     pub(super) fn install(timing: Timing) -> Result<(), String> {
         let _ = TIMING.set(timing);
+        TIMED.with(|timed| timed.set(true));
+        install_hooks()
+    }
+
+    /// **The three hooks on the calling thread, timing nothing**: the close witness alone, for
+    /// a thread whose messages the process's one pair does not time.
+    #[cfg(test)]
+    pub(crate) fn install_witness() -> Result<(), String> {
+        install_hooks()
+    }
+
+    /// The pair, when this thread's hooks time what they see.
+    fn this_threads_timing() -> Option<&'static Timing> {
+        TIMED
+            .with(std::cell::Cell::get)
+            .then(|| TIMING.get())
+            .flatten()
+    }
+
+    fn install_hooks() -> Result<(), String> {
         // SAFETY: a read with no arguments.
         let thread = unsafe { GetCurrentThreadId() };
-        // SAFETY: both procedures are `extern "system"` functions with the
+        // SAFETY: the three procedures are `extern "system"` functions with the
         // `HOOKPROC` signature that live for the whole program; no module is
         // passed because the hook is this thread's and the procedures are in
         // this image.
+        //
+        // **The third is the close witness's** (0.4.10 plan row 103): every posted
+        // message the thread takes off its queue, from winit's pump or from any
+        // nested modal loop's — which `timed_dispatch` below, being winit's hook,
+        // does not see.
         unsafe {
             SetWindowsHookExW(WH_CALLWNDPROC, Some(before_sent), None, thread)
                 .map_err(|error| format!("SetWindowsHookEx(WH_CALLWNDPROC): {error}"))?;
             SetWindowsHookExW(WH_CALLWNDPROCRET, Some(after_sent), None, thread)
                 .map_err(|error| format!("SetWindowsHookEx(WH_CALLWNDPROCRET): {error}"))?;
+            SetWindowsHookExW(WH_GETMESSAGE, Some(taken_posted), None, thread)
+                .map_err(|error| format!("SetWindowsHookEx(WH_GETMESSAGE): {error}"))?;
         }
         Ok(())
     }
@@ -372,25 +413,63 @@ mod windows_pump {
     ///
     /// A negative code is Windows' word for "pass this on and do nothing
     /// else", which is the documented contract of every hook procedure.
+    ///
+    /// **And the close witness hears a close here** (0.4.10 plan row 103): this
+    /// hook's `wParam` is nonzero when another thread sent the message
+    /// (`close_road::CloseDelivery::of_sent`, measured).
     unsafe extern "system" fn before_sent(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0
-            && let Some(timing) = TIMING.get()
-        {
+        if code >= 0 {
             // SAFETY: for this hook `lparam` is a live `*const CWPSTRUCT` for
-            // the length of the call; one field is read by value.
-            let message = unsafe { &*(lparam.0 as *const CWPSTRUCT) }.message;
-            (timing.began)(message);
+            // the length of the call; its fields are read by value.
+            let sent = unsafe { &*(lparam.0 as *const CWPSTRUCT) };
+            if is_close_message(sent.message, sent.wParam.0) {
+                windows_close_road::heard_sent(
+                    sent.hwnd,
+                    sent.message,
+                    sent.wParam.0,
+                    sent.lParam.0,
+                    wparam.0 != 0,
+                );
+            }
+            if let Some(timing) = this_threads_timing() {
+                (timing.began)(sent.message);
+            }
         }
         // SAFETY: the arguments are the ones this procedure was called with.
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
     }
 
     /// `WH_CALLWNDPROCRET`: the procedure a sent message reached has returned.
+    ///
+    /// The close witness is told when a sent `SC_CLOSE` is over.
     unsafe extern "system" fn after_sent(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0
-            && let Some(timing) = TIMING.get()
-        {
-            (timing.ended)();
+        if code >= 0 {
+            // SAFETY: for this hook `lparam` is a live `*const CWPRETSTRUCT`
+            // for the length of the call; its fields are read by value.
+            let returned = unsafe { &*(lparam.0 as *const CWPRETSTRUCT) };
+            windows_close_road::sent_returned(returned.hwnd, returned.message, returned.wParam.0);
+            if let Some(timing) = this_threads_timing() {
+                (timing.ended)();
+            }
+        }
+        // SAFETY: the arguments are the ones this procedure was called with.
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    /// `WH_GETMESSAGE`: the thread took a message off its queue — the close
+    /// witness's posted road (0.4.10 plan row 103). A peek that leaves the
+    /// message where it is (`PM_NOREMOVE`) is not a taking.
+    unsafe extern "system" fn taken_posted(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 && wparam.0 == PM_REMOVE.0 as usize {
+            // SAFETY: for this hook `lparam` is a live `*mut MSG` for the
+            // length of the call; its fields are read by value.
+            let taken = unsafe { &*(lparam.0 as *const MSG) };
+            windows_close_road::heard_posted(
+                taken.hwnd,
+                taken.message,
+                taken.wParam.0,
+                taken.lParam.0,
+            );
         }
         // SAFETY: the arguments are the ones this procedure was called with.
         unsafe { CallNextHookEx(None, code, wparam, lparam) }
