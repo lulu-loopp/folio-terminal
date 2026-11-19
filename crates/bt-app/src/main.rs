@@ -10163,14 +10163,16 @@ fn the_close_was_asked_by_the_shells_exit<B: Backend>(window: &WindowRuntime<B>)
 
 /// **A `WM_CLOSE` reached a put-away window, and was ignored** (`CloseFate::AlreadyAway`): said once
 /// per run, in `diagnostics.log`, so that a tool which closes every top-level window it finds is
-/// seen once and not once a minute.
-fn a_close_reached_a_put_away_window() {
+/// seen once and not once a minute — with the road the request came by (`road`, the close line's
+/// `road=` word; review P1-2), so the tool is named by what it sent.
+fn a_close_reached_a_put_away_window(road: &str) {
     static A_PUT_AWAY_CLOSE_SAID: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
     if !A_PUT_AWAY_CLOSE_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        diagnostics::note(
-            "BT_PUT_AWAY a close reached the put-away window and was ignored; said once per run",
-        );
+        diagnostics::note(&format!(
+            "BT_PUT_AWAY a close reached the put-away window and was ignored; road={road}; said \
+             once per run"
+        ));
     }
 }
 
@@ -12146,8 +12148,9 @@ struct WindowRuntime<B: Backend = Native> {
     /// **The window is put away** (0.4.10 plan row 87, part 87a): the run's last ordinary window,
     /// hidden by a close that kept the run (`Runtime::put_the_window_away`), with every tab, shell
     /// and agent in it still running. Set there, cleared by the one door that brings it back
-    /// (`Runtime::bring_the_window_back_on_the_glass`); a `WM_CLOSE` that reaches it while set is
-    /// ignored (`CloseFate::AlreadyAway`).
+    /// (`Runtime::bring_the_window_back_on_the_glass`) and by every road that lets the window go
+    /// (`Runtime::let_go_of_this_window`); a `WM_CLOSE` that reaches it while set is ignored
+    /// (`CloseFate::AlreadyAway`), and gate 1 reads it (`runtime::frame::window_is_hidden`).
     put_away: bool,
     /// **How this window's close was asked for** (0.4.10 plan row 103): what the close witness
     /// saw of the request and where the pointer was, taken when the request arrived
@@ -48058,6 +48061,15 @@ impl<B: Backend> FolioApp<B> {
         if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
             return Ok(());
         }
+        // **Nor while the system's end holds the document** (0.4.10 plan row 87, part 87a, review
+        // P1-1): Folio's quit from outside, the uninstaller's ask and the session's end each hold
+        // the layout as it stood at the question, and the `WM_CLOSE` posted after the outside
+        // quit for older builds arrives before the settle that writes it. A close that went ahead
+        // would file a window into Recent that the held layout also restores — the quit's own
+        // rule above, 「一颗种子都不进 Recent」, for the system's end.
+        if session_end::holds_the_document() {
+            return Ok(());
+        }
         // **Asked before the window is told, because it decides what the close
         // means** (multiwindow slice D, ruling ②). The last window's shut is the
         // process ending and its picture stays in the file; any other window's is
@@ -48083,7 +48095,9 @@ impl<B: Backend> FolioApp<B> {
         match self.close_fate(id) {
             CloseFate::PutAway => return self.put_the_run_away(id),
             CloseFate::AlreadyAway => {
-                a_close_reached_a_put_away_window();
+                if let Some(mut runtime) = self.runtime(id) {
+                    runtime.ignore_the_close_while_away();
+                }
                 return Ok(());
             }
             CloseFate::Shut | CloseFate::ShutWhileAway => {}
@@ -48110,12 +48124,11 @@ impl<B: Backend> FolioApp<B> {
         };
         // **The window's one close line** (0.4.10 plan row 103): which window, by which road,
         // and what it held — read before it is taken apart.
-        let how = exit_diagnostics::ClosedHow::Asked(runtime.take_close_asked().unwrap_or(
-            exit_diagnostics::CloseAsked {
-                arrival: None,
-                pointer: exit_diagnostics::PointerAtClose::Unread,
-            },
-        ));
+        let how = exit_diagnostics::ClosedHow::Asked(
+            runtime
+                .take_close_asked()
+                .unwrap_or(exit_diagnostics::CloseAsked::UNMARKED),
+        );
         let facts = runtime.closed_facts(summon, windows_left);
         let closed = runtime.close_window(ending);
         // Set whatever the teardown answered: a child that refused to die is
@@ -48248,9 +48261,10 @@ impl<B: Backend> FolioApp<B> {
     }
 
     /// **Put the run away with its last ordinary window** (0.4.10 plan row 87, part 87a): the
-    /// window's own half is [`Runtime::put_the_window_away`]; the run's is nothing at all — no
-    /// summon retired, no spare retired, no `App::finish`, no last-window line — which is the whole
-    /// of the difference from [`Self::close`].
+    /// window's own half is [`Runtime::put_the_window_away`], which spends the close's record and
+    /// says the put-away's own close line; the run's is nothing at all — no summon retired, no
+    /// spare retired, no `App::finish`, no last-window line — which is the whole of the
+    /// difference from [`Self::close`].
     fn put_the_run_away(&mut self, id: WindowId) -> Result<()> {
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
@@ -48280,8 +48294,10 @@ impl<B: Backend> FolioApp<B> {
             if !runtime.bring_the_window_back_on_the_glass()? {
                 continue;
             }
+            // Through the note door (review P2-10): a resident run's `stderr` may be a file
+            // nobody reads, and `diagnostics.log` is where its lines are looked for.
             if let Err(error) = bring_owned_window_forward(&runtime.window.window) {
-                crate::diagnostics::stderr_line(format!("BT_PUT_AWAY {error}"));
+                crate::diagnostics::note(&format!("BT_PUT_AWAY {error}"));
             }
             brought = Some(id);
         }
@@ -52257,6 +52273,16 @@ impl<B: Backend> FolioApp<B> {
                     return;
                 }
             }
+            // **While the system's end holds the document, a close closes nothing** (0.4.10 plan
+            // row 87, part 87a, review P1-1; `FolioApp::close` says why): the request's record is
+            // spent and the window is neither put away nor asked about — ahead of `close_fate_of`,
+            // which would note the arrival for a close that is never performed.
+            if matches!(event, WindowEvent::CloseRequested) && session_end::holds_the_document() {
+                if let Some(mut runtime) = self.runtime(window_id) {
+                    runtime.spend_close_arrival();
+                }
+                return;
+            }
             // **The road a `WM_CLOSE` takes, read before the window is lent out** (0.4.10 plan row
             // 87, part 87a): `close_fate` asks of the whole registry, which the borrow below would
             // hold; the request's arrival is noted on the way (row 103).
@@ -52297,6 +52323,10 @@ impl<B: Backend> FolioApp<B> {
             // inside the close — past that line the window is gone, and a question
             // asked after the answer is worthless.
             let mut shutting = false;
+            // **A put-away window whose shells' exit raised a question is brought back to ask it**
+            // (review P2-2), through the one door back (`Self::bring_the_window_back`) once the
+            // borrow below is given back, as `shutting` is spent.
+            let mut bring_back = false;
             // **The handler this event is about to be given to, named before it is
             // given** — see [`window_event_station`]. Opened here and not at the
             // door above, so the lookup, the three gates and the wheel burst stay
@@ -52343,26 +52373,21 @@ impl<B: Backend> FolioApp<B> {
                 // ahead of the dirty gate, for that arm's reason: nothing is lost, so nothing is
                 // asked. A `WM_CLOSE` that reaches it while it is away is ignored, said once.
                 //
-                // Neither closes the window, so the request `close_fate_of` noted is spent here: no
-                // later close is said to have come by its road (0.4.10 plan row 103).
+                // Neither closes the window, so the request `close_fate_of` noted is spent by each:
+                // the put-away says it on its own close line, the ignored close names its road in
+                // the once-a-run note (0.4.10 plan row 103; review P1-2).
                 WindowEvent::CloseRequested if close_fate == CloseFate::PutAway => {
-                    let _ = runtime.take_close_asked();
                     runtime.put_the_window_away()
                 }
                 WindowEvent::CloseRequested if close_fate == CloseFate::AlreadyAway => {
-                    let _ = runtime.take_close_asked();
-                    a_close_reached_a_put_away_window();
+                    runtime.ignore_the_close_while_away();
                     Ok(())
                 }
                 WindowEvent::CloseRequested if close_fate == CloseFate::ShutWhileAway => runtime
                     .raise_dirty_gate(restore::GateRequest::Shut)
-                    .and_then(|raised| {
+                    .map(|raised| {
                         shutting = raised.proceeds();
-                        if shutting {
-                            Ok(())
-                        } else {
-                            runtime.bring_the_window_back_on_the_glass().map(|_| ())
-                        }
+                        bring_back = !shutting;
                     }),
                 WindowEvent::CloseRequested => {
                     // **Which road this request came by was taken as it arrived** (0.4.10 plan row
@@ -52565,6 +52590,11 @@ impl<B: Backend> FolioApp<B> {
                 result.and(hang_watch::during(hang_watch::Station::EventShut, || {
                     self.close(window_id)
                 }))
+            } else {
+                result
+            };
+            let result = if bring_back {
+                result.and_then(|()| self.bring_the_window_back().map(|_| ()))
             } else {
                 result
             };
@@ -58325,15 +58355,23 @@ impl RestoreMonitor {
 /// gives the arrangement, and Win32 gives each monitor's work area — the taskbar's strip is not a
 /// fact winit reports, and it is exactly the strip a restored window must not open under.
 fn restore_monitors(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitor> {
-    let primary = event_loop.primary_monitor();
+    restore_monitors_of(
+        event_loop.primary_monitor(),
+        event_loop.available_monitors(),
+    )
+}
+
+/// [`restore_monitors`] from the monitors a platform names — an event loop's, or a window's
+/// (`WindowHost::monitors_to_restore_on`, which a put-away window's way back asks: 0.4.10 plan
+/// row 87, part 87a, review P2-3) — **primary first**.
+fn restore_monitors_of(
+    primary: Option<winit::monitor::MonitorHandle>,
+    available: impl Iterator<Item = winit::monitor::MonitorHandle>,
+) -> Vec<RestoreMonitor> {
     primary
         .clone()
         .into_iter()
-        .chain(
-            event_loop
-                .available_monitors()
-                .filter(|monitor| Some(monitor) != primary.as_ref()),
-        )
+        .chain(available.filter(|monitor| Some(monitor) != primary.as_ref()))
         .map(|monitor| {
             let scale = monitor.scale_factor().max(f64::MIN_POSITIVE);
             let origin = monitor.position();

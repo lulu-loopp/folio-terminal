@@ -615,15 +615,6 @@ fn a_window_on_no_screen_still_asks_the_platform_for_its_paint() {
             true,
         ),
         ("not shown yet", PlatformAnswers::default(), false),
-        // Put away (0.4.10 plan row 87, part 87a, gate 1): shown once, and not visible now.
-        (
-            "shown, then hidden",
-            PlatformAnswers {
-                visible: Some(false),
-                ..PlatformAnswers::default()
-            },
-            true,
-        ),
     ] {
         let (mut folio, settled) = window_saying("turn-present-hidden", "PS> ");
         folio.window.window.answers.set(answers);
@@ -645,10 +636,10 @@ fn a_window_on_no_screen_still_asks_the_platform_for_its_paint() {
 
 /// RED (T5; 0.4.10 plan row 87, part 87a, gates 1 and 2) — **a put-away window presents nothing,
 /// and its turn books no picture's clock**: a working agent's mark steps and a pane's output are
-/// turned through with the window shown once and not visible now, and no turn presents; every wake
-/// the turns book is a state's (`WakeOwner::draws_a_picture` false), never the mark's next step.
+/// turned through with the window put away, and no turn presents; every wake the turns book is a
+/// state's (`WakeOwner::draws_a_picture` false), never the mark's next step.
 ///
-/// PLANT P5: drop the visibility term from `window_is_hidden` — the turns present. PLANT P6:
+/// PLANT P5: drop the put-away term from `window_is_hidden` — the mark's step is booked. PLANT P6:
 /// answer `false` for `WakeOwner::StripAnimation` in `draws_a_picture` — the mark's step is booked.
 #[test]
 fn a_put_away_window_presents_nothing_and_books_no_picture() {
@@ -657,10 +648,7 @@ fn a_put_away_window_presents_nothing_and_books_no_picture() {
         folio.window.tabs[0].fleet_working(),
         "the fixture's own precondition: the shell's command is running, so the mark breathes"
     );
-    folio.window.window.answers.set(PlatformAnswers {
-        visible: Some(false),
-        ..PlatformAnswers::default()
-    });
+    folio.window.put_away = true;
     folio.window.window_shown = true;
     for step in 0..3 {
         now += STEP;
@@ -682,6 +670,34 @@ fn a_put_away_window_presents_nothing_and_books_no_picture() {
             "step {step}: the turn booked a picture's clock: {wake:?}"
         );
     }
+}
+
+/// RED (0.4.10 plan row 87, part 87a, review P2-6) — **gate 1 keys on the put-away, not on the
+/// window's visibility**: a window macOS ordered out with its hidden application (`Cmd+H`) — shown,
+/// not visible now, not put away — is read as it always was, on the glass, and its turns present
+/// as before; the same window put away is hidden.
+///
+/// PLANT P24: read the visibility again in `window_is_hidden` (`|| window.is_visible() ==
+/// Some(false)`) — the hidden application's window is hidden.
+#[test]
+fn a_window_ordered_out_with_its_hidden_application_is_not_put_away() {
+    let (mut folio, _) = window_saying("turn-present-cmd-h", "PS> ");
+    folio.window.window.answers.set(PlatformAnswers {
+        visible: Some(false),
+        ..PlatformAnswers::default()
+    });
+    folio.window.window_shown = true;
+    folio.runtime().observe_window_place();
+    assert!(
+        !folio.window.observed_place.hidden,
+        "a window its application's hide ordered out is not hidden to gate 1"
+    );
+    folio.window.put_away = true;
+    folio.runtime().observe_window_place();
+    assert!(
+        folio.window.observed_place.hidden,
+        "and the same window put away is"
+    );
 }
 
 /// RED — **a turn that left before its end hands the present it was asked for to the platform,

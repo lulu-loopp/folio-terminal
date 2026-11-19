@@ -263,6 +263,10 @@ pub(crate) trait WindowHost {
     /// The work area of the display this window is on — `bt_platform::get_work_area`; `None`
     /// where the platform will not say.
     fn work_area(&self) -> Option<bt_platform::WindowRect>;
+    /// **Every display the platform names now, as the layout restore judges against them** —
+    /// `restore_monitors_of` over the window's own monitor list, primary first; empty where the
+    /// platform will not say (0.4.10 plan row 87, part 87a: the way back of a put-away window).
+    fn monitors_to_restore_on(&self) -> Vec<crate::RestoreMonitor>;
     /// **The window stood at an outer rectangle on whichever display it names** —
     /// `bt_platform::stand_window_at`, which says it again until the display's scale has settled.
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String>;
@@ -475,6 +479,12 @@ impl WindowHost for Arc<Window> {
         crate::native_window_of(self)
             .ok()
             .and_then(|native| bt_platform::get_work_area(native).ok())
+    }
+    fn monitors_to_restore_on(&self) -> Vec<crate::RestoreMonitor> {
+        crate::restore_monitors_of(
+            Window::primary_monitor(self),
+            Window::available_monitors(self),
+        )
     }
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
         bt_platform::stand_window_at(native_or_say(self)?, rect)

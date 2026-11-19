@@ -32,8 +32,8 @@ carries it.
 arm of a Windows window procedure, upstream's own suite (`tests/`) is three
 compile-time assertions about `Send`, `Sync` and serde, and membership would pull
 the dev-dependencies of its examples and doctests into `Cargo.lock` and its
-upstream code under the workspace's clippy. The arm is exercised where it
-matters, on a clean machine (the VM harness's close cell).
+upstream code under the workspace's clippy. The arm is not exercised by any
+test; row 41's VM finding is the reason.
 
 ## `src/platform_impl/windows/event_loop.rs` — one arm
 

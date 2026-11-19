@@ -749,9 +749,24 @@ impl<B: Backend> Runtime<'_, B> {
     /// away. Nothing else: no dirty gate (nothing is lost, so nothing is asked), no teardown
     /// ([`Self::close_window`] is not reached), and the run's sentinel stays where it is.
     ///
+    /// **The close's own record is spent here, and said** (review P1-2): every road that puts the
+    /// window away (the window-event door's arm, and `FolioApp::close` for a close that reaches it
+    /// another way) comes through this one, which takes the arrival the request carried and says
+    /// it on the put-away's own close line ([`crate::exit_diagnostics::window_put_away_line`]):
+    /// the road, delivery, foreground and pointer row 103 names on a close, for the close that
+    /// with the switch on is put away and never closed.
+    ///
+    /// **And the window's recordings are paused** (the coordinator's ruling of 2026-11-18): a
+    /// closed window is not heard; they play again when it is brought back. Its pages are left
+    /// running — an agent may be driving them.
+    ///
     /// `window_shown` is kept, for `hide_quake_window`'s reason: a hidden window is not a window
-    /// that was never shown, and gate 1 (`window_is_hidden`) reads the pair.
+    /// that was never shown.
     pub(crate) fn put_the_window_away(&mut self) -> Result<()> {
+        let how = crate::exit_diagnostics::ClosedHow::Asked(
+            self.take_close_asked()
+                .unwrap_or(crate::exit_diagnostics::CloseAsked::UNMARKED),
+        );
         self.end_capture(Ending::Cancel)?;
         // An owner-thread door (`doors::SetVisible`). A refusal is a hide that had no effect, and
         // the window, still on the glass, is not marked away.
@@ -762,14 +777,26 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         self.window.put_away = true;
+        self.window.video.pause_while_away();
         // The turn's facts read again, so that this turn's own fold and present already see a
         // window off the glass (gate 1), not the next turn's.
         self.observe_window_place();
         self.mark_session_dirty(Instant::now());
-        self.window
-            .window
-            .note("BT_PUT_AWAY the last window's close put it away; the run keeps going");
+        let facts = self.closed_facts(self.app.quake.window(), None);
+        crate::exit_diagnostics::say_window_put_away(how, facts, |line| {
+            self.window.window.note(line);
+        });
         Ok(())
+    }
+
+    /// **A close that reached this window while it is put away, ignored**
+    /// (`CloseFate::AlreadyAway`, review P1-2): the request's record is spent, and the once-a-run note names the road it came
+    /// by, so the tool that closes every top-level window it finds is named by what it sent.
+    pub(crate) fn ignore_the_close_while_away(&mut self) {
+        let asked = self
+            .take_close_asked()
+            .unwrap_or(crate::exit_diagnostics::CloseAsked::UNMARKED);
+        crate::a_close_reached_a_put_away_window(asked.road_said());
     }
 
     /// **Bring a put-away window back on the glass** (0.4.10 plan row 87, part 87a; R10, R13): the
@@ -777,17 +804,83 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// [`Self::put_the_window_on_the_glass`] — written re-entrant for the summoned terminal, so a
     /// second show is a statement of fact and not a step — with the window as it was: maximized if
-    /// it was put away maximized. `false` for a window that is not put away, which is left alone.
+    /// it was put away maximized. `false` for a window that is not put away, which is left alone,
+    /// and for one that is closing (review P2-1): a window on its way out is never brought back.
+    ///
+    /// Before the show, the window is held to a monitor that is there now
+    /// ([`Self::hold_the_window_to_a_present_monitor`], review P2-3); after it, the recordings the
+    /// put-away paused play again.
     pub(crate) fn bring_the_window_back_on_the_glass(&mut self) -> Result<bool> {
-        if !self.window.put_away {
+        if !self.window.put_away || self.window.leaving.is_some() {
             return Ok(false);
         }
         self.window.put_away = false;
         let maximized = self.window.window.is_maximized();
+        self.hold_the_window_to_a_present_monitor();
         self.put_the_window_on_the_glass(maximized)?;
+        self.window.video.play_again_after_away();
         // And read again on the glass, for the put-away's reason the other way round.
         self.observe_window_place();
         Ok(true)
+    }
+
+    /// **A put-away window's rectangle held to a monitor that is there now** (0.4.10 plan row 87,
+    /// part 87a, review P2-3): a resident run lives through docking and undocking, and the system
+    /// does not move a hidden window off a monitor that has gone.
+    ///
+    /// The judgement is the layout restore's own, unchanged ([`crate::choose_restored_placement`]
+    /// over the monitors the platform names, primary first), asked of the paragraph this window
+    /// would write with the rectangle it stands at now. A rectangle the judgement keeps is left
+    /// where it is; one it fits or moves is stood where it says ([`crate::startup_window_rect`],
+    /// the restore's own conversion), and one no monitor can see forfeits its corner to the
+    /// primary monitor's, as a restored one does. Maximised or not, it is the rectangle the window
+    /// stands at that is judged, so a window put away maximised is shown maximised where the
+    /// judgement puts it.
+    ///
+    /// Nothing is judged for a minimised window, whose rectangle is the system's parking place
+    /// and not a monitor's, or where the platform names no monitor. A refused stand is said, and
+    /// the window comes back where it is.
+    fn hold_the_window_to_a_present_monitor(&mut self) {
+        let monitors = self.window.window.monitors_to_restore_on();
+        let Some(primary) = monitors.first().copied() else {
+            return;
+        };
+        if self.window.window.is_iconic() {
+            return;
+        }
+        let Some(standing) = self.window.window.outer_rect() else {
+            return;
+        };
+        let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
+        let mut paragraph = self.window_snapshot();
+        paragraph.placement.bounds = persisted_window_bounds(standing, scale);
+        let Some(placement) = crate::choose_restored_placement(&paragraph, &monitors) else {
+            return;
+        };
+        let bounds = paragraph.placement.bounds;
+        let kept = placement.position
+            == Some(winit::dpi::LogicalPosition::new(
+                f64::from(bounds.x),
+                f64::from(bounds.y),
+            ))
+            && placement.size == crate::sane_restored_size(bounds);
+        if kept {
+            return;
+        }
+        let primary_corner = {
+            let left = crate::physical_px(primary.left, scale);
+            let top = crate::physical_px(primary.top, scale);
+            bt_platform::WindowRect {
+                left,
+                top,
+                right: left,
+                bottom: top,
+            }
+        };
+        let rect = crate::startup_window_rect(Some(placement), primary_corner, scale);
+        if let Err(error) = self.window.window.stand_at(rect) {
+            crate::diagnostics::note(&format!("BT_PUT_AWAY the way back: {error}"));
+        }
     }
 
     /// The three things showing a window does, said once for the two doors that
@@ -2464,6 +2557,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// can see — the one outcome worse than an error, and the reason `fail`'s
     /// own comment says so about windows.
     fn let_go_of_this_window(&mut self) -> Result<()> {
+        // **A window let go is no longer put away** (0.4.10 plan row 87, part 87a, review P2-1):
+        // on every road that ends a window, so that nothing brings a closing window back.
+        self.window.put_away = false;
         // **Off the screen first, and on every road that ends a window**
         // (§7.34, user report 2026-08-27: 关掉旧 folio 再开新的,输入法就坏了).
         //

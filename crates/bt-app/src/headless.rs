@@ -388,6 +388,8 @@ pub(crate) struct PlatformAnswers {
     pub(crate) outer_rect: Option<bt_platform::WindowRect>,
     /// `WindowHost::work_area`: `None`.
     pub(crate) work_area: Option<bt_platform::WindowRect>,
+    /// `WindowHost::monitors_to_restore_on`, the one display it names: `None`, no display named.
+    pub(crate) monitor: Option<crate::RestoreMonitor>,
     /// `WindowHost::glass_at`, at every point: `GlassHere::Unknown`.
     pub(crate) glass: crate::GlassHere,
     /// `WindowHost::pointer_in_window`: `None`.
@@ -415,6 +417,7 @@ impl Default for PlatformAnswers {
             exposed: true,
             outer_rect: None,
             work_area: None,
+            monitor: None,
             glass: crate::GlassHere::Unknown,
             pointer: None,
             buttons_down: true,
@@ -514,6 +517,9 @@ impl WindowHost for HeadlessWindow {
     }
     fn work_area(&self) -> Option<bt_platform::WindowRect> {
         self.answers.get().work_area
+    }
+    fn monitors_to_restore_on(&self) -> Vec<crate::RestoreMonitor> {
+        self.answers.get().monitor.into_iter().collect()
     }
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
         self.ledger.record(WindowEffect::StoodAt(rect));

@@ -1693,11 +1693,11 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn observe_window_place(&mut self) {
         let window = &self.window.window;
         let previous = self.window.observed_place;
-        let shown = self.window.window_shown;
+        let put_away = self.window.put_away;
         let (place, taskbar) = hang_watch::during(hang_watch::Station::Place, || {
             let focused =
                 hang_watch::during(hang_watch::Station::PlaceFocus, || window.has_focus());
-            sample_window_place(window, focused, shown, previous)
+            sample_window_place(window, focused, put_away, previous)
         });
         let window = &mut *self.window;
         window.observed_place = place;
@@ -3349,24 +3349,23 @@ pub(crate) fn verified_target_of(
 /// nobody sees, and over-stating puts a toast in front of somebody who is looking straight at the
 /// pane it is about.
 ///
-/// **And a window that has been on the glass and is not visible now is hidden too** (0.4.10 plan
-/// row 87, part 87a, gate 1): a window taken off the glass by `set_visible(false)` — the put-away
-/// run's window, the summoned terminal sent back up — is neither iconic nor cloaked, and without
-/// this third fact it was presented every turn, counted in the turn's allowance and flashed for on
-/// a taskbar button it does not have. `shown` is `WindowRuntime::window_shown`: a window that was
-/// never shown is not visible yet either, and that is its birth, not its being away. One more probe
-/// on the same thread (`IsWindowVisible`, through winit's `is_visible`); a platform that cannot say
-/// (`None`) is read as visible, on the reasoning above.
+/// **And a put-away window is hidden too** (0.4.10 plan row 87, part 87a, gate 1): the run's last
+/// window, taken off the glass by its close (`Runtime::put_the_window_away`), is neither iconic nor
+/// cloaked, and without this third fact it was presented every turn, counted in the turn's
+/// allowance and flashed for on a taskbar button it does not have. `put_away` is
+/// `WindowRuntime::put_away` — Folio's own fact, not a reading of the window's visibility
+/// (review P2-6, the coordinator's ruling of 2026-11-18): an application macOS hides (`Cmd+H`)
+/// orders its windows out, and those windows are read as they always were.
 ///
 /// **An owner-thread door** (`doors::PlaceHidden`, row 13's residue), minted only in
 /// [`sample_window_place`].
 pub(crate) fn window_is_hidden(
     token: WaitToken<'_, doors::PlaceHidden>,
     window: &impl WindowHost,
-    shown: bool,
+    put_away: bool,
 ) -> bool {
     let _ = token;
-    window.is_iconic() || window.is_cloaked() || (shown && window.is_visible() == Some(false))
+    window.is_iconic() || window.is_cloaked() || put_away
 }
 
 /// **Whether the window manager puts this window under any of its own sample points** (user ruling
@@ -3512,7 +3511,7 @@ fn apply_hover_marks(
 pub(crate) fn sample_window_place(
     window: &impl WindowHost,
     focused: bool,
-    shown: bool,
+    put_away: bool,
     previous: notify::WindowPlace,
 ) -> (notify::WindowPlace, bt_platform::TaskbarReading) {
     // **Each probe under its own station** (ticket 48): two of them go to other processes —
@@ -3522,7 +3521,7 @@ pub(crate) fn sample_window_place(
     // `enter`/`at` pair this replaced; the fused call keeps the line
     // `present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value` reads.
     let hidden = bt_platform::admission::admitted::<doors::PlaceHidden, _>(|token| {
-        window_is_hidden(token, window, shown)
+        window_is_hidden(token, window, put_away)
     })
     .unwrap_or(previous.hidden);
     // **The taskbar is read, not asked** (ticket 62). The shell is asked on its own lane; this
