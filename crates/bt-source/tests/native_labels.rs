@@ -132,6 +132,7 @@ const FUNCTIONS: &[&str] = &[
     "message_box",
     "standalone_alert",
     "toast_xml",
+    "track_tray_menu",
 ];
 
 // widened 2026-10-25 by T-NATIVE-LABELS-GUARD-REACH (+108 rows): every literal with a word is a
