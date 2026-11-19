@@ -1483,8 +1483,11 @@ fn the_icons_quit_leaves_and_takes_the_icon_down() {
     run.poke(TrayGesture::Quit);
     run.settle_tray().expect("the icon's turn");
     let mut effects = Vec::new();
-    for _ in 0..200 {
-        let now = std::time::Instant::now();
+    // The turns' own clock, a turn apart (nothing here waits on the real one): the quit is
+    // judged on the instant each turn hands it.
+    let begun = std::time::Instant::now();
+    for turn in 0..200u32 {
+        let now = begun + std::time::Duration::from_millis(10) * turn;
         // The turn's retirement arm (`FolioApp::about_to_wait_inner`): the browsers' clock, the
         // pages' answer, the quit's settle.
         let folio = &mut run.application.folio;
@@ -1494,7 +1497,9 @@ fn the_icons_quit_leaves_and_takes_the_icon_down() {
             .and_then(|app| app.quit.as_ref())
             .is_some_and(crate::quit::Quit::is_retiring)
         {
-            let _ = folio.advance_retirement(now).expect("the retirement's clock");
+            let _ = folio
+                .advance_retirement(now)
+                .expect("the retirement's clock");
             let gone = folio.every_page_has_gone();
             folio.report_to_quit(|quit| quit.pages(gone, now));
         }
@@ -1505,7 +1510,6 @@ fn the_icons_quit_leaves_and_takes_the_icon_down() {
         if effects.contains(&WindowEffect::Exit) {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert!(
         effects.contains(&WindowEffect::Exit),

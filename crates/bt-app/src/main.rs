@@ -48374,7 +48374,7 @@ impl<B: Backend> FolioApp<B> {
         self.windows
             .in_order_mut()
             .into_iter()
-            .any(|window| window.put_away && window.leaving.is_none())
+            .any(|window: &mut WindowRuntime<B>| window.put_away && window.leaving.is_none())
     }
 
     /// **What every tab tells the run's icon** (0.4.10 plan row 87, part 87b; [`tray_fold`]): each
@@ -48385,8 +48385,8 @@ impl<B: Backend> FolioApp<B> {
         self.windows
             .in_order_mut()
             .into_iter()
-            .filter(|window| window.leaving.is_none())
-            .flat_map(|window| {
+            .filter(|window: &&mut WindowRuntime<B>| window.leaving.is_none())
+            .flat_map(|window: &mut WindowRuntime<B>| {
                 let looked_at = !window.put_away;
                 let active = window.active_tab;
                 window
@@ -48560,7 +48560,9 @@ impl<B: Backend> FolioApp<B> {
                     .key_at(*index)
                     .filter(|id| Some(*id) != summon && *id != going)
                     .and_then(|id| self.windows.get_mut(id))
-                    .is_some_and(|window| window.leaving.is_none() && !window.put_away)
+                    .is_some_and(|window: &mut WindowRuntime<B>| {
+                        window.leaving.is_none() && !window.put_away
+                    })
             })
             .count()
     }

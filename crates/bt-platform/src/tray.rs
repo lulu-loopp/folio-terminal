@@ -875,7 +875,8 @@ mod windows_tray {
             let menu = Result::ok(CreatePopupMenu())?;
             let chosen = (|| {
                 for row in TrayGesture::MENU {
-                    let label: Vec<u16> = labels.of(row).encode_utf16().chain([0]).collect();
+                    let mut label: Vec<u16> = labels.of(row).encode_utf16().collect();
+                    label.push(0);
                     Result::ok(AppendMenuW(
                         menu,
                         MF_STRING,
