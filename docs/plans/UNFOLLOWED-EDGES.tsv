@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1828. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1826. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_deref	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_str	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
@@ -1090,6 +1090,7 @@ crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_contro
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	is_some	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	next	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::cap_controlled_failure	Ambiguous	take	1	
+crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::close_line	Ambiguous	map_or	1	2026-11-19: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a, the review fold P1-2/P2-3); row 103's window_closed_line split into close_line(head, how, facts), which both the closed line and the new put-away line call; the delivery word read through Option::map_or (std), moved from window_closed_line, not added; no wait
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::one_line	Ambiguous	collect	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::one_line	Ambiguous	map	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::path_end	Ambiguous	and_then	1	
@@ -1112,10 +1113,10 @@ crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_shell_
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_spawn_failure	Dynamic	note	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_spawn_fallback	Dynamic	note	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_window_closed	Dynamic	note	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the window close line said through the note door the caller hands (a closure)
+crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::say_window_put_away	Dynamic	note	1	2026-11-19: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a, the review fold P1-2/P2-3); the put-away close line said through the note door the caller hands (a closure: the window's own note door), as say_window_closed does; no wait
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::starts_absolute_path	Ambiguous	get	2	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::starts_absolute_path	Ambiguous	is_ascii_alphabetic	1	
 crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::starts_absolute_path	Ambiguous	is_ascii_whitespace	1	
-crates/bt-app/src/exit_diagnostics.rs	bt-app crate::exit_diagnostics::window_closed_line	Ambiguous	map_or	1	2026-11-18: T-CLOSE-REQUEST-SAYS-WHICH-WINDOW-AND-HOW (0.4.10 plan row 103); the close arrival's road read through Option::map_or (std)
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::MenuFate::left	Dynamic	into	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::Start::this_process	Ambiguous	is_some_and	1	
 crates/bt-app/src/explorer_menu.rs	bt-app crate::explorer_menu::Start::this_process	Ambiguous	map	1	
@@ -2336,7 +2337,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::install_main_menu	Ambiguous	ma
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::install_main_menu	Dynamic	send	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::keep_what_the_systems_end_did_not_save	Ambiguous	flatten	1	2026-10-21: T-ENDSESSION-SAVES review; a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::keep_what_the_systems_end_did_not_save	Ambiguous	line	1	2026-10-21: T-ENDSESSION-SAVES; `preview::Kept::line`, a sentence formatted from a buffer's name and where its edit is, which calls no door
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::on_window_event	Ambiguous	and_then	5	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::on_window_event	Ambiguous	and_then	6	2026-11-19: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a, the review fold P1-2/P2-3); grown 5 -> 6: after a ShutWhileAway close whose question keeps the run, the window comes back through the one bring-back door (Result::and_then over the shut's result, then FolioApp::bring_the_window_back); an in-memory combinator, no wait
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::on_window_event	Ambiguous	is_some_and	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::on_window_event	Ambiguous	state	2	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::open_a_window_for_a_launch	Ambiguous	map	1	
@@ -2686,14 +2687,12 @@ crates/bt-app/src/main.rs	bt-app crate::release_trial_writer	Dynamic	(value)	1	2
 crates/bt-app/src/main.rs	bt-app crate::report_frame_shape_stop	Dynamic	announce	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	map_or_else	1	
 crates/bt-app/src/main.rs	bt-app crate::resolve_title	Ambiguous	or_else	1	
-crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	clone	1	
-crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	collect	1	
-crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	into_iter	1	
-crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	map	1	
-crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	position	1	
-crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	saturating_add	2	
-crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	scale_factor	1	
-crates/bt-app/src/main.rs	bt-app crate::restore_monitors	Ambiguous	size	1	
+crates/bt-app/src/main.rs	bt-app crate::restore_monitors_of	Ambiguous	collect	1	2026-11-19: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a, the review fold P1-2/P2-3); restore_monitors split into restore_monitors_of(primary, available) so the put-away window's way back (WindowHost::monitors_to_restore_on) reads the same monitors the layout restore reads; the iterator chain and winit's MonitorHandle reads moved, not added (clone and into_iter left the list as single-candidate calls); no wait
+crates/bt-app/src/main.rs	bt-app crate::restore_monitors_of	Ambiguous	map	1	2026-11-19: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a, the review fold P1-2/P2-3); restore_monitors split into restore_monitors_of(primary, available) so the put-away window's way back (WindowHost::monitors_to_restore_on) reads the same monitors the layout restore reads; the iterator chain and winit's MonitorHandle reads moved, not added (clone and into_iter left the list as single-candidate calls); no wait
+crates/bt-app/src/main.rs	bt-app crate::restore_monitors_of	Ambiguous	position	1	2026-11-19: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a, the review fold P1-2/P2-3); restore_monitors split into restore_monitors_of(primary, available) so the put-away window's way back (WindowHost::monitors_to_restore_on) reads the same monitors the layout restore reads; the iterator chain and winit's MonitorHandle reads moved, not added (clone and into_iter left the list as single-candidate calls); no wait
+crates/bt-app/src/main.rs	bt-app crate::restore_monitors_of	Ambiguous	saturating_add	2	2026-11-19: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a, the review fold P1-2/P2-3); restore_monitors split into restore_monitors_of(primary, available) so the put-away window's way back (WindowHost::monitors_to_restore_on) reads the same monitors the layout restore reads; the iterator chain and winit's MonitorHandle reads moved, not added (clone and into_iter left the list as single-candidate calls); no wait
+crates/bt-app/src/main.rs	bt-app crate::restore_monitors_of	Ambiguous	scale_factor	1	2026-11-19: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a, the review fold P1-2/P2-3); restore_monitors split into restore_monitors_of(primary, available) so the put-away window's way back (WindowHost::monitors_to_restore_on) reads the same monitors the layout restore reads; the iterator chain and winit's MonitorHandle reads moved, not added (clone and into_iter left the list as single-candidate calls); no wait
+crates/bt-app/src/main.rs	bt-app crate::restore_monitors_of	Ambiguous	size	1	2026-11-19: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a, the review fold P1-2/P2-3); restore_monitors split into restore_monitors_of(primary, available) so the put-away window's way back (WindowHost::monitors_to_restore_on) reads the same monitors the layout restore reads; the iterator chain and winit's MonitorHandle reads moved, not added (clone and into_iter left the list as single-candidate calls); no wait
 crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	clone	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
 crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	cloned	1	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
 crates/bt-app/src/main.rs	bt-app crate::revive_plan_with	Ambiguous	collect	3	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the revive pass now takes the restore switch and reads each saved leaf's agent record beside its profile and folder: the existing iterator chain (iter, zip, map, collect, clone, cloned, str::is_empty) over the saved tab moved into the new signature; an in-memory read of values the call already holds, no wait
