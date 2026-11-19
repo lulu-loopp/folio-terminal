@@ -518,8 +518,11 @@ Add-Type -Namespace Smoke -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
 [DllImport("user32.dll")] public static extern int GetWindowLongW(IntPtr h, int index);
 [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr m, int t, out uint x, out uint y);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder name, int max);
+[DllImport("shell32.dll")] public static extern int Shell_NotifyIconGetRect(ref NOTIFYICONIDENTIFIER id, out RECT r);
 public delegate bool EnumWindowsProc(IntPtr h, IntPtr p);
 public struct RECT { public int Left, Top, Right, Bottom; }
+[StructLayout(LayoutKind.Sequential)] public struct NOTIFYICONIDENTIFIER { public uint cbSize; public IntPtr hWnd; public uint uID; public Guid guidItem; }
 '@
 
 # Every probe process in this repository declares per-monitor v2 before it asks
@@ -851,6 +854,36 @@ if (-not $folio.HasExited -and $window -ne [IntPtr]::Zero) {
     $putAway = -not $folio.HasExited -and -not [Smoke.Win32]::IsWindowVisible($window)
 }
 
+# **And its icon stands in the notification area while it is put away** (0.4.10 plan row 87,
+# part 87b). The icon's host is the process's window of class `FolioTrayHost`
+# (`bt_platform::tray::TRAY_HOST_CLASS`); the shell answers where icon 1 of that host is, and an
+# icon it does not hold has no place. Windows 11 parks a new icon in the overflow, and the shell
+# answers for an icon there too (row 87b's clean-machine check 1).
+$iconStood = $false
+if ($putAway) {
+    $trayHost = [IntPtr]::Zero
+    [Smoke.Win32]::EnumWindows({
+            param([IntPtr] $handle, [IntPtr] $unused)
+            $pid_ = 0
+            [void][Smoke.Win32]::GetWindowThreadProcessId($handle, [ref] $pid_)
+            $class = New-Object System.Text.StringBuilder 64
+            [void][Smoke.Win32]::GetClassNameW($handle, $class, 64)
+            if ($pid_ -eq $folio.Id -and $class.ToString() -eq 'FolioTrayHost') {
+                $script:trayHost = $handle
+                return $false
+            }
+            return $true
+        }, [IntPtr]::Zero) | Out-Null
+    if ($trayHost -ne [IntPtr]::Zero) {
+        $icon = New-Object Smoke.Win32+NOTIFYICONIDENTIFIER
+        $icon.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type] [Smoke.Win32+NOTIFYICONIDENTIFIER])
+        $icon.hWnd = $trayHost
+        $icon.uID = 1
+        $place = New-Object Smoke.Win32+RECT
+        $iconStood = [Smoke.Win32]::Shell_NotifyIconGetRect([ref] $icon, [ref] $place) -eq 0
+    }
+}
+
 # **Then ask it to quit the way the installer and the uninstaller do** — Folio's quit from
 # outside (`bt_platform::session_end::OUTSIDE_QUIT_MESSAGE`), which is heard on a hidden window
 # as on a shown one — and give it the time a clean quit takes.
@@ -894,6 +927,8 @@ Write-Host ("dpi: window and monitor agree at {0} ({1:P0} scaling)." -f $windowD
 
 if (-not $putAway) { throw 'the window close did not put Folio away: the window stayed up, or the run ended' }
 Write-Host 'its window close put it away, and the process stayed.'
+if (-not $iconStood) { throw 'the put-away run has no icon in the notification area' }
+Write-Host 'its icon stood in the notification area while it was put away.'
 if (-not $closed) { throw 'Folio did not quit when asked by its quit from outside' }
 if ($folio.ExitCode -ne 0) { throw "folio exited $($folio.ExitCode)" }
 Write-Host 'it quit when asked from outside, and exited 0.'
