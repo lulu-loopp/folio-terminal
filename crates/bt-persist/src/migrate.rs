@@ -79,6 +79,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (38, migrate_settings_v38_to_v39),
     (39, migrate_settings_v39_to_v40),
     (40, migrate_settings_v40_to_v41),
+    (41, migrate_settings_v41_to_v42),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -916,6 +917,25 @@ fn migrate_settings_v40_to_v41(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(41));
         object.insert("close_keeps_running".to_owned(), Value::Bool(true));
+    }
+    value
+}
+
+/// v41 -> v42: `first_hide_toast`, the receipt that the first put-away has been told on this
+/// machine (0.4.10 plan row 87, part 87d; ruling R12), written **`NotShown`**.
+///
+/// Every reader of a v41 file meets the put-away for the first time with this build, so every one
+/// of them is owed the sentence once. Written rather than left to the reader's default, as v39
+/// wrote `web_pages_used`: the receipt's state is the step's statement, not an absence. One key,
+/// [`migrate_settings_v38_to_v39`]'s shape; no sibling is read.
+fn migrate_settings_v41_to_v42(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(42));
+        object.insert(
+            "first_hide_toast".to_owned(),
+            serde_json::to_value(crate::FirstHideToastV1::NotShown)
+                .expect("a unit variant serialises"),
+        );
     }
     value
 }
@@ -3425,6 +3445,73 @@ mod tests {
         let absent: crate::SettingsV1 =
             serde_json::from_value(written).expect("this key has a default");
         assert!(absent.close_keeps_running);
+    }
+
+    /// RED (0.4.10 plan row 87, part 87d, T21) — **the v41 -> v42 step writes `first_hide_toast` as
+    /// `NotShown` and leaves every sibling exactly as it found it, and the three places a default
+    /// lives agree on it.** The key is a receipt (ruling R12): every reader of a v41 file meets the
+    /// put-away for the first time with this build, so the step states that the sentence is owed
+    /// rather than leaving it to a key the file does not have.
+    ///
+    /// MUTATION (87d-P37): drop the `first_hide_toast` insert from `migrate_settings_v41_to_v42` —
+    /// the first assertion goes red.
+    #[test]
+    fn migrate_settings_v41_to_v42_writes_the_receipt_not_shown_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 41,
+            "theme_mode": "Dark",
+            "close_keeps_running": false,
+            "first_run_card": "Shown",
+            "web_pages_used": "Used",
+            "terminal_notifications": false
+        });
+        let migrated = migrate_value(before.clone(), 41, 42, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(
+            migrated["first_hide_toast"],
+            json!("NotShown"),
+            "every reader of a v41 file is owed the sentence once"
+        );
+        assert_eq!(migrated["schema_version"], json!(42));
+        let (before, after) = (
+            before.as_object().expect("an object"),
+            migrated.as_object().expect("an object"),
+        );
+        assert_eq!(after.len(), before.len() + 1, "exactly one key is added");
+        for (key, value) in before {
+            if key != "schema_version" {
+                assert_eq!(&after[key], value, "`{key}` was rewritten by the step");
+            }
+        }
+
+        // And the round trip's defaults say the same: a whole v41 document the step carries reads
+        // as owed, the product's own default is owed, and a v42 document that omits the line is.
+        let mut whole = serde_json::to_value(crate::SettingsV1::default())
+            .expect("a settings document serialises");
+        let fields = whole
+            .as_object_mut()
+            .expect("a settings document is an object");
+        fields.remove("first_hide_toast");
+        fields.insert("schema_version".to_owned(), json!(41));
+        let carried = migrate_value(whole, 41, 42, SETTINGS_MIGRATIONS).unwrap();
+        let read: crate::SettingsV1 =
+            serde_json::from_value(carried).expect("the migrated document reads");
+        assert_eq!(read.first_hide_toast, crate::FirstHideToastV1::NotShown);
+        assert_eq!(
+            crate::SettingsV1::default().first_hide_toast,
+            crate::FirstHideToastV1::NotShown
+        );
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            first_hide_toast: crate::FirstHideToastV1::Shown,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("first_hide_toast");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert_eq!(absent.first_hide_toast, crate::FirstHideToastV1::NotShown);
     }
 
     /// The v15 -> v16 session step takes the number and nothing else: no older key holds an agent.

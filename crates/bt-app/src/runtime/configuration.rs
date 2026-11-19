@@ -453,7 +453,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// The values no row shows, and the two rows whose press only records a
     /// value read where it is used, are stored as they are — for them storing is
     /// the whole of putting them in force.
-    fn apply_imported_setting(&mut self, change: SettingChange) -> Result<()> {
+    ///
+    /// `pub(super)` for the put-away's tests (0.4.10 plan row 87, part 87d), which turn the
+    /// close switch off through the door an import and a hand edit share.
+    pub(super) fn apply_imported_setting(&mut self, change: SettingChange) -> Result<()> {
         match change {
             SettingChange::Theme(mode) => {
                 self.apply_theme_mode(mode)?;
@@ -584,18 +587,21 @@ impl<B: Backend> Runtime<'_, B> {
             SettingChange::ResumeAgents(enabled) => {
                 self.apply_resume_agents(enabled);
             }
+            // **Through the row's own door** (0.4.10 plan row 87, part 87d): turning it off brings a
+            // put-away window back, which a store alone would not.
+            SettingChange::CloseKeepsRunning(enabled) => {
+                self.apply_close_keeps_running(enabled);
+            }
             SettingChange::WebPages(scheme) => {
                 self.apply_web_color_scheme(scheme)?;
             }
             // Read where they are used, so the store is their door: the open
             // Advanced groups, the summoned terminal's profile — stored by id,
             // which is what its row's press stores too, rather than through the
-            // row's index into this table — its top gap, and whether the last
-            // window's close keeps the run (read at each close, 0.4.10 plan row 87).
+            // row's index into this table — and its top gap.
             ref change @ (SettingChange::AdvancedOpen(_)
             | SettingChange::QuakeProfile(_)
-            | SettingChange::QuakeTopGap(_)
-            | SettingChange::CloseKeepsRunning(_)) => self.store_imported_value(change),
+            | SettingChange::QuakeTopGap(_)) => self.store_imported_value(change),
         }
         Ok(())
     }

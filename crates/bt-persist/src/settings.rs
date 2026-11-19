@@ -349,7 +349,15 @@ use serde::{Deserialize, Serialize};
 /// **It lands on**, which is the owner's ruling (2026-11-14, R2) rather than a behaviour carried
 /// forward: the row is born now, so no reader has chosen, and a wrong "off" is the loss the row
 /// exists for (an accidental close ending every agent of the session).
-pub const SETTINGS_SCHEMA_VERSION: u32 = 41;
+///
+/// **v42 carries `first_hide_toast`**, a receipt about this machine and not a preference: whether
+/// the one notification that says Folio is still running after its last window was put away has
+/// been shown here (0.4.10 plan row 87, part 87d; ruling R12) — see [`FirstHideToastV1`]. No row
+/// shows it and no import moves it.
+///
+/// **It lands on `NotShown`**: the put-away is new to every reader of a v41 file, so every one of
+/// them is owed the sentence once.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 42;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -613,7 +621,8 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "quake_startup_command": "fastfetch" | "",
 ///   "quake_top_gap": 0..=64,
 ///   "quake_restore": "Nothing" | "Folders" | "FoldersAndPinnedCommands",
-///   "web_pages_used": "Never" | "Used"
+///   "web_pages_used": "Never" | "Used",
+///   "first_hide_toast": "NotShown" | "Shown"
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1267,6 +1276,15 @@ pub struct SettingsV1 {
     /// a file that does not say so is not evidence that a page was ever opened.
     #[serde(default)]
     pub web_pages_used: WebPagesUsedV1,
+    /// **Whether this machine has been told that Folio is still running after its last window was
+    /// put away** (v42, 0.4.10 plan row 87, part 87d; ruling R12) — see [`FirstHideToastV1`]. A
+    /// receipt about this machine, beside `first_run_card`: no Settings row, and an import leaves
+    /// it as it stands.
+    ///
+    /// `#[serde(default)]` because [`FirstHideToastV1::NotShown`] is the honest reading of a
+    /// missing key: a file that does not say so is not evidence that the sentence was ever shown.
+    #[serde(default)]
+    pub first_hide_toast: FirstHideToastV1,
     /// **What a second start of Folio opens when one is already running** (v33,
     /// `docs/DESIGN.md` §7.59) — see [`LaunchOpensV1`].
     ///
@@ -1564,6 +1582,8 @@ impl Default for SettingsV1 {
             first_run_card: FirstRunCardV1::NotShown,
             // A profile being written for the first time has opened no page.
             web_pages_used: WebPagesUsedV1::Never,
+            // A machine whose file is being written for the first time has put no window away.
+            first_hide_toast: FirstHideToastV1::NotShown,
             // Starting a program again opens that program — see `LaunchOpensV1`.
             launch_opens: LaunchOpensV1::NewWindow,
             // Option composes text, which is what the key does everywhere else
@@ -1665,6 +1685,25 @@ pub enum WebPagesUsedV1 {
     Never,
     /// A page has committed here, or the saved session holds one.
     Used,
+}
+
+/// **Whether the first put-away has been told on this machine** (0.4.10 plan row 87, part 87d;
+/// ruling R12): the one notification, "Folio is still running", that the first close of the last
+/// window puts on the desktop, because Windows 11 parks a new notification-area icon out of sight
+/// and the first close would otherwise look like a quit.
+///
+/// **Two values and not a `bool`, for [`FirstRunCardV1`]'s reason**: the default is the one a
+/// migrated file lands on, and it has to be the one that still owes the sentence.
+///
+/// **Written by one function, never by a row**: the put-away that hands the notification to the
+/// desktop writes `Shown`. Nothing writes `NotShown` back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FirstHideToastV1 {
+    /// Never shown. The only state from which the notification is raised.
+    #[default]
+    NotShown,
+    /// Shown once. Nothing shows it again.
+    Shown,
 }
 
 /// Which language the interface is written in — `docs/DESIGN.md` §7.1.6c-3.

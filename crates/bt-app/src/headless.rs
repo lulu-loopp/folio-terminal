@@ -39,7 +39,7 @@ use crate::ime_report::NativeFacts;
 use crate::window_seam::{
     Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
     ImeCaretDoor, LoopDoor, LoopProxy, MathMenuDoor, PageTree, SavePickerDoor, TaskbarDoor,
-    WindowHost,
+    ToastDoor, WindowHost,
 };
 use crate::{App, AppEvent, TabState, WindowRuntime};
 
@@ -293,6 +293,7 @@ impl Backend for Headless {
     type SavePicker = HeadlessPicker;
     type ImeCaret = HeadlessImeCaret;
     type Loop = HeadlessLoop;
+    type Toasts = HeadlessToasts;
 
     fn rebuild_every_surface(
         _gpu: &mut HeadlessDevice,
@@ -1644,6 +1645,26 @@ impl ImeCaretDoor for HeadlessImeCaret {
     }
 }
 
+/// **The notification centre, recorded** (0.4.10 plan row 87, part 87d; R7 of T-TRAY-87D): every
+/// toast handed over, as `(title, body, launch)`, oldest first, and no click unless a test puts
+/// one in. Nothing reaches the machine: the product's desk writes the toast identity into the
+/// account's registry on its first toast and puts a real message on the desktop.
+#[derive(Default)]
+pub(crate) struct HeadlessToasts {
+    pub(crate) handed_over: Vec<(String, String, String)>,
+}
+
+impl ToastDoor for HeadlessToasts {
+    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
+        self.handed_over
+            .push((title.to_owned(), body.to_owned(), launch.to_owned()));
+        Ok(())
+    }
+    fn take_activations(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// **A loop that is not running**: it records being told to stop and how to wait.
 pub(crate) struct HeadlessLoop {
     pub(crate) ledger: Ledger,
@@ -2110,7 +2131,7 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         codex_notify_installed: false,
         copilot_hooks_installed: false,
         copilot_readiness: attention_copilot::Readiness::default(),
-        notifications: NotificationDesk::new(proxy.clone()),
+        notifications: HeadlessToasts::default(),
         session_store,
         settings_store,
         shortcuts,

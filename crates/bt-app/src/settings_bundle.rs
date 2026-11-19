@@ -32,13 +32,15 @@
 //!
 //! # What an import leaves alone
 //!
-//! Three keys of `settings.json` are receipts about *this machine* and not
+//! Four keys of `settings.json` are receipts about *this machine* and not
 //! preferences: whether the first-run card has been put up here
 //! (`first_run_card`), whether the cards' gesture hint has been
 //! shown here (`cards_gesture_hint_offer`, which has one spender and one
 //! restorer and no third opinion — `the_cards_offer_is_spent_in_one_place_and_given_back_in_one`),
-//! and whether a web page has ever committed here (`web_pages_used`, 0.4.5
-//! ticket 60, which decides whether this profile is given a spare controller).
+//! whether a web page has ever committed here (`web_pages_used`, 0.4.5
+//! ticket 60, which decides whether this profile is given a spare controller),
+//! and whether the first put-away has been told here (`first_hide_toast`, 0.4.10
+//! plan row 87, part 87d).
 //! Another machine's answer to any of them is not a fact about this one, so they
 //! are kept as they stand. A row this platform
 //! does not have — `Acrylic` on a Mac, `Option key sends Alt` on Windows — is
@@ -128,7 +130,7 @@ pub(crate) enum SettingChange {
 
 impl SettingChange {
     /// The Settings row this value is chosen on, for the platform question and
-    /// for the name a report gives it. `None` for the two values no row shows.
+    /// for the name a report gives it. `None` for the one value no row shows.
     pub(crate) const fn row(&self) -> Option<SettingsRow> {
         Some(match self {
             Self::Theme(_) => SettingsRow::Theme,
@@ -174,10 +176,9 @@ impl SettingChange {
             Self::MultilinePaste(_) => SettingsRow::MultilinePaste,
             Self::ResumeAgents(_) => SettingsRow::ResumeAgents,
             Self::WebPages(_) => SettingsRow::WebPages,
-            // The ones with no row: which pages' Advanced groups are open, and — until its
-            // Settings row lands (0.4.10 plan row 87, part 87d) — whether the last window's close
-            // keeps the run. Each is read where it is used.
-            Self::AdvancedOpen(_) | Self::CloseKeepsRunning(_) => {
+            Self::CloseKeepsRunning(_) => SettingsRow::CloseKeepsRunning,
+            // The one with no row: which pages' Advanced groups are open, read where it is used.
+            Self::AdvancedOpen(_) => {
                 return None;
             }
         })
@@ -317,6 +318,7 @@ pub(crate) fn plan_settings(
         // one above.
         first_run_card: _,
         web_pages_used: _,
+        first_hide_toast: _,
         launch_opens,
         option_sends_alt,
         multiline_paste_ask,

@@ -88,7 +88,7 @@ impl From<EventLoopProxy<AppEvent>> for LoopProxy {
 pub(crate) mod prelude {
     pub(crate) use super::{
         Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
-        ImeCaretDoor, LoopDoor, MathMenuDoor, SavePickerDoor, TaskbarDoor, WindowHost,
+        ImeCaretDoor, LoopDoor, MathMenuDoor, SavePickerDoor, TaskbarDoor, ToastDoor, WindowHost,
     };
 }
 
@@ -120,6 +120,9 @@ pub(crate) trait Backend: Sized + 'static {
     type ImeCaret: ImeCaretDoor;
     /// The loop a turn runs in: how the application stops it and paces it.
     type Loop: LoopDoor;
+    /// The process's desk in the notification centre: the toasts it raises and the clicks on
+    /// them (0.4.10 plan row 87, part 87d).
+    type Toasts: ToastDoor;
 
     /// **Every window's surface, built again on the device layer** — what a device the driver
     /// took away, and the debug build's surface self-test, ask of every window at once.
@@ -171,6 +174,7 @@ impl Backend for Native {
     type SavePicker = bt_platform::SaveFilePicker;
     type ImeCaret = bt_platform::ImeSystemCaret;
     type Loop = ActiveEventLoop;
+    type Toasts = crate::NotificationDesk;
 
     fn rebuild_every_surface(
         gpu: &mut Self::Device,
@@ -1449,6 +1453,81 @@ impl SavePickerDoor for bt_platform::SaveFilePicker {
 pub(crate) trait ImeCaretDoor {
     fn update(&mut self, x: i32, y: i32) -> Result<(), String>;
     fn destroy(&mut self);
+}
+
+/// **The desk a run's notifications go out through** (§7.6; 0.4.10 plan row 87, part 87d, R7 of
+/// T-TRAY-87D): one toast raised, or the platform's refusal; and the launch strings of the toasts
+/// clicked since the last ask. The product's is `NotificationDesk`, built lazily on the first toast
+/// that passes the gate; the test suite's records what it is handed and reaches nothing.
+pub(crate) trait ToastDoor {
+    /// Raise one toast; `Err` is the platform's refusal, said once.
+    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String>;
+    /// Every clicked toast's launch string since the last call.
+    fn take_activations(&self) -> Vec<String>;
+}
+
+/// **The product's toast door is the desk** (0.4.10 plan row 87, part 87d; R7 of T-TRAY-87D),
+/// implemented here with every other door of the seam.
+impl ToastDoor for crate::NotificationDesk {
+    /// Raise one toast, building the platform side if this is the first, or say why not.
+    ///
+    /// **The refusal is answered rather than only logged** (user ruling 2026-08-25). A desk that
+    /// swallowed a platform error into `stderr` left the one failure mode nobody can detect: the
+    /// reader is not notified, and is not notified that they were not notified. The `Err` is what
+    /// the caller turns into a card in the window — see [`crate::Runtime::raise_attention`].
+    ///
+    /// `Ok(())` on an already-refused desk, and it is not a lie: the sentence being reported is
+    /// "this machine cannot raise notifications", it has been said once, and saying it again on
+    /// every later message would be the flood the one-card rule exists to prevent.
+    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
+        if self.refused {
+            return Ok(());
+        }
+        if self.voice.is_none() {
+            let proxy = self.proxy.clone();
+            let wake: Box<dyn Fn() + Send> = Box::new(move || {
+                // Nothing is done here beyond waking the loop, for
+                // `AppEvent::GitChanged`'s reason and one of its own: this runs on
+                // a platform thread with no access to any window, and the launch
+                // string is already in the notifier's own queue.
+                let _ = proxy.send_event(AppEvent::NotificationClicked);
+            });
+            // **An update's trial writes no identity** (`update_trial`, F-7):
+            // the toast goes out under the one the old build registered, and
+            // the commit writes this build's.
+            let opened = if crate::update_trial::defer(crate::update_trial::Writer::ToastIdentity) {
+                bt_platform::Notifier::without_registration(wake)
+            } else {
+                bt_platform::Notifier::new(crate::APP_NAME, wake)
+            };
+            match opened {
+                Ok(voice) => self.voice = Some(voice),
+                Err(error) => {
+                    crate::diagnostics::stderr_line(format!(
+                        "desktop notifications unavailable: {error}"
+                    ));
+                    self.refused = true;
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(voice) = self.voice.as_mut()
+            && let Err(error) = voice.show(title, body, launch)
+        {
+            crate::diagnostics::stderr_line(format!("desktop notification refused: {error}"));
+            self.refused = true;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Every clicked toast's launch string since the last call.
+    fn take_activations(&self) -> Vec<String> {
+        self.voice
+            .as_ref()
+            .map(bt_platform::Notifier::take_activations)
+            .unwrap_or_default()
+    }
 }
 
 impl ImeCaretDoor for bt_platform::ImeSystemCaret {

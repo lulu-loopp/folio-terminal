@@ -181,7 +181,7 @@ pub(crate) enum Writer {
     /// the old build until the trial is committed. Held back, both are still read and shown;
     /// the release runs the two Explorer members again.
     ExplorerRepair,
-    /// The toast sender's identity in the registry (`NotificationDesk::show` →
+    /// The toast sender's identity in the registry (`<NotificationDesk as ToastDoor>::show` →
     /// `bt_platform::Notifier::register_identity`).
     ToastIdentity,
     /// The record of the recovered copies a start has said

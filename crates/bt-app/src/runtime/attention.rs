@@ -820,6 +820,43 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **The first put-away on this machine says so, once** (0.4.10 plan row 87, part 87d; ruling
+    /// R12): "Folio is still running. Its icon in the notification area brings the window back."
+    /// Windows 11 parks a new notification-area icon out of sight, so without it the first close
+    /// would look like a quit.
+    ///
+    /// Asked at the put-away and nowhere else, after the hide was admitted: a refused hide, a close
+    /// that reaches a window already away, the summoned terminal's hide and a close that ends the
+    /// run never reach it. [`notify::first_hide_toast_owed`] decides — Windows, the receipt not yet
+    /// spent, and the `Notifications` row letting a toast through, asked through the gate every
+    /// toast passes. Silenced, the receipt stays owed.
+    ///
+    /// **The receipt is spent when the notification is handed to the desk**, whatever the desk
+    /// answers (R5 of T-TRAY-87D). A refusal raises no card for this message: nobody asked for it,
+    /// the window it would sit in is hidden, and the desk has already said its one stderr line and
+    /// latched. Its click is [`notify::BRING_BACK_LAUNCH`], which the door back answers.
+    ///
+    /// **Here, beside [`Self::raise_attention`]**: this module is the one writer of the desk
+    /// (`App::notifications`); the put-away (`Runtime::put_the_window_away`) asks.
+    pub(super) fn tell_the_first_put_away(&mut self) {
+        let settings = self.app.settings_store.loaded();
+        if !notify::first_hide_toast_owed(
+            bt_platform::host_platform(),
+            settings.first_hide_toast,
+            settings.terminal_notifications,
+        ) {
+            return;
+        }
+        let mut settings = settings.clone();
+        settings.first_hide_toast = bt_persist::FirstHideToastV1::Shown;
+        self.app.settings_store.store(settings);
+        let _ = self.app.notifications.show(
+            i18n::Text::ToastStillRunningTitle.text(),
+            i18n::Text::ToastStillRunningBody.text(),
+            notify::BRING_BACK_LAUNCH,
+        );
+    }
+
     pub(crate) fn raise_attention(&mut self, raised: Vec<AttentionDelivery>) -> Result<()> {
         if raised.is_empty() {
             return Ok(());

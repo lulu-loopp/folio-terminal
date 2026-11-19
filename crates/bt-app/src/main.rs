@@ -9449,7 +9449,12 @@ struct App<B: Backend = Native> {
     /// two identities would be two apps in the reader's notification settings.
     /// The window a click must return to is carried in the toast instead — see
     /// `notify::NotificationRoute`.
-    notifications: NotificationDesk,
+    ///
+    /// **The backend's toast door** (0.4.10 plan row 87, part 87d; R7 of T-TRAY-87D): the
+    /// product's is the desk above; the test suite's records each toast and reaches nothing,
+    /// so no test writes the toast identity or puts a message on the desktop of the machine
+    /// running it.
+    notifications: B::Toasts,
     session_store: persist::SessionStore,
     settings_store: persist::SettingsStore,
     /// The shortcut table dispatch reads: this build's defaults with the user's
@@ -9696,6 +9701,15 @@ struct App<B: Backend = Native> {
     /// So the chord records a debt and [`FolioApp`] spends it at the door, where
     /// the windows all are.
     quit_requested: bool,
+    /// **Every put-away window owed its way back** (0.4.10 plan row 87, part 87d): set when the
+    /// switch `Keep running when closed` is turned off — by its row, an import or a hand edit of
+    /// `settings.json` — so that off is the old behaviour exactly, with no window left hidden.
+    ///
+    /// [`Self::quit_requested`]'s shape for its reason: the switch is answered inside a
+    /// `Runtime`, which is one window by construction, and the door back
+    /// (`FolioApp::bring_the_window_back`) walks every window. Recorded by
+    /// [`Self::ask_for_the_put_away_windows`] and spent at the loop's door.
+    bring_back_requested: bool,
     /// **The quit that is under way**, if one is (multiwindow slice E2, §2.9).
     ///
     /// On `App` and not on a window, because it is the process leaving: one card,
@@ -9828,7 +9842,7 @@ struct AppParts<B: Backend> {
     copilot_hooks_installed: bool,
     agent_config_refusals: [Option<&'static str>; 3],
     copilot_readiness: attention_copilot::Readiness,
-    notifications: NotificationDesk,
+    notifications: B::Toasts,
     session_store: persist::SessionStore,
     settings_store: persist::SettingsStore,
     shortcuts: shortcuts::Shortcuts,
@@ -10014,6 +10028,7 @@ impl<B: Backend> App<B> {
             capture_endings: Vec::new(),
             pending_handover: None,
             quit_requested: false,
+            bring_back_requested: false,
             quit: None,
             windows_open: Vec::new(),
             activated: Vec::new(),
@@ -24297,66 +24312,6 @@ impl NotificationDesk {
             proxy,
         }
     }
-
-    /// Raise one toast, building the platform side if this is the first, or say why not.
-    ///
-    /// **The refusal is answered rather than only logged** (user ruling 2026-08-25). A desk that
-    /// swallowed a platform error into `stderr` left the one failure mode nobody can detect: the
-    /// reader is not notified, and is not notified that they were not notified. The `Err` is what
-    /// the caller turns into a card in the window — see [`Runtime::raise_attention`].
-    ///
-    /// `Ok(())` on an already-refused desk, and it is not a lie: the sentence being reported is
-    /// "this machine cannot raise notifications", it has been said once, and saying it again on
-    /// every later message would be the flood the one-card rule exists to prevent.
-    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
-        if self.refused {
-            return Ok(());
-        }
-        if self.voice.is_none() {
-            let proxy = self.proxy.clone();
-            let wake: Box<dyn Fn() + Send> = Box::new(move || {
-                // Nothing is done here beyond waking the loop, for
-                // `AppEvent::GitChanged`'s reason and one of its own: this runs on
-                // a platform thread with no access to any window, and the launch
-                // string is already in the notifier's own queue.
-                let _ = proxy.send_event(AppEvent::NotificationClicked);
-            });
-            // **An update's trial writes no identity** (`update_trial`, F-7):
-            // the toast goes out under the one the old build registered, and
-            // the commit writes this build's.
-            let opened = if update_trial::defer(update_trial::Writer::ToastIdentity) {
-                bt_platform::Notifier::without_registration(wake)
-            } else {
-                bt_platform::Notifier::new(APP_NAME, wake)
-            };
-            match opened {
-                Ok(voice) => self.voice = Some(voice),
-                Err(error) => {
-                    crate::diagnostics::stderr_line(format!(
-                        "desktop notifications unavailable: {error}"
-                    ));
-                    self.refused = true;
-                    return Err(error);
-                }
-            }
-        }
-        if let Some(voice) = self.voice.as_mut()
-            && let Err(error) = voice.show(title, body, launch)
-        {
-            crate::diagnostics::stderr_line(format!("desktop notification refused: {error}"));
-            self.refused = true;
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    /// Every clicked toast's launch string since the last call.
-    fn take_activations(&self) -> Vec<String> {
-        self.voice
-            .as_ref()
-            .map(bt_platform::Notifier::take_activations)
-            .unwrap_or_default()
-    }
 }
 
 /// **One interruption the ledger has allowed, on its way out of the window** (`attention` plan
@@ -38162,6 +38117,13 @@ impl<B: Backend> App<B> {
         self.quit_requested = true;
     }
 
+    /// **Ask for every put-away window back** (0.4.10 plan row 87, part 87d): the debt the loop
+    /// spends at [`FolioApp::settle_bring_back_request`], for [`Self::ask_to_quit`]'s reason —
+    /// the door back walks every window, and the switch is turned off inside one `Runtime`.
+    fn ask_for_the_put_away_windows(&mut self) {
+        self.bring_back_requested = true;
+    }
+
     /// **Leave without this change, on a cancelled quit's card** (T-QUIT-DOCUMENTS;
     /// revision (d)2): the quit is asked for again through the one door every quit
     /// goes through, carrying the choice — the documents the card named are dropped
@@ -47901,6 +47863,12 @@ impl<B: Backend> FolioApp<B> {
             self.bring_the_window_back()?;
         }
         for launch in activations {
+            // **The first put-away's notification names no pane** (0.4.10 plan row 87, part 87d):
+            // its click is the door above and nothing else.
+            if launch == notify::BRING_BACK_LAUNCH {
+                attention_trace::line(|| format!("open route={launch} leave=brought-back"));
+                continue;
+            }
             let Some(route) = notify::NotificationRoute::parse(&launch) else {
                 attention_trace::line(|| format!("open route={launch} leave=unparsed"));
                 continue;
@@ -48608,6 +48576,19 @@ impl<B: Backend> FolioApp<B> {
             app.pending_application_change = None;
         }
         Ok(())
+    }
+
+    /// **Bring back every put-away window when the switch was turned off** (0.4.10 plan row 87,
+    /// part 87d): spends [`App::bring_back_requested`] through the one door back. Nothing happens
+    /// when no window is put away, which is the common case of a press on `Off`.
+    fn settle_bring_back_request(&mut self) -> Result<()> {
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        if !std::mem::take(&mut app.bring_back_requested) {
+            return Ok(());
+        }
+        self.bring_the_window_back().map(drop)
     }
 
     /// **Write down every window this process has open** (B9, user ruling
@@ -52062,6 +52043,7 @@ impl<B: Backend> FolioApp<B> {
             .and_then(|()| self.settle_window_ring())
             .and_then(|()| self.settle_update_card())
             .and_then(|()| self.settle_application_change())
+            .and_then(|()| self.settle_bring_back_request())
             .and_then(|()| self.settle_restore_answer())
             // **F2 — before the window door and after everything that could have
             // closed a window.** A release that asked for a window of its own
@@ -52626,6 +52608,7 @@ impl<B: Backend> FolioApp<B> {
             let result = result.and_then(|()| {
                 hang_watch::during(hang_watch::Station::EventSettleApplication, || {
                     self.settle_application_change()
+                        .and_then(|()| self.settle_bring_back_request())
                 })
             });
             // The prompt's one answer, if this event was it — before the door below,

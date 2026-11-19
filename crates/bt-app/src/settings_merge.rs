@@ -22,8 +22,8 @@
 //! added to `SettingsV1` does not compile here until somebody has said how it
 //! merges.
 //!
-//! **The three machine receipts** (`first_run_card`, `cards_gesture_hint_offer`,
-//! `web_pages_used`) merge like any other field: a hand edit on this machine is
+//! **The four machine receipts** (`first_run_card`, `cards_gesture_hint_offer`,
+//! `web_pages_used`, `first_hide_toast`) merge like any other field: a hand edit on this machine is
 //! a statement about this machine. They have no door, so storing them is
 //! putting them in force ([`take_receipts`]).
 //!
@@ -200,6 +200,7 @@ pub(crate) fn merge(
         quake_restore,
         first_run_card,
         web_pages_used,
+        first_hide_toast,
         launch_opens,
         option_sends_alt,
         multiline_paste_ask,
@@ -343,6 +344,11 @@ pub(crate) fn merge(
         quake_restore: m.field("quake_restore", |s| &mut s.quake_restore, quake_restore),
         first_run_card: m.field("first_run_card", |s| &mut s.first_run_card, first_run_card),
         web_pages_used: m.field("web_pages_used", |s| &mut s.web_pages_used, web_pages_used),
+        first_hide_toast: m.field(
+            "first_hide_toast",
+            |s| &mut s.first_hide_toast,
+            first_hide_toast,
+        ),
         launch_opens: m.field("launch_opens", |s| &mut s.launch_opens, launch_opens),
         option_sends_alt: m.field(
             "option_sends_alt",
@@ -623,7 +629,7 @@ pub(crate) fn doors(
     plan_settings(in_force, merged, platform)
 }
 
-/// **The three machine receipts, put in force by storing them** (§3.4): they
+/// **The four machine receipts, put in force by storing them** (§3.4): they
 /// have no door, and the doors' plan leaves them out.
 pub(crate) fn take_receipts(settings: &mut SettingsV1, merged: &SettingsV1) {
     settings.first_run_card = merged.first_run_card;
@@ -631,6 +637,9 @@ pub(crate) fn take_receipts(settings: &mut SettingsV1, merged: &SettingsV1) {
     // file (`the_cards_offer_is_spent_in_one_place_and_given_back_in_one`).
     settings.cards_gesture_hint_offer = merged.cards_gesture_hint_offer;
     settings.web_pages_used = merged.web_pages_used;
+    // The first put-away's notification, told or owed on this machine (0.4.10 plan row 87,
+    // part 87d).
+    settings.first_hide_toast = merged.first_hide_toast;
 }
 
 #[cfg(test)]

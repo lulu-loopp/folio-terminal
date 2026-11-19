@@ -1149,3 +1149,8 @@ fn a_put_away_window_publishes_nothing_and_its_first_frame_back_is_built_then() 
         frame_says(shown)
     );
 }
+
+// The switch's row, its import door and the first put-away's notification (0.4.10 plan row 87,
+// part 87d), on this file's fixture.
+#[path = "close_switch_tests.rs"]
+mod close_switch;
