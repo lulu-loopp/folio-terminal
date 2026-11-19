@@ -690,8 +690,8 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
    Windows 的可以是 `-unsigned`,更新不看 Authenticode,行 102);A 还必须是更新
    卡已打开的构建(`OFFERS_ENABLED_WINDOWS` 自 U-31 起、`OFFERS_ENABLED_MACOS` 自 U-32 起)——`--update-feed`
    只换来源,不打开卡片。B 的版本号高于 A,且是演练版本号(第三段不小于 1000,见前提 3);
-   B 的发布清单里 `min_updater` 不高于 A 的版本(它就是声明的 `min_from`;否则 Prepare 在大下载
-   之前以 `Stop::TooOld` 停下)。B 不必发布到 GitHub,它的声明也从不上传。
+   B 的发布清单里 `min_updater` 不高于 A 的版本(它就是声明的 `min_from`;否则 Prepare 在下载大文件
+   之前就以 `Stop::TooOld` 停下)。B 不必发布到 GitHub,它的声明也从不上传。
 2. A 已由 `install-candidate.ps1` 装进客户机的 `C:\folio-vm\folio\` 并打了快照;每一行都从这个
    快照开始。
 3. 后继版本 B 经命令行参数 `--update-feed <file-URL>` 注入(U-30b)。带这个参数启动的那个
@@ -707,9 +707,9 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
       用所有者本机的签名会话;不签时不带 `-Sign`)。产物在 `target/release-package/`:
       `folio-<B>-windows-x64.zip`,或不签时的 `folio-<B>-windows-x64-unsigned.zip`。
       **B 的版本号是演练版本号**:第三段不小于 1000(例如 A 是 0.4.10 时 B 取 0.4.1010)。
-      声明的语法只认三段数字和 `v<版本>`、`v<版本>-preview` 两种标签,写不进「rehearsal」
-      这样的词,所以用号码来标:没有哪个发布会用这样的号,演练声明就不会被当成发布的声明;
-      `make-feed.ps1` 拒绝更小的号。B 的检出里还要有 `check-release-statement`(`cargo build
+      声明的语法里版本只能是三段数字,标签只能是 `v<版本>` 或 `v<版本>-preview`,写不进
+      「rehearsal」这类字样,所以靠号码来标:正式发布不会用这样的号,演练声明也就不会被当成
+      哪一次发布的声明;`make-feed.ps1` 拒绝更小的号。B 的检出里还要有 `check-release-statement`(`cargo build
       --release --locked -p bt-winres --features release-key,inflate --bin check-release-statement`,
       或用 `-CheckBinary` 指给它)。
    2. **建源文件夹**:用 B 的检出里的 `scripts/release/cleanvm/updater/make-feed.ps1`,它用同一
@@ -721,11 +721,11 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
 
       它把归档(给了 `-Image` 时还有 dmg)拷进这个新文件夹,由 `release-statement.ps1` 写出
       `RELEASE-STATEMENT.txt` 并打印签名命令;**持钥人用 live 密钥运行那条 `openssl pkeyutl
-      -sign` 命令**,脚本等 `RELEASE-STATEMENT.txt.sig` 出现(或用 `-Signature <文件>` 直接给),
+      -sign` 命令**,脚本等 `RELEASE-STATEMENT.txt.sig` 出现(或用 `-Signature <文件>` 直接给出),
       再用 `check-release-statement verify` 按更新器的读法核对整个文件夹,最后写
       `releases.json`:在声明的标签下列三个资产——声明列出的归档、声明、签名。给了 `-Image`
-      时声明陈述两半,dmg 核对过后从 Windows 源里删掉(Mac 的源由 `mac/setup.sh` 用同一份声明
-      做)。`releases.json` 的形状(GitHub 发布列表的形状;`size` 是文件字节数;`draft: true`
+      时声明同时列出 Windows 与 macOS 两个包,dmg 核对过后从 Windows 的源文件夹里删掉(Mac 的源
+      由 `mac/setup.sh` 用同一份声明来做)。`releases.json` 的形状(GitHub 发布列表的形状;`size` 是文件字节数;`draft: true`
       的条目不算):
 
       ```json
@@ -752,11 +752,12 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
 
       **演练声明只放在演练文件夹里,只用于这一次运行**:从不上传;最后一行跑完,
       `make-feed.ps1 -Out <feed 文件夹> -Remove` 删掉声明和签名(Mac 上由 `teardown.sh` 删,
-      `in/` 与 `feed/` 里的都删),客户机里的那份随每行回滚的快照一起消失。组好声明之后任何一步
-      失败(等签名超时、核对被拒),`make-feed.ps1` 当场删掉声明和签名,报错里写明 `-Remove`:
-      超时之后才写出来的签名用它删;重做时换一个新文件夹。**剩下的风险**:演练声明、它的签名和
-      B 的包若一起泄露,有人可以劝用户带 `--update-feed` 指向这几个文件启动 0.4.10 及以后的
-      Folio,装上 B;挡住它的只有「从不上传、跑完即删」,最坏时撤换 live 密钥。
+      `in/` 与 `feed/` 里的都删),客户机里的那份随每行回滚的快照一起消失。声明写出之后任何一步
+      失败(等签名超时、核对被拒),`make-feed.ps1` 都当场删掉声明和签名,并在报错里写明
+      `-Remove`:超时之后才落盘的签名用它来删;重做时用一个新文件夹。**残余风险**:演练声明、
+      它的签名和 B 的包若一起泄露,别人可以诱导用户带 `--update-feed` 指向这几个文件启动
+      0.4.10 或更新的 Folio,从而装上 B;能挡住这一点的只有「从不上传、跑完即删」,最坏的情况
+      只能撤换 live 密钥。
    3. **拷进客户机** `C:\feed\`:`run-row.ps1 -Feed <宿主上的 feed 文件夹>` 每一行都逐个文件拷入。
    4. **带参数启动 A**:`guest/keys.ps1` 的第一步 `launchfeed` 以
       `C:\folio-vm\folio\folio.exe --update-feed file:///C:/feed/` 启动它。
@@ -770,10 +771,10 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
    源的答复**:此后 24 小时内的普通启动仍会提示 v<B>,按下去去问 github.com(U-31 D-10)。
 
    macOS 同理:资产是 `Folio-<B>-macos-arm64.dmg`、声明和它的签名,声明就是
-   `make-feed.ps1 -Image` 陈述两半的那一份。三个文件先 `scp` 到 Mac 上演练文件夹的 `in/`;
+   `make-feed.ps1 -Image` 做出的、同时列出两个包的那一份。三个文件先 `scp` 到 Mac 上演练文件夹的 `in/`;
    `mac/setup.sh` 只认 `in/RELEASE-STATEMENT.txt` 与 `in/RELEASE-STATEMENT.txt.sig`(`teardown.sh`
    删的就是这两个),先核对 dmg 与声明的 `macos-arm64` 行(名字、大小、SHA-256)、声明的版本
-   和补丁号不小于 1000,再只把这三个文件放进演练文件夹的 `feed/`,在声明的标签下写好
+   (第三段不小于 1000),再只把这三个文件放进演练文件夹的 `feed/`,在声明的标签下写好
    `releases.json`,URL 形如 `file://<演练文件夹>/feed/Folio-<B>-macos-arm64.dmg`。
 
 #### Windows 步骤(W1–W15)
