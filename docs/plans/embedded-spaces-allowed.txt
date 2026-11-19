@@ -129,10 +129,10 @@ crates/bt-source/tests/index.rs:487 code sample: the indentation after an escape
 crates/bt-source/tests/index.rs:1435 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/tripwire.rs:9024 code sample: the indentation after an escaped line break is the sample's own
 crates/bt-source/tests/tripwire.rs:9406 code sample: the indentation after an escaped line break is the sample's own
-crates/bt-term/src/session.rs:22542 recorded terminal byte stream: the blank cells a repaint wrote
-crates/bt-term/src/session.rs:22659 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-term/src/session.rs:35942 terminal screen fixture: the columns are where the terminal draws them
-crates/bt-term/src/session.rs:38781 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-term/src/session.rs:22611 recorded terminal byte stream: the blank cells a repaint wrote
+crates/bt-term/src/session.rs:22728 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-term/src/session.rs:36011 terminal screen fixture: the columns are where the terminal draws them
+crates/bt-term/src/session.rs:38850 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session/pane_columns_tests.rs:135 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session/pane_columns_tests.rs:137 terminal screen fixture: the columns are where the terminal draws them
 crates/bt-term/src/session/pane_columns_tests.rs:144 terminal screen fixture: the columns are where the terminal draws them
