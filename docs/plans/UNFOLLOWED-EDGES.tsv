@@ -2383,6 +2383,7 @@ crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_update_card	Ambiguous	f
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_update_card	Ambiguous	map	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_update_card	Dynamic	verbs	2	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::settle_window_ring	Ambiguous	flatten	1	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::start_nothing_at_the_systems_end	Ambiguous	is_some_and	1	2026-11-19: T-TRAY-87E-QUIT-ASKS review fold (P2-3); whether the quit's update hand-over is already on its way, Option::is_some_and over the quit under way with Quit::give_up_the_update_for_the_systems_end as its predicate: a standard-library combinator, no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::surface_selftest_if_due	Ambiguous	elapsed	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::take_the_documents_answers	Ambiguous	is_some_and	1	2026-10-21: T-ENDSESSION-SAVES review; moved with the preview answers' hearing out of `take_preview_save_answers` (or the documents' out of `take_document_answers`); a standard-library combinator on an Option, an iterator, a slice or a string, which calls no door
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::transfer_tab	Ambiguous	and_then	1	
