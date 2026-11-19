@@ -454,7 +454,7 @@ A string literal that wraps continues with `\` at the end of the line, so the br
 
 `unsafe_code` · `clippy::todo` · `clippy::unimplemented` · `clippy::dbg_macro` · `clippy::debug_assert_with_mut_call`
 
-`clippy::debug_assert_with_mut_call` does not see a method call through a field (`self.term.finish_resize_transaction()`, the shape 0.4.10 plan row 107 found inside a `debug_assert!`), so that shape is guarded by review only until plan row 110. <!-- zh: pending T-SIX-KB-PER-LINE-PAST-THE-CAP -->
+`clippy::debug_assert_with_mut_call` 看不出经由字段的方法调用（如 `self.term.finish_resize_transaction()`，0.4.10 计划行 107 在一个 `debug_assert!` 里发现的正是这种写法），所以在计划行 110 落地之前，这种写法只靠审查把关。
 
 ⚠️ **成员 crate 必须写 `[lints] workspace = true`**——cargo 不自动继承。缺这行整张表就是摆设（这正是本规范首版的真实状态：写了一大堆 lint，一条都没生效）。**vendor 不继承**：它是 upstream 的代码，按 upstream 的标准。
 
