@@ -4148,18 +4148,19 @@ impl SettingsRow {
     ///
     /// `None` is the ordinary answer and it means what it says: the row is about
     /// Folio, or about a file, or about a shell that exists everywhere, and it
-    /// is on every machine's page. The five that answer `Some` are about a
+    /// is on every machine's page. The six that answer `Some` are about a
     /// mechanism one platform has and another has not — Explorer's folder menu,
-    /// the `$PROFILE` of a shell with no other door, the readline module that
-    /// one edition of PowerShell ships, the blurred backdrop this build can ask
-    /// a window for, and a key called Option.
+    /// a start at sign-in, a run kept in the notification area when the last
+    /// window closes (0.4.10 plan row 87, part 87d), the blurred backdrop this
+    /// build can ask a window for, a key called Option, and the agents' resume.
     ///
     /// **The same [`Capability`] the first-run card reads, and deliberately so.**
-    /// Two of these five are mechanisms that card already asks about, and a
-    /// second table would be a second place to remember which platforms have
-    /// them. The other three joined the table for this page and the card has no
-    /// row for any of them. What each surface owns is what it *does* with the
-    /// answer: the card drops the question, and this page drops the row.
+    /// One of these six, Explorer's folder menu, is a mechanism that card also
+    /// asks about (`first_run::RowKind::needs`), and a second table would be a
+    /// second place to remember which platforms have it. The other five joined
+    /// the table for this page and the card has no row for any of them. What
+    /// each surface owns is what it *does* with the answer: the card drops the
+    /// question, and this page drops the row.
     ///
     /// **A row the machine cannot honour is a different thing and is not here.**
     /// A Windows too old to know what a backdrop is, and a built-in profile's
@@ -6069,12 +6070,10 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
 /// the order impossible to read. [`SettingsRow::needs`] is where each row says
 /// what it is about; this is where the page acts on it.
 ///
-/// **Nothing here can empty a page.** Every category the five conditional rows
-/// belong to keeps unconditional rows under the same heading — General keeps
-/// six, Terminal keeps four, and Appearance keeps the whole of its everyday
-/// group and seven of its eight advanced rows — so the heading derivation that
-/// walks this list never meets a run of nothing, and the disclosure above the
-/// advanced group is untouched.
+/// **Nothing here can empty a page.** Every category the six conditional rows
+/// ([`SettingsRow::needs`]) belong to keeps unconditional rows under the same
+/// heading, so the heading derivation that walks this list never meets a run
+/// of nothing, and the disclosure above the advanced group is untouched.
 /// `no_page_is_left_with_a_heading_and_no_rows` is that claim.
 #[must_use]
 pub fn visible_rows_for(

@@ -833,8 +833,11 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// **The receipt is spent when the notification is handed to the desk**, whatever the desk
     /// answers (R5 of T-TRAY-87D). A refusal raises no card for this message: nobody asked for it,
-    /// the window it would sit in is hidden, and the desk has already said its one stderr line and
-    /// latched. Its click is [`notify::BRING_BACK_LAUNCH`], which the door back answers.
+    /// and the window it would sit in is hidden. But the desk has latched it and answers `Ok`
+    /// from now on, so the refusal is kept (`App::toast_refusal_unsaid`) and
+    /// [`Self::raise_attention`] raises the session's one card on the first delivery that would
+    /// have reached the desktop (review P1-1). Its click is [`notify::BRING_BACK_LAUNCH`], which
+    /// the door back answers.
     ///
     /// **Here, beside [`Self::raise_attention`]**: this module is the one writer of the desk
     /// (`App::notifications`); the put-away (`Runtime::put_the_window_away`) asks.
@@ -850,11 +853,13 @@ impl<B: Backend> Runtime<'_, B> {
         let mut settings = settings.clone();
         settings.first_hide_toast = bt_persist::FirstHideToastV1::Shown;
         self.app.settings_store.store(settings);
-        let _ = self.app.notifications.show(
+        if let Err(error) = self.app.notifications.show(
             i18n::Text::ToastStillRunningTitle.text(),
             i18n::Text::ToastStillRunningBody.text(),
             notify::BRING_BACK_LAUNCH,
-        );
+        ) {
+            self.app.toast_refusal_unsaid = Some(error);
+        }
     }
 
     pub(crate) fn raise_attention(&mut self, raised: Vec<AttentionDelivery>) -> Result<()> {
@@ -865,12 +870,14 @@ impl<B: Backend> Runtime<'_, B> {
         let window = u64::from(self.window.window.id());
         let mut flashes = Vec::new();
         let mut refusal = None;
+        let mut handed_to_the_desk = false;
         for delivery in raised {
             match notify::interruption(delivery.reach, enabled) {
                 notify::Interruption::Nothing => {}
                 // Collected and flashed once below: the button is the window's.
                 notify::Interruption::FlashTheTaskbarButton => flashes.push(delivery),
                 notify::Interruption::PutItOnTheDesktop => {
+                    handed_to_the_desk = true;
                     let route = notify::NotificationRoute {
                         window,
                         tab: delivery.tab.0,
@@ -904,6 +911,14 @@ impl<B: Backend> Runtime<'_, B> {
                 flashes,
             );
         }
+        // **The first put-away's kept refusal** (review P1-1): the desk answered this round `Ok`
+        // because it latched that refusal, so the message just handed over was lost and its card
+        // is this one.
+        let refusal = refusal.or_else(|| {
+            self.app
+                .toast_refusal_unsaid
+                .take_if(|_| handed_to_the_desk)
+        });
         match refusal {
             Some(error) => self.raise_notification_refusal(&error),
             None => Ok(()),

@@ -1646,16 +1646,31 @@ impl ImeCaretDoor for HeadlessImeCaret {
 }
 
 /// **The notification centre, recorded** (0.4.10 plan row 87, part 87d; R7 of T-TRAY-87D): every
-/// toast handed over, as `(title, body, launch)`, oldest first, and no click unless a test puts
-/// one in. Nothing reaches the machine: the product's desk writes the toast identity into the
-/// account's registry on its first toast and puts a real message on the desktop.
+/// toast handed over, as `(title, body, launch)`, oldest first, and no click: a test hands the
+/// route loop its launches itself (`FolioApp::route_notification_launches`). Nothing reaches the
+/// machine: the product's desk writes the toast identity into the account's registry on its first
+/// toast and puts a real message on the desktop.
+///
+/// **`refuse_with` is the platform's refusal, latched as the product's desk latches it** (review
+/// P1-1): set, the next toast answers that `Err` and is not handed over, and every toast after it
+/// answers `Ok` and is not handed over either — the "said once" rule of
+/// `<NotificationDesk as ToastDoor>::show`.
 #[derive(Default)]
 pub(crate) struct HeadlessToasts {
     pub(crate) handed_over: Vec<(String, String, String)>,
+    pub(crate) refuse_with: Option<String>,
+    refused: bool,
 }
 
 impl ToastDoor for HeadlessToasts {
     fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
+        if self.refused {
+            return Ok(());
+        }
+        if let Some(error) = self.refuse_with.take() {
+            self.refused = true;
+            return Err(error);
+        }
         self.handed_over
             .push((title.to_owned(), body.to_owned(), launch.to_owned()));
         Ok(())
@@ -1958,6 +1973,13 @@ impl HeadlessApplication {
     /// One window event, dispatched as the loop dispatches it.
     pub(crate) fn window_event(&mut self, event: winit::event::WindowEvent) {
         self.folio.on_window_event(&self.event_loop, self.id, event);
+    }
+
+    /// **One turn of the loop, as `about_to_wait` takes it** (0.4.10 plan row 87, part 87d,
+    /// review P2-1): the application's settles and every window's clocks, with no window event —
+    /// the only door a put-away run's sole window gets, since a hidden window is sent none.
+    pub(crate) fn turn(&mut self) {
+        self.folio.about_to_wait_inner(&self.event_loop);
     }
 }
 

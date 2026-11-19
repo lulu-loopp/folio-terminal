@@ -11,6 +11,7 @@ use crate::headless::WindowEffect;
 use crate::notify::{BRING_BACK_LAUNCH, NotificationRoute};
 use crate::settings::{SettingsRow, SettingsTarget};
 use crate::settings_bundle::SettingChange;
+use crate::test_support::StoragePassRig;
 use bt_persist::FirstHideToastV1;
 use winit::event::WindowEvent;
 
@@ -133,12 +134,79 @@ fn a_machine_that_was_told_is_not_told_again() {
     assert!(run.toasts_told().is_empty(), "nothing reaches the desk");
 }
 
+/// RED (T16e; R5, review P1-1) — **a refused first put-away spends the receipt, raises no card,
+/// and leaves the session's one refusal card to the message it would have lost**: the desk
+/// latches the refusal and answers `Ok` from then on, so the next attention delivery that
+/// reaches the desktop is not shown — and that delivery raises the "notifications refused" card
+/// (DESIGN §7.1.5o ④, 2026-08-25), with the platform's words.
+///
+/// PLANT 87d-P38: drop the kept refusal (`App::toast_refusal_unsaid`) from
+/// `Runtime::tell_the_first_put_away` — the agent's message is lost and no card says so.
+#[test]
+fn a_refused_first_put_away_leaves_its_card_to_the_next_message_it_would_have_lost() {
+    const REFUSAL: &str = "the notification platform is not here";
+    let mut run = PutAwayRun::open_with("told-refused", FirstHideToastV1::NotShown, true);
+    run.app().notifications.refuse_with = Some(REFUSAL.to_owned());
+    let refusal_cards = |run: &mut PutAwayRun| {
+        run.window()
+            .toasts
+            .toasts()
+            .iter()
+            .filter(|card| card.body().contains(REFUSAL))
+            .count()
+    };
+    let _ = run.close();
+    assert!(run.window().put_away, "the fixture's window is put away");
+    assert_eq!(
+        run.first_hide_receipt(),
+        FirstHideToastV1::Shown,
+        "the receipt is spent on the platform's refusal too"
+    );
+    assert!(run.toasts_told().is_empty(), "nothing was shown");
+    assert_eq!(refusal_cards(&mut run), 0, "and no card is raised for it");
+    run.application
+        .folio
+        .bring_the_window_back()
+        .expect("the window comes back");
+    assert!(!run.window().put_away, "the window is back");
+    let tab = run.window().tabs[0].id;
+    let seat = run.window().tabs[0].seats.identity();
+    let delivery = |title: &str| crate::AttentionDelivery {
+        tab,
+        seat,
+        reach: crate::attention::Reach::Toast,
+        why: crate::attention::Why::Awaiting,
+        title: title.to_owned(),
+        body: None,
+    };
+    run.application
+        .runtime()
+        .raise_attention(vec![delivery("等你 waiting")])
+        .expect("the delivery is answered");
+    assert!(
+        run.toasts_told().is_empty(),
+        "the latched desk shows nothing"
+    );
+    assert_eq!(
+        refusal_cards(&mut run),
+        1,
+        "and the message it lost raises the one refusal card"
+    );
+    run.application
+        .runtime()
+        .raise_attention(vec![delivery("second")])
+        .expect("the delivery is answered");
+    assert_eq!(refusal_cards(&mut run), 1, "once a session");
+}
+
 /// RED (T16d; R12) — **a click on it brings the window back and opens nothing**: its launch is
 /// [`BRING_BACK_LAUNCH`], which names no pane (`NotificationRoute::parse` refuses it), and the
 /// door every click on one of Folio's notifications takes brings the put-away window back.
 ///
 /// PLANT 87d-P34: hand the desk an empty launch in `Runtime::tell_the_first_put_away` — the
-/// launch the click carries is not the one the route loop knows by name.
+/// launch the click carries is not the one the route loop knows by name. This pins the launch
+/// constant; the route loop's `bring-back` arm only names the click in the attention trace, which
+/// no test can read, and is unpinned (review N1).
 #[test]
 fn a_click_on_it_brings_the_window_back_and_opens_nothing() {
     let mut run = PutAwayRun::open_with("told-click", FirstHideToastV1::NotShown, true);
@@ -255,4 +323,42 @@ fn turning_the_switch_on_moves_no_window() {
         "no window is shown or hidden: {effects:?}"
     );
     assert!(!run.window().put_away);
+}
+
+/// RED (T20c; R8, review P2-1) — **a hand edit of `settings.json` to Off brings a put-away window
+/// back on the turn alone**: the edit arrives with the storage worker's answer
+/// (`AppEvent::DocumentsAnswered`), not with a window event, and a put-away run's sole window is
+/// sent none, so the turn's settle chain is the only door that spends the ask.
+///
+/// PLANT 87d-P39: drop `settle_bring_back_request` from `FolioApp::about_to_wait_inner`'s chain —
+/// the window stays put away with the switch off.
+#[test]
+fn a_hand_edit_to_off_brings_a_put_away_window_back_on_the_turn_alone() {
+    let mut run = PutAwayRun::open("hand-edit-off", true);
+    let _ = run.close();
+    assert!(run.window().put_away, "the fixture's window is put away");
+    let mut edited = run.app().settings_store.loaded().clone();
+    edited.close_keeps_running = false;
+    StoragePassRig::write(&run.dir, crate::persist::SETTINGS_FILE_NAME, &edited);
+    run.app().settings_store.ask_reread();
+    crate::lane::wait_until("the hand edit, merged", || {
+        run.application
+            .folio
+            .take_document_answers()
+            .expect("the answers are heard");
+        !run.switch()
+    });
+    assert!(
+        run.window().put_away,
+        "the answer itself brings nothing back: the turn's door spends the ask"
+    );
+    let _ = run.application.event_loop.ledger.take();
+    run.application.turn();
+    let effects = run.application.event_loop.ledger.take();
+    assert!(
+        effects.contains(&WindowEffect::Visible(true)),
+        "the window is back on the glass: {effects:?}"
+    );
+    assert!(!run.window().put_away, "and no longer put away");
+    assert!(run.sentinel_stands(), "the run goes on");
 }

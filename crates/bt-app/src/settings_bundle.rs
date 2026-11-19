@@ -903,6 +903,39 @@ mod tests {
         }
     }
 
+    /// RED (0.4.10 plan row 87, part 87d, review N5) — **the first put-away's receipt is no row
+    /// and no import moves it**: it says whether this machine was told, not a preference, so a
+    /// file from another machine neither tells this one again nor silences it.
+    #[test]
+    fn the_first_put_away_receipt_is_no_row_and_no_import_moves_it() {
+        use bt_persist::FirstHideToastV1::{NotShown, Shown};
+        for (here, there) in [(NotShown, Shown), (Shown, NotShown)] {
+            let current = SettingsV1 {
+                first_hide_toast: here,
+                ..SettingsV1::default()
+            };
+            let imported = SettingsV1 {
+                first_hide_toast: there,
+                ..SettingsV1::default()
+            };
+            let plan = plan_settings(&current, &imported, bt_platform::HostPlatform::Windows);
+            assert!(
+                plan.apply.is_empty() && plan.elsewhere.is_empty(),
+                "nothing to put in force: {:?} {:?}",
+                plan.apply,
+                plan.elsewhere
+            );
+            let mut folded = current.clone();
+            for change in plan.apply.iter().chain(&plan.elsewhere) {
+                change.write_into(&mut folded);
+            }
+            assert_eq!(
+                folded.first_hide_toast, here,
+                "this machine's receipt stands"
+            );
+        }
+    }
+
     /// RED (0.4.4 ticket 05) — **an import of an export of this very state
     /// changes nothing and names nothing.**
     ///

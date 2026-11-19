@@ -533,10 +533,11 @@ close ends the run** (2026-10-09, T-SUMMON-DIRTY-PREVIEW): with Keep running whe
 closed off, or for a last window whose shells all exited. Before the run ends, the
 summoned terminal's gate is put the run's end (`GateRequest::ShutWithTheRun`) and,
 when it asks, the summoned terminal is brought up holding the card; Save all or
-Discard re-runs that window's close, and Cancel leaves it open. **With the switch on
-(the default, 2026-11-14), that close puts the window away instead** (0.4.10 row 87):
-nothing is asked, the summoned terminal stays as it was, and both go when the run
-goes, which is only at a quit, the system's end or the outside quit message. A
+Discard re-runs that window's close, and Cancel leaves it open. **On Windows, with
+the switch on (the default, 2026-11-14), that close puts the window away instead**
+(0.4.10 row 87): nothing is asked, the summoned terminal stays as it was, and both
+go when the run goes, which is only at a quit, the system's end, the outside quit
+message, or the exit of the put-away window's last shell. A
 put-away run the system restarts comes back on the glass: the layout keeps no
 put-away bit. The summoned terminal never stands alone.
 **From.** §7.1.3; §7.1.3q; §7.1.3s *undo lives on the buffer, and the dirty dot is

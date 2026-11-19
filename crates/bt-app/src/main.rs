@@ -9710,6 +9710,17 @@ struct App<B: Backend = Native> {
     /// (`FolioApp::bring_the_window_back`) walks every window. Recorded by
     /// [`Self::ask_for_the_put_away_windows`] and spent at the loop's door.
     bring_back_requested: bool,
+    /// **A refusal the first put-away's notification met, owed its card** (0.4.10 plan row 87,
+    /// part 87d, review P1-1): the desk latches its first refusal and answers `Ok` ever after, so
+    /// the one "notifications refused" card of a session (DESIGN §7.1.5o ④, 2026-08-25) is
+    /// raised by whichever caller met the `Err`. The first put-away raises no card of its own
+    /// (R5 of T-TRAY-87D: nobody asked for it, the window is hidden), so it keeps the refusal here
+    /// and `Runtime::raise_attention` raises the card on the first delivery that would have
+    /// reached the desktop — the message that was lost.
+    ///
+    /// [`Self::quit_requested`]'s shape: written and spent in `runtime::attention`, the desk's
+    /// one writer.
+    toast_refusal_unsaid: Option<String>,
     /// **The quit that is under way**, if one is (multiwindow slice E2, §2.9).
     ///
     /// On `App` and not on a window, because it is the process leaving: one card,
@@ -10029,6 +10040,7 @@ impl<B: Backend> App<B> {
             pending_handover: None,
             quit_requested: false,
             bring_back_requested: false,
+            toast_refusal_unsaid: None,
             quit: None,
             windows_open: Vec::new(),
             activated: Vec::new(),
