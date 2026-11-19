@@ -402,8 +402,8 @@ pub(crate) fn is_writer_of(directory: &Path) -> bool {
 
 /// **One row of the claim table**: the claim this process took on a directory (it is the writer,
 /// and the guard lives here), or `None` (it asked and was refused) — and, in a test build, the
-/// directory it was asked of, which is how [`let_go_of_the_claims_on_removed_directories`]
-/// knows a test's directory is gone.
+/// directory it was asked of, which is how the test build's
+/// `let_go_of_the_claims_on_removed_directories` knows a test's directory is gone.
 struct ClaimRow {
     claim: Option<bt_platform::instance::DataDirectoryClaim>,
     #[cfg(test)]
