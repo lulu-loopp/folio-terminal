@@ -3209,6 +3209,15 @@ impl HostPlatform {
     pub const fn an_application_outlives_its_last_window(self) -> bool {
         matches!(self, Self::MacOs)
     }
+
+    /// **Whether this platform has a notification area to put the run's icon in** (0.4.10 plan
+    /// row 87, part 87b): Windows does, so `bt-app` puts the icon up while its switch keeps the
+    /// run. macOS's way back to a running application is its Dock icon (part 87c), and a Linux
+    /// desktop's tray is not written. A value, for [`host_platform`]'s reason.
+    #[must_use]
+    pub const fn has_a_notification_area(self) -> bool {
+        matches!(self, Self::Windows)
+    }
 }
 
 /// **The variable that names this user's home directory on `platform`.**
@@ -9238,6 +9247,12 @@ pub mod close_road;
 mod box_icon;
 #[cfg(windows)]
 pub use box_icon::ProgramIcons;
+
+/// **Folio's icon in the notification area** (0.4.10 plan row 87, part 87b): a host window of
+/// its own, the icon in the shell's version-4 shape, its menu, and the badge `bt-app`'s fold
+/// asks for. Constructible and showing nothing where there is no notification area
+/// ([`HostPlatform::has_a_notification_area`]).
+pub mod tray;
 
 /// **The shell's two icon sides at a display's scale** (0.4.10 plan rows 71 and 72): the small
 /// icon (`SM_CXSMICON`, 16 at 96 DPI) and the big one (`SM_CXICON`, 32 at 96 DPI), each
