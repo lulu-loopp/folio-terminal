@@ -762,6 +762,10 @@ pub struct VideoSeat {
     /// only by [`Self::answer`], through [`seat_answer`]; it travels with the
     /// seat across a tear-off, as the engine does.
     late_since: Option<Instant>,
+    /// **Paused because its window was put away**, and owed its play when the window is brought
+    /// back (0.4.10 plan row 87, part 87a): set only for a seat that was playing at the put-away,
+    /// so a recording the person had paused stays paused.
+    paused_while_away: bool,
 }
 
 impl std::fmt::Debug for VideoSeat {
@@ -817,6 +821,25 @@ impl VideoSeat {
             bar_drawn: None,
             rate_index: 0,
             late_since: None,
+            paused_while_away: false,
+        }
+    }
+
+    /// **Paused for its window's put-away** (0.4.10 plan row 87, part 87a; the coordinator's
+    /// ruling of 2026-11-18): a recording that was playing is paused and remembers it, one that
+    /// was not is left as it stands.
+    fn pause_for_the_put_away(&mut self) {
+        if self.engine.state().playing {
+            self.engine.pause();
+            self.paused_while_away = true;
+        }
+    }
+
+    /// **Played again when its window is brought back** — only if [`Self::pause_for_the_put_away`]
+    /// paused it.
+    fn play_after_the_put_away(&mut self) {
+        if std::mem::take(&mut self.paused_while_away) {
+            self.engine.play();
         }
     }
 
@@ -2121,6 +2144,24 @@ impl VideoSeats {
     pub fn shutdown_all(&mut self) {
         for (_, mut seat) in std::mem::take(&mut self.seats) {
             seat.shutdown();
+        }
+    }
+
+    /// **The window is put away, and its recordings are not heard** (0.4.10 plan row 87, part
+    /// 87a; the coordinator's ruling of 2026-11-18: the video pane pauses when its window is put
+    /// away and plays again when it is brought back, while the window's pages are left running):
+    /// every playing seat paused ([`VideoSeat::pause_for_the_put_away`]).
+    pub fn pause_while_away(&mut self) {
+        for seat in self.seats.values_mut() {
+            seat.pause_for_the_put_away();
+        }
+    }
+
+    /// **The window is brought back**: every seat the put-away paused plays again
+    /// ([`VideoSeat::play_after_the_put_away`]).
+    pub fn play_again_after_away(&mut self) {
+        for seat in self.seats.values_mut() {
+            seat.play_after_the_put_away();
         }
     }
 }

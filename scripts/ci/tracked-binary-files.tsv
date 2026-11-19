@@ -176,3 +176,7 @@ vendor/conpty/Microsoft.Windows.Console.ConPTY.1.24.260512001.nupkg	binary forma
 vendor/conpty/Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg	binary format contains NUL bytes
 vendor/psreadline/PSReadLine.2.4.5.nupkg	binary format contains NUL bytes
 vendor/vte/tests/demo.vte	binary format contains NUL bytes
+vendor/winit/examples/data/cross.png	binary format contains NUL bytes
+vendor/winit/examples/data/cross2.png	binary format contains NUL bytes
+vendor/winit/examples/data/gradient.png	binary format contains NUL bytes
+vendor/winit/examples/data/icon.png	binary format contains NUL bytes

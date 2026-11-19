@@ -78,6 +78,24 @@ The Apache-2.0 text is reproduced in this document under the crate listing.
 
 ---
 
+### `winit` 0.30.13, vendored and modified
+
+<https://github.com/rust-windowing/winit> — Apache License, Version 2.0.
+
+`vendor/winit/` is the crates.io 0.30.13 archive with one change by the Folio
+contributors: on Windows, the thread event-target window's procedure answers
+`WM_CLOSE` with 0 instead of handing it to `DefWindowProcW`, which destroyed the
+window and every event-loop wake after it. The one file that differs carries a
+notice at the top of the file, as section 4(b) of the Apache License requires,
+and `vendor/winit/CHANGES-FOLIO.md` indexes it.
+
+Upstream ships **no `NOTICE` file** with this crate, so there is no attribution
+notice to propagate under section 4(d). The licence text it carries is in the
+repository at `vendor/winit/LICENSE`, and the Apache-2.0 text is reproduced in
+this document under the crate listing.
+
+---
+
 ### Microsoft ConPTY sidecar — `conpty.dll` and `OpenConsole.exe`
 
 <https://github.com/microsoft/terminal> — MIT.

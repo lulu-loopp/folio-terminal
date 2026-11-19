@@ -90,6 +90,7 @@ public static class KeysWindows {
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder text, int max);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessageW(string name);
   public const uint WM_CLOSE = 0x0010;
   public static IntPtr[] AppWindowsOf(uint target) {
     var all = new System.Collections.Generic.List<IntPtr>();
@@ -107,12 +108,18 @@ public static class KeysWindows {
 # **Every Folio window is closed, then every folio.exe must be gone**: a plain start while Folio
 # runs is handed to it and opens a second window in the same process (seen in E1-b's RV-W11), so
 # closing one window leaves the process running and the next plain start hands over again.
+# Each window is first asked by Folio's quit from outside (0.4.10 plan row 87, part 87a; R9),
+# because with the close switch on the last window's WM_CLOSE only puts it away; WM_CLOSE follows
+# for a build that does not hear the message (an update row's older Folio).
 function CloseFolio {
   $procs = @(Get-Process folio -ErrorAction SilentlyContinue)
   if ($procs.Count -eq 0) { Say 'close: no Folio running'; return }
+  $outsideQuit = [KeysWindows]::RegisterWindowMessageW('Folio.QuitFromOutside.v1')
   foreach ($p in $procs) {
     $hs = @([KeysWindows]::AppWindowsOf([uint32]$p.Id))
     foreach ($h in $hs) {
+      $quit = [KeysWindows]::PostMessage($h, $outsideQuit, [IntPtr]::Zero, [IntPtr]::Zero)
+      Say "Folio.QuitFromOutside.v1 ($outsideQuit) posted to hwnd=$h of pid=$($p.Id) -> $quit"
       $ok = [KeysWindows]::PostMessage($h, [KeysWindows]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
       Say "WM_CLOSE posted to hwnd=$h of pid=$($p.Id) -> $ok"
     }

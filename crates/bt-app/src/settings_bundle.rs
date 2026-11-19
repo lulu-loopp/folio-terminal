@@ -120,6 +120,8 @@ pub(crate) enum SettingChange {
     OptionSendsAlt(bool),
     MultilinePaste(bool),
     ResumeAgents(bool),
+    /// Whether closing the run's last ordinary window puts it away (v41, 0.4.10 plan row 87).
+    CloseKeepsRunning(bool),
     /// Which colour scheme a web pane asks its page for (0.4.4 ticket 09).
     WebPages(WebColorSchemeV1),
 }
@@ -172,9 +174,10 @@ impl SettingChange {
             Self::MultilinePaste(_) => SettingsRow::MultilinePaste,
             Self::ResumeAgents(_) => SettingsRow::ResumeAgents,
             Self::WebPages(_) => SettingsRow::WebPages,
-            // The one with no row: which pages' Advanced groups are open. It is read where it is
-            // used.
-            Self::AdvancedOpen(_) => {
+            // The ones with no row: which pages' Advanced groups are open, and — until its
+            // Settings row lands (0.4.10 plan row 87, part 87d) — whether the last window's close
+            // keeps the run. Each is read where it is used.
+            Self::AdvancedOpen(_) | Self::CloseKeepsRunning(_) => {
                 return None;
             }
         })
@@ -236,6 +239,7 @@ impl SettingChange {
             Self::OptionSendsAlt(value) => settings.option_sends_alt = value,
             Self::MultilinePaste(value) => settings.multiline_paste_ask = value,
             Self::ResumeAgents(value) => settings.resume_agents = value,
+            Self::CloseKeepsRunning(value) => settings.close_keeps_running = value,
             Self::WebPages(value) => settings.web_color_scheme = value,
         }
     }
@@ -317,6 +321,7 @@ pub(crate) fn plan_settings(
         option_sends_alt,
         multiline_paste_ask,
         resume_agents,
+        close_keeps_running,
         web_color_scheme,
     } = imported.clone();
     let mut changes = Vec::new();
@@ -496,6 +501,10 @@ pub(crate) fn plan_settings(
     offer(
         current.resume_agents != resume_agents,
         SettingChange::ResumeAgents(resume_agents),
+    );
+    offer(
+        current.close_keeps_running != close_keeps_running,
+        SettingChange::CloseKeepsRunning(close_keeps_running),
     );
     offer(
         current.web_color_scheme != web_color_scheme,
@@ -785,6 +794,7 @@ mod tests {
             option_sends_alt: !base.option_sends_alt,
             multiline_paste_ask: !base.multiline_paste_ask,
             resume_agents: !base.resume_agents,
+            close_keeps_running: !base.close_keeps_running,
             web_color_scheme: WebColorSchemeV1::Dark,
             web_pages_used: bt_persist::WebPagesUsedV1::Used,
             ..base

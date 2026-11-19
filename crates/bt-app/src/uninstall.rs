@@ -2235,6 +2235,18 @@ fn remove_the_program(
         Ok(running) => {
             for process in running {
                 if !waited.contains(&process) {
+                    // **A running copy is asked to quit before it is waited for** (0.4.10 plan row
+                    // 87, part 87a; R9): with its last window's close keeping the run, a copy a
+                    // person left put away would otherwise be waited for until "Still running".
+                    // Folio's quit from outside writes its layout and leaves; this process, the
+                    // door, is waited for and not asked.
+                    if process.pid != std::process::id() {
+                        let _ = bt_platform::install_flip::ask(
+                            process,
+                            &[program],
+                            bt_platform::install_flip::Ask::Quit,
+                        );
+                    }
                     waited.push(process);
                 }
             }

@@ -320,6 +320,20 @@ pub(crate) struct CloseAsked {
     pub(crate) pointer: PointerAtClose,
 }
 
+impl CloseAsked {
+    /// A close whose request nothing witnessed and whose pointer was not read.
+    pub(crate) const UNMARKED: Self = Self {
+        arrival: None,
+        pointer: PointerAtClose::Unread,
+    };
+
+    /// The road's words in a close line's `road=` field: `unmarked` when nothing was witnessed.
+    pub(crate) fn road_said(self) -> &'static str {
+        self.arrival
+            .map_or("unmarked", |arrival| arrival.road.road_word())
+    }
+}
+
 /// **Where the pointer was when the close arrived**, in the window's own words.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PointerAtClose {
@@ -401,12 +415,34 @@ const fn closed_cause(how: ClosedHow) -> &'static str {
 /// when it ends the run, `Folio: window closed —` with the windows left when it does not. Enum
 /// words and counts only, on one physical line.
 pub(crate) fn window_closed_line(how: ClosedHow, facts: ClosedFacts) -> String {
+    let head = if facts.windows_left.is_some() {
+        "Folio: window closed"
+    } else {
+        "Folio: last window closed"
+    };
+    close_line(head, how, facts)
+}
+
+/// **The one line a close that puts the run's last window away writes** (0.4.10 plan row 87,
+/// part 87a, review P1-2): `Folio: last window put away —`, then the same cause, road, delivery,
+/// foreground, pointer and counts as [`window_closed_line`]. With the switch on the last
+/// window's close is put away and never closed, so this is the line that names the road of the
+/// close row 103 was built to name.
+pub(crate) fn window_put_away_line(how: ClosedHow, facts: ClosedFacts) -> String {
+    close_line("Folio: last window put away", how, facts)
+}
+
+/// Say the put-away line through the road the window says its lines on.
+pub(crate) fn say_window_put_away(how: ClosedHow, facts: ClosedFacts, mut note: impl FnMut(&str)) {
+    note(&window_put_away_line(how, facts));
+}
+
+/// A close's line after `head`: the cause, the road's four readings and the counts.
+fn close_line(head: &str, how: ClosedHow, facts: ClosedFacts) -> String {
     let (road, delivery, foreground, pointer) = match how {
         ClosedHow::TabMovedOut => ("tab-moved-out", "unread", "unread", "unread"),
         ClosedHow::Asked(asked) => (
-            asked
-                .arrival
-                .map_or("unmarked", |arrival| arrival.road.road_word()),
+            asked.road_said(),
             asked
                 .arrival
                 .and_then(|arrival| arrival.delivery)
@@ -422,11 +458,6 @@ pub(crate) fn window_closed_line(how: ClosedHow, facts: ClosedFacts) -> String {
     let window = match facts.window {
         ClosedWindow::Ordinary => "ordinary",
         ClosedWindow::Summon => "summon",
-    };
-    let head = if facts.windows_left.is_some() {
-        "Folio: window closed"
-    } else {
-        "Folio: last window closed"
     };
     let cause = closed_cause(how);
     let (id, tabs, panes) = (facts.id, facts.tabs, facts.panes);

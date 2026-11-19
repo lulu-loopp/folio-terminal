@@ -9787,6 +9787,11 @@ struct App<B: Backend = Native> {
     /// every application the product builds; an instance's own so that a test drives the quit
     /// with the suite's patience (`lane::PATIENCE`) rather than the product's four seconds.
     pane_retirement_deadline: std::time::Duration,
+    /// **Where a put-away run's return asks the carry pass for the agents' hooks** (0.4.10 plan
+    /// row 87, part 87a; R13): [`carry_pass::begin_carry_pass`] in every application the product
+    /// builds; an instance's own so that a test of the door counts the ask rather than starting a
+    /// pass over the account's agent files.
+    carry_ask: fn(CarryAsk),
 }
 
 /// **What an [`App`] is built from**: every field its builder computes — the device, the workers it
@@ -10021,6 +10026,7 @@ impl<B: Backend> App<B> {
             handoff_answer: None,
             handoff_heard: None,
             pane_retirement_deadline: PANE_RETIREMENT_DEADLINE,
+            carry_ask: carry_pass::begin_carry_pass,
         }
     }
 }
@@ -10038,8 +10044,23 @@ impl<B: Backend> App<B> {
 /// asks for a turn", and the summon chord is now the only such thing there is.
 static SUMMON_PROXY: std::sync::OnceLock<EventLoopProxy<AppEvent>> = std::sync::OnceLock::new();
 
-/// **A run ends with the last window a person can see** (§7.54e ①, user ruling
-/// 2026-09-05).
+/// **A run ends with the last window a person can see — unless the close keeps it** (§7.54e ①,
+/// user ruling 2026-09-05; reversed for the run's last ordinary window while the switch is on by
+/// the owner's ruling R1 of 2026-11-14, 0.4.10 plan row 87, part 87a).
+///
+/// `keeping` is whether this close keeps the run: `settings.json`'s `close_keeps_running` is on
+/// (R2: on by default), no quit is under way, and the window still holds a shell that has not
+/// exited (R4: a last window whose every shell exited ends the run, as before). An emptied
+/// registry keeps nothing, so `FolioApp::run_end` asks with `false`. The other half of the rule,
+/// what a kept close does instead, is [`the_last_visible_windows_close_puts_the_run_away`]: the
+/// window is put away (hidden, its shells and agents running), and a second launch, a click on one
+/// of its notifications, and the notification-area icon (part 87b) bring it back through
+/// `FolioApp::bring_the_window_back`.
+///
+/// **What the 2026-09-05 ruling refused is not what this keeps.** It refused a `folio.exe` with
+/// nothing on any screen and no way back but a chord; a put-away run is that process with every
+/// road back named, which is why the reversal is ruled with them (the bring-back door here, the
+/// icon in part 87b) and never lands without them.
 ///
 /// One fact, and it is written here as a named rule rather than inlined at the two doors that ask
 /// it — `FolioApp::close`, on whether a shut ends a run, and `FolioApp::reap_leaving_windows`, on
@@ -10074,8 +10095,85 @@ static SUMMON_PROXY: std::sync::OnceLock<EventLoopProxy<AppEvent>> = std::sync::
 /// machine, and `only_the_named_files_decide_what_platform_this_is` is what
 /// keeps a `cfg!` out of this page. It also means the Mac's answer is a claim a
 /// Windows runner can check, which is what the case below does.
-const fn a_run_ends_with_its_last_visible_window(visible_windows: usize) -> bool {
-    visible_windows == 0 && !bt_platform::host_platform().an_application_outlives_its_last_window()
+const fn a_run_ends_with_its_last_visible_window(visible_windows: usize, keeping: bool) -> bool {
+    visible_windows == 0
+        && !keeping
+        && !bt_platform::host_platform().an_application_outlives_its_last_window()
+}
+
+/// **The close that would have ended the run puts its window away instead** (0.4.10 plan row 87,
+/// part 87a; owner's rulings R1 and R2 of 2026-11-14, the coordinator's R3 and R4 of 2026-11-12).
+///
+/// The other half of [`a_run_ends_with_its_last_visible_window`], from the same three facts, so
+/// that the two can never both answer yes: with no ordinary window left after this one and the
+/// close keeping the run, the window is hidden — itself, not a stand-in (R3) — and everything in it
+/// keeps running. A platform whose application outlives its last window (macOS) answers no here
+/// as well: its last close is part 87c's, and this part changes nothing there.
+const fn the_last_visible_windows_close_puts_the_run_away(
+    visible_windows: usize,
+    keeping: bool,
+) -> bool {
+    visible_windows == 0
+        && keeping
+        && !bt_platform::host_platform().an_application_outlives_its_last_window()
+}
+
+/// **What a close of one window does, read before the window is told anything** (0.4.10 plan row
+/// 87, part 87a): the road `FolioApp::on_window_event` takes for a `WM_CLOSE`, and the one
+/// `FolioApp::close` takes for a close that reaches it by another road (a gate's confirmed answer,
+/// a wait that ended).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloseFate {
+    /// Today's close: the dirty gate, then `FolioApp::close` — a window filed into Recent, or the
+    /// run's end.
+    Shut,
+    /// The run's last ordinary window, with the close keeping the run: put away
+    /// (`Runtime::put_the_window_away`), with no question asked — nothing is lost, so nothing is
+    /// asked, the summoned terminal's own argument (§7.54e ②).
+    PutAway,
+    /// **A `WM_CLOSE` that reached a window already put away** (the coordinator's ruling of
+    /// 2026-11-14, item 3): there is no `×` to press on a hidden window, so it is a tool that
+    /// closes every top-level window it finds, and it is ignored, said once per run. The system's
+    /// end of the session is not this road: it is heard by the window's session-end subclass
+    /// (row 18), which a put-away window keeps.
+    AlreadyAway,
+    /// **A put-away window whose last shell has exited** (R4): its final tab asked for the close,
+    /// by the road the request carries ([`the_close_was_asked_by_the_shells_exit`]), and the run
+    /// ends from the hidden window as it would from a shown one — through the dirty gate, whose question, if it has one, is asked on
+    /// the window brought back on the glass to ask it.
+    ShutWhileAway,
+}
+
+/// **The close held for this window was asked by its shells' exit** (R4): the road the request
+/// carried, as the close witness read it on arrival (0.4.10 plan row 103,
+/// `WindowRuntime::close_asked`) — `OwnCloseRoad::ShellsExited`, which the final tab asks by when
+/// every pane's shell has exited. Such a close is the run's end, never a put-away.
+fn the_close_was_asked_by_the_shells_exit<B: Backend>(window: &WindowRuntime<B>) -> bool {
+    window
+        .close_asked
+        .as_ref()
+        .and_then(|asked| asked.arrival)
+        .is_some_and(|arrival| {
+            arrival.road
+                == bt_platform::close_road::CloseRoad::Own(
+                    bt_platform::close_road::OwnCloseRoad::ShellsExited,
+                )
+        })
+}
+
+/// **A `WM_CLOSE` reached a put-away window, and was ignored** (`CloseFate::AlreadyAway`): said once
+/// per run, in `diagnostics.log`, so that a tool which closes every top-level window it finds is
+/// seen once and not once a minute — with the road the request came by (`road`, the close line's
+/// `road=` word; review P1-2), so the tool is named by what it sent.
+fn a_close_reached_a_put_away_window(road: &str) {
+    static A_PUT_AWAY_CLOSE_SAID: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !A_PUT_AWAY_CLOSE_SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        diagnostics::note(&format!(
+            "BT_PUT_AWAY a close reached the put-away window and was ignored; road={road}; said \
+             once per run"
+        ));
+    }
 }
 
 /// **One row of `Move to window ▸`**, before it is words (B9).
@@ -12047,6 +12145,13 @@ struct WindowRuntime<B: Backend = Native> {
     /// rather than performing half of it here (see [`Runtime::answer_dirty_gate`]).
     /// The loop takes it through [`Runtime::take_close_request`].
     window_close_requested: Option<WindowId>,
+    /// **The window is put away** (0.4.10 plan row 87, part 87a): the run's last ordinary window,
+    /// hidden by a close that kept the run (`Runtime::put_the_window_away`), with every tab, shell
+    /// and agent in it still running. Set there, cleared by the one door that brings it back
+    /// (`Runtime::bring_the_window_back_on_the_glass`) and by every road that lets the window go
+    /// (`Runtime::let_go_of_this_window`); a `WM_CLOSE` that reaches it while set is ignored
+    /// (`CloseFate::AlreadyAway`), and gate 1 reads it (`runtime::frame::window_is_hidden`).
+    put_away: bool,
     /// **How this window's close was asked for** (0.4.10 plan row 103): what the close witness
     /// saw of the request and where the pointer was, taken when the request arrived
     /// ([`Runtime::note_close_arrival`]). Kept through the close's re-runs — the gate's answer,
@@ -35355,6 +35460,8 @@ fn new_window_runtime<B: Backend>(parts: NewWindowParts<B>) -> WindowRuntime<B> 
         update_card: update_card::Card::default(),
         first_run: first_run::Card::default(),
         window_close_requested: None,
+        // A window is born on its way to the glass, not put away.
+        put_away: false,
         close_asked: None,
         close_rerun: false,
         preview_menu: profiles::PreviewMenu::default(),
@@ -47780,7 +47887,20 @@ impl<B: Backend> FolioApp<B> {
         let Some(app) = self.app.as_ref() else {
             return Ok(());
         };
-        for launch in app.notifications.take_activations() {
+        let activations = app.notifications.take_activations();
+        self.route_notification_launches(activations)
+    }
+
+    /// **Each clicked notification's `launch` string, opened** — the routing half of
+    /// [`Self::route_clicked_notifications`], over the strings the platform handed back.
+    fn route_notification_launches(&mut self, activations: Vec<String>) -> Result<()> {
+        // **A click on one of Folio's notifications brings a put-away run back first** (0.4.10 plan
+        // row 87, part 87a): the route opens a pane in a window, and the window has to be on the
+        // glass for that to mean anything.
+        if !activations.is_empty() {
+            self.bring_the_window_back()?;
+        }
+        for launch in activations {
             let Some(route) = notify::NotificationRoute::parse(&launch) else {
                 attention_trace::line(|| format!("open route={launch} leave=unparsed"));
                 continue;
@@ -47941,6 +48061,15 @@ impl<B: Backend> FolioApp<B> {
         if self.app.as_ref().is_some_and(|app| app.quit.is_some()) {
             return Ok(());
         }
+        // **Nor while the system's end holds the document** (0.4.10 plan row 87, part 87a, review
+        // P1-1): Folio's quit from outside, the uninstaller's ask and the session's end each hold
+        // the layout as it stood at the question, and the `WM_CLOSE` posted after the outside
+        // quit for older builds arrives before the settle that writes it. A close that went ahead
+        // would file a window into Recent that the held layout also restores — the quit's own
+        // rule above, 「一颗种子都不进 Recent」, for the system's end.
+        if session_end::holds_the_document() {
+            return Ok(());
+        }
         // **Asked before the window is told, because it decides what the close
         // means** (multiwindow slice D, ruling ②). The last window's shut is the
         // process ending and its picture stays in the file; any other window's is
@@ -47958,7 +48087,23 @@ impl<B: Backend> FolioApp<B> {
         // to answer. The summoned terminal is a companion and not a second
         // program: it goes when the windows go, and comes back holding what the
         // restore row says — see `retire_the_summon_with_the_run` below.
-        let ending = a_run_ends_with_its_last_visible_window(self.windows_left_after(id));
+        //
+        // **Unless the close keeps the run** (0.4.10 plan row 87, part 87a): with the switch on, the
+        // run's last ordinary window is put away and not closed, whichever road this close came by
+        // — a gate's answer re-requested, a wait that ended — so that no road ends the run the
+        // switch keeps. A window already put away is not closed by one of them either.
+        match self.close_fate(id) {
+            CloseFate::PutAway => return self.put_the_run_away(id),
+            CloseFate::AlreadyAway => {
+                if let Some(mut runtime) = self.runtime(id) {
+                    runtime.ignore_the_close_while_away();
+                }
+                return Ok(());
+            }
+            CloseFate::Shut | CloseFate::ShutWhileAway => {}
+        }
+        let keeping = self.the_close_keeps_the_run(id);
+        let ending = a_run_ends_with_its_last_visible_window(self.windows_left_after(id), keeping);
         // **And a close that ends the run asks the summoned terminal first**
         // (T-SUMMON-DIRTY-PREVIEW): it goes with this window, so this close is
         // its shut too, and an unsaved buffer in it is asked about in it before
@@ -47979,12 +48124,11 @@ impl<B: Backend> FolioApp<B> {
         };
         // **The window's one close line** (0.4.10 plan row 103): which window, by which road,
         // and what it held — read before it is taken apart.
-        let how = exit_diagnostics::ClosedHow::Asked(runtime.take_close_asked().unwrap_or(
-            exit_diagnostics::CloseAsked {
-                arrival: None,
-                pointer: exit_diagnostics::PointerAtClose::Unread,
-            },
-        ));
+        let how = exit_diagnostics::ClosedHow::Asked(
+            runtime
+                .take_close_asked()
+                .unwrap_or(exit_diagnostics::CloseAsked::UNMARKED),
+        );
         let facts = runtime.closed_facts(summon, windows_left);
         let closed = runtime.close_window(ending);
         // Set whatever the teardown answered: a child that refused to die is
@@ -48037,6 +48181,148 @@ impl<B: Backend> FolioApp<B> {
         self.windows
             .get_mut(id)
             .is_some_and(|window| window.leaving.is_some())
+    }
+
+    /// **The road a close of `id` takes** (0.4.10 plan row 87, part 87a) — read before the window is
+    /// told anything, by `on_window_event` for a `WM_CLOSE` (where the summoned terminal's own arm
+    /// is taken, ahead of the dirty gate) and by [`Self::close`] for every other road to it.
+    ///
+    /// A put-away window answers [`CloseFate::AlreadyAway`], unless its last shell has exited: the
+    /// final tab's own close (R4), asked by the shells' exit
+    /// ([`the_close_was_asked_by_the_shells_exit`]), ends the run from the hidden window as it would
+    /// from a shown one ([`CloseFate::ShutWhileAway`]). Any other window is put away when its close would have ended
+    /// the run and the close keeps it ([`the_last_visible_windows_close_puts_the_run_away`]), and
+    /// shut otherwise.
+    fn close_fate(&mut self, id: WindowId) -> CloseFate {
+        let Some(window) = self.windows.get_mut(id) else {
+            return CloseFate::Shut;
+        };
+        if window.put_away {
+            return if the_close_was_asked_by_the_shells_exit(window) {
+                CloseFate::ShutWhileAway
+            } else {
+                CloseFate::AlreadyAway
+            };
+        }
+        let keeping = self.the_close_keeps_the_run(id);
+        if the_last_visible_windows_close_puts_the_run_away(self.windows_left_after(id), keeping) {
+            CloseFate::PutAway
+        } else {
+            CloseFate::Shut
+        }
+    }
+
+    /// **A close request while the system's end holds the document, spent and nothing else**
+    /// (0.4.10 plan row 87, part 87a, review P1-1; [`Self::close`] says why a close then closes
+    /// nothing): `true` for a `WM_CLOSE` to `id` while `session_end::holds_the_document`, whose
+    /// record is spent, so the window is neither put away nor asked about; `false` for every
+    /// other event, and for every close while nothing holds the document.
+    fn a_close_the_held_document_spends(&mut self, id: WindowId, event: &WindowEvent) -> bool {
+        if !matches!(event, WindowEvent::CloseRequested) || !session_end::holds_the_document() {
+            return false;
+        }
+        if let Some(mut runtime) = self.runtime(id) {
+            runtime.spend_close_arrival();
+        }
+        true
+    }
+
+    /// **The road `event` takes on `id`**: [`Self::close_fate`] for a `WM_CLOSE`, and
+    /// [`CloseFate::Shut`] — no road at all — for every other event, so the window-event door reads
+    /// it before it lends the window out and its own arms stay the only `CloseRequested` arms.
+    ///
+    /// **The request's arrival is noted first** (0.4.10 plan row 103's
+    /// [`Runtime::note_close_arrival`]), because the fate reads it: a close the shells' exit asked
+    /// for is the run's end (R4), and the road it came by is the one the request carries. Noted
+    /// here for every `WM_CLOSE` but the showing summoned terminal's, whose `×` is a hide and
+    /// spends its arrival in its own arm (row 103); a re-run of a held close keeps the arrival it
+    /// re-runs, as the note does.
+    fn close_fate_of(&mut self, id: WindowId, event: &WindowEvent) -> CloseFate {
+        if !matches!(event, WindowEvent::CloseRequested) {
+            return CloseFate::Shut;
+        }
+        let a_summon_hide = self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.quake.window() == Some(id) && app.quake.is_showing());
+        if a_summon_hide {
+            return CloseFate::Shut;
+        }
+        if let Some(mut runtime) = self.runtime(id) {
+            runtime.note_close_arrival();
+        }
+        self.close_fate(id)
+    }
+
+    /// **Whether a close of `id` keeps the run** — the `keeping` of
+    /// [`a_run_ends_with_its_last_visible_window`] (0.4.10 plan row 87, part 87a): the switch is on
+    /// (`close_keeps_running`, R2), no quit is under way, the window is an ordinary one (the
+    /// summoned terminal's close is its own arms', §7.54e ②), and it was not its last shell's exit
+    /// that asked for the close (R4, [`the_close_was_asked_by_the_shells_exit`]).
+    fn the_close_keeps_the_run(&mut self, id: WindowId) -> bool {
+        let Some(app) = self.app.as_ref() else {
+            return false;
+        };
+        let switch_on = app.settings_store.loaded().close_keeps_running;
+        let ordinary = app.quake.window() != Some(id);
+        let no_quit = app.quit.is_none();
+        switch_on
+            && ordinary
+            && no_quit
+            && self
+                .windows
+                .get_mut(id)
+                .is_some_and(|window| !the_close_was_asked_by_the_shells_exit(window))
+    }
+
+    /// **Put the run away with its last ordinary window** (0.4.10 plan row 87, part 87a): the
+    /// window's own half is [`Runtime::put_the_window_away`], which spends the close's record and
+    /// says the put-away's own close line; the run's is nothing at all — no summon retired, no
+    /// spare retired, no `App::finish`, no last-window line — which is the whole of the
+    /// difference from [`Self::close`].
+    fn put_the_run_away(&mut self, id: WindowId) -> Result<()> {
+        let Some(mut runtime) = self.runtime(id) else {
+            return Ok(());
+        };
+        runtime.put_the_window_away()
+    }
+
+    /// **The one door back for a put-away run** (0.4.10 plan row 87, part 87a; R10, R13): every
+    /// put-away window back on the glass as it was put away
+    /// ([`Runtime::bring_the_window_back_on_the_glass`]), un-minimised and given the keyboard
+    /// (`bring_owned_window_forward`), and one below-normal round of the carry pass for the agents'
+    /// hooks, adopted as any round is — what the agents did while nobody was looking is read again.
+    ///
+    /// Called by a second launch (`land_one_launch_request`) and a click on one of Folio's
+    /// notifications (`route_clicked_notifications`); the notification-area icon (part 87b) and
+    /// the macOS Reopen (part 87c) call it too. Answers the window brought back, or `None` when no
+    /// window was put away — which leaves everything as it was.
+    fn bring_the_window_back(&mut self) -> Result<Option<WindowId>> {
+        let mut brought = None;
+        for index in 0..self.windows.len() {
+            let Some(id) = self.windows.key_at(index) else {
+                continue;
+            };
+            let Some(mut runtime) = self.runtime(id) else {
+                continue;
+            };
+            if !runtime.bring_the_window_back_on_the_glass()? {
+                continue;
+            }
+            // Through the note door (review P2-10): a resident run's `stderr` may be a file
+            // nobody reads, and `diagnostics.log` is where its lines are looked for.
+            if let Err(error) = bring_owned_window_forward(&runtime.window.window) {
+                crate::diagnostics::note(&format!("BT_PUT_AWAY {error}"));
+            }
+            brought = Some(id);
+        }
+        if brought.is_some() {
+            crate::diagnostics::note("BT_PUT_AWAY the put-away window is back on the glass");
+            if let Some(app) = self.app.as_ref() {
+                (app.carry_ask)(CarryAsk::HOOKS);
+            }
+        }
+        Ok(brought)
     }
     /// **How many windows a reader would still have after this one goes** — the
     /// number both residency doors are decided on (§7.54, §7.54e ①).
@@ -48274,8 +48560,10 @@ impl<B: Backend> FolioApp<B> {
         if !self.windows.is_empty() {
             return web_spare::RunControl::Wait;
         }
+        // An emptied registry keeps nothing: the put-away window is one of the registry's, and
+        // with none left there is no run to keep (0.4.10 plan row 87, part 87a).
         web_spare::after_the_last_window(
-            a_run_ends_with_its_last_visible_window(self.windows.len()),
+            a_run_ends_with_its_last_visible_window(self.windows.len(), false),
             let_go,
             spare_next,
             bound,
@@ -48689,6 +48977,20 @@ impl<B: Backend> FolioApp<B> {
         event_loop: &B::Loop,
         request: &launch_wire::LaunchRequest,
     ) -> Result<Option<WindowId>> {
+        // **A launch while the run is put away brings it back first** (0.4.10 plan row 87, part
+        // 87a; R10). A plain one — the taskbar pin, Start, a shortcut — asked for Folio and nothing
+        // else, and is answered by the window as it was put away; one that asked for something (a
+        // flag, a folder, Explorer's entry, a profile, a carried environment) then lands as asked,
+        // by today's rule, in a run that has a window up again.
+        if let Some(id) = self.bring_the_window_back()?
+            && request.asks_for_folio_and_nothing_else()
+        {
+            if let Some(app) = self.app.as_mut() {
+                app.activated.retain(|visited| *visited != id);
+                app.activated.push(id);
+            }
+            return Ok(Some(id));
+        }
         let target = self.app.as_ref().and_then(|app| {
             most_recently_active_window(
                 &app.activated,
@@ -51986,6 +52288,15 @@ impl<B: Backend> FolioApp<B> {
                     return;
                 }
             }
+            // **While the system's end holds the document, a close closes nothing** — ahead of
+            // `close_fate_of`, which would note the arrival for a close that is never performed.
+            if self.a_close_the_held_document_spends(window_id, &event) {
+                return;
+            }
+            // **The road a `WM_CLOSE` takes, read before the window is lent out** (0.4.10 plan row
+            // 87, part 87a): `close_fate` asks of the whole registry, which the borrow below would
+            // hold; the request's arrival is noted on the way (row 103).
+            let close_fate = self.close_fate_of(window_id, &event);
             let Some(mut runtime): Option<Runtime<'_, B>> =
                 hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
             else {
@@ -52022,6 +52333,10 @@ impl<B: Backend> FolioApp<B> {
             // inside the close — past that line the window is gone, and a question
             // asked after the answer is worthless.
             let mut shutting = false;
+            // **A put-away window whose shells' exit raised a question is brought back to ask it**
+            // (review P2-2), through the one door back (`Self::bring_the_window_back`) once the
+            // borrow below is given back, as `shutting` is spent.
+            let mut bring_back = false;
             // **The handler this event is about to be given to, named before it is
             // given** — see [`window_event_station`]. Opened here and not at the
             // door above, so the lookup, the three gates and the wheel burst stay
@@ -52063,11 +52378,31 @@ impl<B: Backend> FolioApp<B> {
                     runtime.app.quake.press();
                     Ok(())
                 }
+                // **The run's last ordinary window, with the close keeping the run, is put away**
+                // (0.4.10 plan row 87, part 87a) — taken here, beside the summoned terminal's arm and
+                // ahead of the dirty gate, for that arm's reason: nothing is lost, so nothing is
+                // asked. A `WM_CLOSE` that reaches it while it is away is ignored, said once.
+                //
+                // Neither closes the window, so the request `close_fate_of` noted is spent by each:
+                // the put-away says it on its own close line, the ignored close names its road in
+                // the once-a-run note (0.4.10 plan row 103; review P1-2).
+                WindowEvent::CloseRequested if close_fate == CloseFate::PutAway => {
+                    runtime.put_the_window_away()
+                }
+                WindowEvent::CloseRequested if close_fate == CloseFate::AlreadyAway => {
+                    runtime.ignore_the_close_while_away();
+                    Ok(())
+                }
+                WindowEvent::CloseRequested if close_fate == CloseFate::ShutWhileAway => runtime
+                    .raise_dirty_gate(restore::GateRequest::Shut)
+                    .map(|raised| {
+                        shutting = raised.proceeds();
+                        bring_back = !shutting;
+                    }),
                 WindowEvent::CloseRequested => {
-                    // **Which road this request came by, taken as it arrives** (0.4.10 plan row
-                    // 103): kept on the window until the close is performed, whatever the gate
-                    // below decides.
-                    runtime.note_close_arrival();
+                    // **Which road this request came by was taken as it arrived** (0.4.10 plan row
+                    // 103), by `close_fate_of` above, which reads it: kept on the window until the
+                    // close is performed, whatever the gate below decides.
                     // **Gate ③ (P125).** "Dirty preview buffers do not survive a shut
                     // — plans carry paths, never content — so shutting asks, the same
                     // honesty as closing a tab."
@@ -52265,6 +52600,11 @@ impl<B: Backend> FolioApp<B> {
                 result.and(hang_watch::during(hang_watch::Station::EventShut, || {
                     self.close(window_id)
                 }))
+            } else {
+                result
+            };
+            let result = if bring_back {
+                result.and_then(|()| self.bring_the_window_back().map(|_| ()))
             } else {
                 result
             };
@@ -55091,7 +55431,10 @@ mod floated_page_tests {
     // is as much of one as a door written here; and the summon's `×` and the
     // gear are *parts* of bodies, so what replaces the file is the body each is
     // cut out of, with the cut unchanged.
-    use super::{a_page_still_has_a_pane, a_run_ends_with_its_last_visible_window, marks};
+    use super::{
+        a_page_still_has_a_pane, a_run_ends_with_its_last_visible_window, marks,
+        the_last_visible_windows_close_puts_the_run_away,
+    };
 
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Search, View, needle};
 
@@ -56352,8 +56695,17 @@ mod floated_page_tests {
         );
     }
 
-    /// RED (§7.54e ①, user ruling 2026-09-05) — **a run ends with the last window a person can
-    /// see, and a summoned terminal hidden behind its chord does not hold it open.**
+    /// RED (§7.54e ①, user ruling 2026-09-05; with the switch, 0.4.10 plan row 87, part 87a) — **a
+    /// run ends with the last window a person can see unless the close keeps it, and a summoned
+    /// terminal hidden behind its chord does not hold it open either way.**
+    ///
+    /// **Two arms since 2026-11-14** (the owner's ruling R1): with `close_keeps_running` off, the
+    /// 2026-09-05 rule as it was; with it on, the close that would end the run puts the last
+    /// ordinary window away instead ([`the_last_visible_windows_close_puts_the_run_away`]), and the
+    /// two rules never both answer yes. The withdrawn icon's source gate that stood at the end of
+    /// this test is retired with the rewrite (the coordinator's ruling of 2026-11-14, item 2): the
+    /// notification-area icon comes back in part 87b, as the road back to a put-away run, under the
+    /// switch this rule now reads.
     ///
     /// This replaces `an_icon_keeps_the_run_alive_only_while_a_summoned_terminal_is_behind_it` and
     /// `a_run_outlives_its_last_visible_window_only_with_an_icon_and_a_summon`, and it replaces
@@ -56422,17 +56774,41 @@ mod floated_page_tests {
         // **On this platform**, which M3-1 is what made a qualification rather
         // than a redundancy: a Mac answers the other way and the case below is
         // the one that says so.
+        let outlives = bt_platform::host_platform().an_application_outlives_its_last_window();
+        // The switch off: the 2026-09-05 rule.
         assert_eq!(
-            a_run_ends_with_its_last_visible_window(0),
-            !bt_platform::host_platform().an_application_outlives_its_last_window(),
+            a_run_ends_with_its_last_visible_window(0, false),
+            !outlives,
             "the last window a person can see has gone and the process is still in the task list, \
              reachable only by a chord the reader may have bound weeks ago"
         );
         assert!(
-            !a_run_ends_with_its_last_visible_window(1),
-            "a run with a window still on the glass ended anyway"
+            !the_last_visible_windows_close_puts_the_run_away(0, false),
+            "the switch is off and the last window was put away anyway"
         );
-        assert!(!a_run_ends_with_its_last_visible_window(4));
+        // The switch on: the same close keeps the run, and puts the window away instead.
+        assert!(
+            !a_run_ends_with_its_last_visible_window(0, true),
+            "the close kept the run and ended it anyway"
+        );
+        assert_eq!(
+            the_last_visible_windows_close_puts_the_run_away(0, true),
+            !outlives,
+            "the close keeps the run, and its last window was neither closed nor put away"
+        );
+        // Either way, a window still on the glass is no end and no put-away.
+        for keeping in [false, true] {
+            for left in [1, 4] {
+                assert!(
+                    !a_run_ends_with_its_last_visible_window(left, keeping),
+                    "a run with a window still on the glass ended anyway ({left}, {keeping})"
+                );
+                assert!(
+                    !the_last_visible_windows_close_puts_the_run_away(left, keeping),
+                    "a window that was not the last was put away ({left}, {keeping})"
+                );
+            }
+        }
 
         // And the summoned terminal is not one of the windows that number counts,
         // which is the half of this that decides the ruling: `windows_left_after`
@@ -56459,7 +56835,9 @@ mod floated_page_tests {
         );
         let shut = method_body("FolioApp", "close");
         assert!(
-            shut.contains("a_run_ends_with_its_last_visible_window(self.windows_left_after(id))"),
+            shut.contains(
+                "a_run_ends_with_its_last_visible_window(self.windows_left_after(id), keeping)"
+            ) && shut.contains("let keeping = self.the_close_keeps_the_run(id);"),
             "the shut door decides residency for itself instead of reading the one rule, so it \
              can answer differently from the reap:\n{shut}"
         );
@@ -56478,7 +56856,7 @@ mod floated_page_tests {
         );
         let run_end = method_body("FolioApp", "run_end");
         assert!(
-            run_end.contains("a_run_ends_with_its_last_visible_window(self.windows.len())"),
+            run_end.contains("a_run_ends_with_its_last_visible_window(self.windows.len(), false)"),
             "the run's end decides residency for itself instead of reading the one rule:\n{run_end}"
         );
 
@@ -56486,7 +56864,7 @@ mod floated_page_tests {
         // the turn its last visible window goes, exactly as above; with one parked it ends when
         // the spare lets go — the last closed window waits for it hidden, as it waits for its own
         // pages — and never later than the run's bound.
-        let ends = a_run_ends_with_its_last_visible_window(0);
+        let ends = a_run_ends_with_its_last_visible_window(0, false);
         let now = std::time::Instant::now();
         let bound = now + crate::quit::PAGE_TEARDOWN_DEADLINE;
         assert_eq!(
@@ -56514,31 +56892,6 @@ mod floated_page_tests {
             "the last closed window no longer waits for the spare, and an empty registry is not \
              woken for its wait:\n{reap}"
         );
-        // **And no door reads an icon any more**, because there is not one. A
-        // source gate rather than an assertion about behaviour: what the ruling
-        // withdrew is a mechanism, and a mechanism that is merely unreachable is
-        // one somebody re-reaches.
-        //
-        // **Over every file this package compiles** (§4.1): a withdrawn
-        // mechanism re-reached from `runtime/` is as re-reached as one written
-        // here, and the reading this replaces watched one file.
-        //
-        // Spelled in halves, because a gate written as one literal is a gate
-        // that trips on its own text — which `needle!` now also answers, by
-        // excluding the construction it records.
-        for withdrawn in [
-            concat!("tray_keeps", "_the_run_alive"),
-            concat!("Tray", "Icon"),
-            concat!("a_run_worth", "_keeping"),
-            concat!("bt_platform::", "tray"),
-        ] {
-            let hits = found(needle!(Pattern::text(withdrawn)), View::Raw);
-            assert!(
-                hits.is_empty(),
-                "`{withdrawn}` is the withdrawn notification-area icon, and it is still here\n{}",
-                hits.report(source())
-            );
-        }
     }
 
     /// RED — **a closed window is not dropped until its engines have let go, and
@@ -58012,15 +58365,23 @@ impl RestoreMonitor {
 /// gives the arrangement, and Win32 gives each monitor's work area — the taskbar's strip is not a
 /// fact winit reports, and it is exactly the strip a restored window must not open under.
 fn restore_monitors(event_loop: &ActiveEventLoop) -> Vec<RestoreMonitor> {
-    let primary = event_loop.primary_monitor();
+    restore_monitors_of(
+        event_loop.primary_monitor(),
+        event_loop.available_monitors(),
+    )
+}
+
+/// [`restore_monitors`] from the monitors a platform names — an event loop's, or a window's
+/// (`WindowHost::monitors_to_restore_on`, which a put-away window's way back asks: 0.4.10 plan
+/// row 87, part 87a, review P2-3) — **primary first**.
+fn restore_monitors_of(
+    primary: Option<winit::monitor::MonitorHandle>,
+    available: impl Iterator<Item = winit::monitor::MonitorHandle>,
+) -> Vec<RestoreMonitor> {
     primary
         .clone()
         .into_iter()
-        .chain(
-            event_loop
-                .available_monitors()
-                .filter(|monitor| Some(monitor) != primary.as_ref()),
-        )
+        .chain(available.filter(|monitor| Some(monitor) != primary.as_ref()))
         .map(|monitor| {
             let scale = monitor.scale_factor().max(f64::MIN_POSITIVE);
             let origin = monitor.position();
@@ -59898,7 +60259,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 47] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 48] = [
         // Windows-only test fixture: the `pi` row, which only the Windows table ships, reopened
         // from a Recent row, beside its every-platform twin on the host's fallback shell.
         "app_files_tests.rs",
@@ -59971,6 +60332,10 @@ mod platform_gate_tests {
         // A test re-export gated as its only test caller is: a share handed over, which
         // only Windows names by its own spelling (`tests.rs`).
         "runtime/mod.rs",
+        // The put-away tests' module, gated to Windows (0.4.10 plan row 87, part 87a): on macOS an
+        // application outlives its last window, so their close neither puts away nor ends the run;
+        // 87c writes the macOS arms and the gate goes.
+        "runtime/windows.rs",
         // One test gated off macOS (2026-11-18, 0.4.10 plan row 103): the summoned terminal's
         // question held over the run's end, which a Mac run never reaches because its
         // application outlives its last window; the close lines are every platform's.

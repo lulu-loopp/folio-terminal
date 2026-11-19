@@ -197,6 +197,31 @@ impl<B: Backend> Runtime<'_, B> {
         trigger: FrameTrigger,
         skip_unchanged: bool,
     ) -> Result<bool> {
+        // **Every publish settles the PTY's debt**, and this is the one door they all come
+        // through — a keystroke's frame, an expose, a resize's, the drain's own. What has been
+        // fed is about to be on the glass, or is about to be found no different from what
+        // already is, and either answers the question the wait was asking. Cleared here rather
+        // than at each caller so that a publication path added later cannot forget: an armed
+        // deadline nobody disarms is the failure [`coalesce::Pending`] is written against. First,
+        // so that the put-away window's publish below settles it too: no deadline stands for a
+        // picture nobody will draw.
+        self.window.pty_coalesce.settle();
+        // **A put-away window publishes nothing** (0.4.10 plan row 87, part 87a; the VM's M1 and
+        // M3, 2026-11-18): off the glass there is no picture to make, and everything below is
+        // the making of one - the journeys carried, the projection of the focused grid, the
+        // detection pass, the decorations dispatched, the frame in the slot. Gate 1 already
+        // stopped the present; on a flood this half still cost the window thread 126-143 ms a
+        // second. The drain goes on feeding every grid, so nothing a shell prints is lost. The
+        // first frame on the way back is built then: `Runtime::bring_the_window_back_on_the_glass`
+        // lowers the mark before it shows the window, and the show publishes from the grids as
+        // they stand.
+        //
+        // On `put_away` and not on gate 1's `window_hidden`: a minimised or cloaked window comes
+        // back by the platform's restore, which publishes nothing first, so it keeps the slot's
+        // picture fresh as before.
+        if self.window.put_away {
+            return Ok(false);
+        }
         hang_watch::during(hang_watch::Station::Present, || {
             // **Whatever asked for this frame, it carries every journey that is
             // running** (review 2026-09-18, P1). Above everything that reads a
@@ -207,13 +232,6 @@ impl<B: Backend> Runtime<'_, B> {
             // Costs a window with nothing moving one `bool` and one `Option` read.
             // See [`Self::carry_live_journeys`].
             self.carry_live_journeys(Instant::now());
-            // **Every publish settles the PTY's debt**, and this is the one door they all come
-            // through — a keystroke's frame, an expose, a resize's, the drain's own. What has been
-            // fed is about to be on the glass, or is about to be found no different from what
-            // already is, and either answers the question the wait was asking. Cleared here rather
-            // than at each caller so that a publication path added later cannot forget: an armed
-            // deadline nobody disarms is the failure [`coalesce::Pending`] is written against.
-            self.window.pty_coalesce.settle();
             // **The tripwire.** A frame is about to describe a tab whose seat set
             // may have changed; if it changed without anyone carrying the change to
             // the shells, this is the moment the two pictures diverge and the last
@@ -620,7 +638,9 @@ impl<B: Backend> Runtime<'_, B> {
         // wheel bug [`Self::repaint_pane_change`] was written for, and the same
         // repair: run the compositor over the picture already on the glass, which
         // rebuilds every unfocused pane from its own projection.
-        if !published && self.window.unpainted_pane_output {
+        // Nor for a put-away window: its glass is nobody's (see `publish_frame_inner`'s gate),
+        // and the show that brings it back draws every pane from its own grid.
+        if !published && self.window.unpainted_pane_output && !self.window.put_away {
             self.represent_on_screen_frame(FrameTrigger {
                 occurred_at: now,
                 source: FrameSource::Expose,
@@ -1673,10 +1693,11 @@ impl<B: Backend> Runtime<'_, B> {
     pub(crate) fn observe_window_place(&mut self) {
         let window = &self.window.window;
         let previous = self.window.observed_place;
+        let put_away = self.window.put_away;
         let (place, taskbar) = hang_watch::during(hang_watch::Station::Place, || {
             let focused =
                 hang_watch::during(hang_watch::Station::PlaceFocus, || window.has_focus());
-            sample_window_place(window, focused, previous)
+            sample_window_place(window, focused, put_away, previous)
         });
         let window = &mut *self.window;
         window.observed_place = place;
@@ -2649,6 +2670,13 @@ impl<B: Backend> Runtime<'_, B> {
                 })
                 .flatten(),
         ];
+        // **Gate 2** (0.4.10 plan row 87, part 87a): a window off the glass — put away, sent back
+        // up, minimised or cloaked — wakes for its state and not for its pictures.
+        let deadlines = crate::wake_owner::unbook_the_pictures(
+            DEADLINE_OWNERS,
+            deadlines,
+            self.window.window_hidden,
+        );
         let wake = earliest_named_deadline(DEADLINE_OWNERS, deadlines);
         if self.app.trace_perf
             && facts.at_rest()
@@ -3321,14 +3349,23 @@ pub(crate) fn verified_target_of(
 /// nobody sees, and over-stating puts a toast in front of somebody who is looking straight at the
 /// pane it is about.
 ///
+/// **And a put-away window is hidden too** (0.4.10 plan row 87, part 87a, gate 1): the run's last
+/// window, taken off the glass by its close (`Runtime::put_the_window_away`), is neither iconic nor
+/// cloaked, and without this third fact it was presented every turn, counted in the turn's
+/// allowance and flashed for on a taskbar button it does not have. `put_away` is
+/// `WindowRuntime::put_away` — Folio's own fact, not a reading of the window's visibility
+/// (review P2-6, the coordinator's ruling of 2026-11-18): an application macOS hides (`Cmd+H`)
+/// orders its windows out, and those windows are read as they always were.
+///
 /// **An owner-thread door** (`doors::PlaceHidden`, row 13's residue), minted only in
 /// [`sample_window_place`].
 pub(crate) fn window_is_hidden(
     token: WaitToken<'_, doors::PlaceHidden>,
     window: &impl WindowHost,
+    put_away: bool,
 ) -> bool {
     let _ = token;
-    window.is_iconic() || window.is_cloaked()
+    window.is_iconic() || window.is_cloaked() || put_away
 }
 
 /// **Whether the window manager puts this window under any of its own sample points** (user ruling
@@ -3474,6 +3511,7 @@ fn apply_hover_marks(
 pub(crate) fn sample_window_place(
     window: &impl WindowHost,
     focused: bool,
+    put_away: bool,
     previous: notify::WindowPlace,
 ) -> (notify::WindowPlace, bt_platform::TaskbarReading) {
     // **Each probe under its own station** (ticket 48): two of them go to other processes —
@@ -3483,7 +3521,7 @@ pub(crate) fn sample_window_place(
     // `enter`/`at` pair this replaced; the fused call keeps the line
     // `present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value` reads.
     let hidden = bt_platform::admission::admitted::<doors::PlaceHidden, _>(|token| {
-        window_is_hidden(token, window)
+        window_is_hidden(token, window, put_away)
     })
     .unwrap_or(previous.hidden);
     // **The taskbar is read, not asked** (ticket 62). The shell is asked on its own lane; this

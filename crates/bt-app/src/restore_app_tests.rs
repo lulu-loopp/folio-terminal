@@ -148,9 +148,11 @@ fn a_window_close_requested_while_the_gate_is_up_neither_closes_the_window_nor_l
     );
 
     let event = window_event_squeezed();
+    // The request's arrival is noted before the arm, by `FolioApp::close_fate_of`, which reads it
+    // (0.4.10 plan row 87, part 87a, with row 103's `note_close_arrival`).
     assert!(
         event.contains(
-            "WindowEvent::CloseRequested=>{runtime.note_close_arrival();runtime.raise_dirty_gate(restore::GateRequest::Shut).map(|raised|shutting=raised.proceeds())}"
+            "WindowEvent::CloseRequested=>{runtime.raise_dirty_gate(restore::GateRequest::Shut).map(|raised|shutting=raised.proceeds())}"
         ),
         "the OS close shuts only when the gate had nothing to ask:\n{event}"
     );

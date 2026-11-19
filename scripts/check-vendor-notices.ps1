@@ -52,6 +52,13 @@ $crates = @(
         dir    = "vendor\vte"
         sha256 = "A5924018406CE0063CD67F8E008104968B74B563EE1B85DDE3ED1F7CB87D3DBD"
         added  = @("CHANGES-FOLIO.md")
+    },
+    @{
+        name   = "winit"
+        version = "0.30.13"
+        dir    = "vendor\winit"
+        sha256 = "A6755FA58A9F8350BD1E472D4C3FCC25F824EC358933BBA33306D0B63DF5978D"
+        added  = @("CHANGES-FOLIO.md")
     }
 )
 

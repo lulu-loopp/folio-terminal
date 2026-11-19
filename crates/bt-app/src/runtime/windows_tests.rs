@@ -45,7 +45,12 @@ fn a_close_request_is_taken_once_through_the_windows_door() {
         "the keystroke landed"
     );
     let (tab, _) = tab_with_a_preview(1, vec![buffer]);
-    let folio = HeadlessFolio::with_tabs("close-request-door", vec![tab], 0);
+    let mut folio = HeadlessFolio::with_tabs("close-request-door", vec![tab], 0);
+    // The switch off: with it on, this last window's close puts it away and asks nothing (0.4.10
+    // plan row 87, part 87a, T2).
+    let mut settings = folio.app.settings_store.loaded().clone();
+    settings.close_keeps_running = false;
+    assert!(folio.app.settings_store.store(settings));
     let mut application = HeadlessApplication::of(folio);
     let window = application.id;
 
@@ -2908,7 +2913,24 @@ fn one_dirty_window(tag: &str) -> HeadlessApplication {
         "the keystroke landed"
     );
     let (tab, _) = tab_with_a_preview(1, vec![buffer]);
-    HeadlessApplication::of(HeadlessFolio::with_tabs(tag, vec![tab], 0))
+    HeadlessApplication::of(the_close_switch_off(HeadlessFolio::with_tabs(
+        tag,
+        vec![tab],
+        0,
+    )))
+}
+
+/// **The close switch off** (`close_keeps_running`, 0.4.10 plan row 87, part 87a): the run's last
+/// ordinary window's close ends the run, as the close lines these tests read are said for; with
+/// the switch on, as a new run's settings have it, that close puts the window away instead.
+fn the_close_switch_off(mut folio: HeadlessFolio) -> HeadlessFolio {
+    let mut settings = folio.app.settings_store.loaded().clone();
+    settings.close_keeps_running = false;
+    assert!(
+        folio.app.settings_store.store(settings),
+        "the switch is off"
+    );
+    folio
 }
 
 /// Two ordinary windows, `1` and `2`, nothing asked in either.
@@ -3061,11 +3083,11 @@ fn a_final_tab_whose_shells_exited_beside_unsaved_edits_closes_only_as_the_perso
 /// request, nothing to ask, ends the run on one line that names its road and delivery**.
 #[test]
 fn an_own_request_with_nothing_to_ask_ends_the_run_saying_its_road() {
-    let mut application = HeadlessApplication::of(HeadlessFolio::with_tabs(
+    let mut application = HeadlessApplication::of(the_close_switch_off(HeadlessFolio::with_tabs(
         "close-road-own",
         vec![ringing_tab(1, 1)],
         0,
-    ));
+    )));
     application
         .runtime()
         .request_window_close(bt_platform::close_road::OwnCloseRoad::CaptionButton)
@@ -3085,11 +3107,11 @@ fn an_own_request_with_nothing_to_ask_ends_the_run_saying_its_road() {
 /// and where the pointer was.
 #[test]
 fn another_programs_close_message_says_so() {
-    let mut application = HeadlessApplication::of(HeadlessFolio::with_tabs(
+    let mut application = HeadlessApplication::of(the_close_switch_off(HeadlessFolio::with_tabs(
         "close-road-foreign",
         vec![ringing_tab(1, 1)],
         0,
-    ));
+    )));
     arrives(
         &mut application,
         1,
@@ -3113,11 +3135,11 @@ fn another_programs_close_message_says_so() {
 /// witnessed says so, and reads its unknowns as unread**.
 #[test]
 fn a_close_request_nothing_witnessed_says_unmarked() {
-    let mut application = HeadlessApplication::of(HeadlessFolio::with_tabs(
+    let mut application = HeadlessApplication::of(the_close_switch_off(HeadlessFolio::with_tabs(
         "close-road-unmarked",
         vec![ringing_tab(1, 1)],
         0,
-    ));
+    )));
     application.window_event(WindowEvent::CloseRequested);
     assert_eq!(
         close_lines(&application),
@@ -3260,7 +3282,11 @@ fn a_close_the_summon_held_keeps_the_road_that_asked() {
         preview_edit::insert(content, caret, "typed by hand")
     }));
     let (summoned_tab, _) = tab_with_a_preview(2, vec![buffer]);
-    let folio = HeadlessFolio::with_tabs("close-road-summon-held", vec![ringing_tab(1, 1)], 0);
+    let folio = the_close_switch_off(HeadlessFolio::with_tabs(
+        "close-road-summon-held",
+        vec![ringing_tab(1, 1)],
+        0,
+    ));
     let summoned = headless_window(
         &folio.app,
         HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),

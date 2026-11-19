@@ -83,6 +83,7 @@ Add-Type -Namespace Guest -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr h, uint cmd);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessageW(string name);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
@@ -223,9 +224,17 @@ function Save-Screen {
     return $path
 }
 
+# **Ends the process, not only the window** (0.4.10 plan row 87, part 87a; R9): Folio's last
+# window's WM_CLOSE now puts it away and the run keeps going, so the quit from outside is posted
+# first - Folio settles it as the Restart Manager's close and leaves - and WM_CLOSE after it, for
+# a window that does not hear the message (an older build, the panic self-test's message box).
 function Close-Window {
     param([System.Diagnostics.Process] $Process, [IntPtr] $Window)
     if ($Window -ne [IntPtr]::Zero) {
+        $outsideQuit = [Guest.Win32]::RegisterWindowMessageW('Folio.QuitFromOutside.v1')
+        if ($outsideQuit -ne 0) {
+            [void][Guest.Win32]::PostMessageW($Window, $outsideQuit, [IntPtr]::Zero, [IntPtr]::Zero)
+        }
         [void][Guest.Win32]::PostMessageW($Window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) # WM_CLOSE
     }
     if (-not $Process.WaitForExit(20000)) { $Process.Kill() }

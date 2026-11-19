@@ -78,6 +78,7 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (37, migrate_settings_v37_to_v38),
     (38, migrate_settings_v38_to_v39),
     (39, migrate_settings_v39_to_v40),
+    (40, migrate_settings_v40_to_v41),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -899,6 +900,22 @@ fn migrate_settings_v39_to_v40(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(40));
         object.insert("resume_agents".to_owned(), Value::Bool(true));
+    }
+    value
+}
+
+/// v40 -> v41: `close_keeps_running`, the switch over what closing the run's last ordinary window
+/// does (0.4.10 plan row 87, part 87a), written **on**.
+///
+/// The owner's ruling and not a behaviour carried forward (2026-11-14, R2: default on, written
+/// into existing documents): every build before this one ended the run with that close, and the
+/// switch is what keeps the old road a choice. Written rather than left to the reader's default,
+/// as v30 wrote `quake_dismiss_on_blur` (§7.54c ①): the row is born now, so no reader has chosen.
+/// One key, [`migrate_settings_v39_to_v40`]'s shape; no sibling is read.
+fn migrate_settings_v40_to_v41(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(41));
+        object.insert("close_keeps_running".to_owned(), Value::Bool(true));
     }
     value
 }
@@ -3343,6 +3360,71 @@ mod tests {
                 assert_eq!(&migrated[key], value, "{key} is left as it was");
             }
         }
+    }
+
+    /// RED (0.4.10 plan row 87, part 87a, T12) — **the v40 -> v41 step writes
+    /// `close_keeps_running` on and leaves every sibling exactly as it found it, and the three
+    /// places a default lives agree on it.** The owner ruled the switch on and written into
+    /// existing documents (2026-11-14, R2); a step that only moved the version would leave every
+    /// upgrading reader with a key their file does not say, and a default that differed between
+    /// the step, `SettingsV1::default` and a document that omits the line would make the answer
+    /// depend on which road the document came by.
+    ///
+    /// MUTATION (P12): drop the `close_keeps_running` line from `migrate_settings_v40_to_v41` —
+    /// the first assertion goes red.
+    #[test]
+    fn migrate_settings_v40_to_v41_writes_the_close_switch_on_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 40,
+            "theme_mode": "Dark",
+            "resume_agents": false,
+            "quake_dismiss_on_blur": false,
+            "turn_end_notification": false
+        });
+        let migrated = migrate_value(before.clone(), 40, 41, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(
+            migrated["close_keeps_running"],
+            json!(true),
+            "the owner ruled the switch on, written into the documents that exist"
+        );
+        assert_eq!(migrated["schema_version"], json!(41));
+        let (before, after) = (
+            before.as_object().expect("an object"),
+            migrated.as_object().expect("an object"),
+        );
+        assert_eq!(after.len(), before.len() + 1, "exactly one key is added");
+        for (key, value) in before {
+            if key != "schema_version" {
+                assert_eq!(&after[key], value, "`{key}` was rewritten by the step");
+            }
+        }
+
+        // And the round trip's defaults say the same: a whole v40 document the step carries reads
+        // as on, the product's own default is on, and a v41 document that omits the line means on.
+        let mut whole = serde_json::to_value(crate::SettingsV1::default())
+            .expect("a settings document serialises");
+        let fields = whole
+            .as_object_mut()
+            .expect("a settings document is an object");
+        fields.remove("close_keeps_running");
+        fields.insert("schema_version".to_owned(), json!(40));
+        let carried = migrate_value(whole, 40, 41, SETTINGS_MIGRATIONS).unwrap();
+        let read: crate::SettingsV1 =
+            serde_json::from_value(carried).expect("the migrated document reads");
+        assert!(read.close_keeps_running);
+        assert!(crate::SettingsV1::default().close_keeps_running);
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            close_keeps_running: false,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("close_keeps_running");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert!(absent.close_keeps_running);
     }
 
     /// The v15 -> v16 session step takes the number and nothing else: no older key holds an agent.
