@@ -368,7 +368,7 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 | **按下后下载的内容** | 所选版本的三个文件：发布声明（`RELEASE-STATEMENT.txt`）、声明的签名（`RELEASE-STATEMENT.txt.sig`），以及声明中列出的 Windows 压缩包（`folio-<version>-windows-x64.zip`；未做 Windows 签名的版本为 `folio-<version>-windows-x64-unsigned.zip`）。 |
 | **来源** | `https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/<file>`，按所选版本命名，不使用 "latest"；GitHub 重定向到自己的下载主机。HTTP 栈和请求头与更新检查相同：WinHTTP、`User-Agent: Folio`。 |
 | **验证内容** | 用当前 Folio 内置的发布密钥验证声明的签名，再将压缩包及其中每个文件与声明中的 SHA-256 和大小比对。不符则拒绝，不改动任何文件。 |
-| **Windows 签名** | Folio 还会让 Windows 读取 `folio.exe` 的签名，只用于说明 Windows 是否可能发出警告：新版就绪时读取新版的签名，此后每次启动时若新版仍处于就绪状态，再读一次；每次打开设置 > 关于时，读取正在运行的那份的签名。启动时和关于页的读取只用本机已有的信息检查吊销，不询问任何服务器；只有按下 **Update** 之后的那次读取，可能让 Windows 向证书颁发者查询证书是否已吊销，与 Windows 对待任何已签名程序一样。 |
+| **Windows 签名** | Folio 还会让 Windows 读取 `folio.exe` 的签名，只用于说明 Windows 是否可能发出警告：新版就绪时读取新版的签名，此后每次启动时若新版仍处于就绪状态，再读一次；每次打开设置 > 关于时，读取正在运行的那个 `folio.exe` 的签名。启动时和关于页的读取只用本机已有的信息检查吊销，不询问任何服务器；只有按下 **Update** 之后的那次读取，可能让 Windows 向证书颁发者查询证书是否已吊销，与 Windows 对待任何已签名程序一样。 |
 | **存放位置** | Folio 自身目录内的 `.folio-update` 文件夹，与 `folio.exe` 同级：下载文件、新版文件、用于回退的旧版副本、更新日志与记录。随目录一起走。 |
 | **目录外写入** | 替换文件期间，在 `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` 下写入一个 `FolioUpdate-<id>` 值：若更新被断电中断，下次登录时由它完成或回滚。更新结束时删除；`folio.exe --uninstall-cleanup` 可清理残留值。若已注册资源管理器菜单的包，则以新版本重新注册（撤销方式见下文资源管理器行）。 |
 | **如何关闭** | 关闭自动检查（上文）：Folio 不再主动询问，因此不会弹出新卡片，除非你按下**检查**。 |

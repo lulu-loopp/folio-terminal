@@ -725,8 +725,8 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
       再用 `check-release-statement verify` 按更新器的读法核对整个文件夹,最后写
       `releases.json`:在声明的标签下列三个资产——声明列出的归档、声明、签名。给了 `-Image`
       时声明同时列出 Windows 与 macOS 两个包,dmg 核对过后从 Windows 的源文件夹里删掉(Mac 的源
-      由 `mac/setup.sh` 用同一份声明来做)。`releases.json` 的形状(GitHub 发布列表的形状;`size` 是文件字节数;`draft: true`
-      的条目不算):
+      由 `mac/setup.sh` 用同一份声明来做)。
+      `releases.json` 的形状(GitHub 发布列表的形状;`size` 是文件字节数;`draft: true` 的条目不算):
 
       ```json
       [
@@ -756,7 +756,7 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
       失败(等签名超时、核对被拒),`make-feed.ps1` 都当场删掉声明和签名,并在报错里写明
       `-Remove`:超时之后才落盘的签名用它来删;重做时用一个新文件夹。**残余风险**:演练声明、
       它的签名和 B 的包若一起泄露,别人可以诱导用户带 `--update-feed` 指向这几个文件启动
-      0.4.10 或更新的 Folio,从而装上 B;能挡住这一点的只有「从不上传、跑完即删」,最坏的情况
+      0.4.10 或更新的 Folio,从而装上 B;能挡住这一点的只有「从不上传、跑完即删」,最坏的情况下
       只能撤换 live 密钥。
    3. **拷进客户机** `C:\feed\`:`run-row.ps1 -Feed <宿主上的 feed 文件夹>` 每一行都逐个文件拷入。
    4. **带参数启动 A**:`guest/keys.ps1` 的第一步 `launchfeed` 以
@@ -774,7 +774,7 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
    `make-feed.ps1 -Image` 做出的、同时列出两个包的那一份。三个文件先 `scp` 到 Mac 上演练文件夹的 `in/`;
    `mac/setup.sh` 只认 `in/RELEASE-STATEMENT.txt` 与 `in/RELEASE-STATEMENT.txt.sig`(`teardown.sh`
    删的就是这两个),先核对 dmg 与声明的 `macos-arm64` 行(名字、大小、SHA-256)、声明的版本
-   (第三段不小于 1000),再只把这三个文件放进演练文件夹的 `feed/`,在声明的标签下写好
+   是否就是 B 的版本且第三段不小于 1000,再只把这三个文件放进演练文件夹的 `feed/`,在声明的标签下写好
    `releases.json`,URL 形如 `file://<演练文件夹>/feed/Folio-<B>-macos-arm64.dmg`。
 
 #### Windows 步骤(W1–W15)
@@ -857,7 +857,7 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
 | ☐ | W14long | 同上,持有 120 秒。**前提:A 为 0.4.7 或更高**(A = 0.4.6 时是已知问题:新版以未记录状态运行,直到下次启动或登录完成更新;本行不执行) | 不断电;句柄持有覆盖 applier 的 `TrialBegan` 写入及其回滚声明 | 句柄持有期间:`diagnostics.log` 包含 `the trial <pid> could not be recorded`,然后 `is asked to quit`,然后 `started …\folio.exe`;唯一的 Folio 窗口是以 trial 启动的新版,卡片显示「Update incomplete.」并指出文件夹;日志停留在 `Moving`;Run 值仍存在。释放句柄后,trial 的 watchdog 到期时(该 trial 启动后 102 s、204 s、408 s、816 s;至多四次,前一次恢复仍在运行时不启动下一次)或在下次启动/登录时立即完成:`BT_UPDATE_TRIAL … it is handed back to …\rescue\folio.exe (ready)`(仅 watchdog 路径),然后 `BT_UPDATE_RECOVER the trial <pid> runs and its receipt names it, and the journal does not record it: it is recorded`。句柄仍持有时,人手动启动触发的恢复记录 `BT_UPDATE_RECOVER deferred: …` 且不启动第二个进程 trial 窗口不会被自行结束;唯一可以结束从未变为 ready 的 trial 的是持有事务的恢复进程。日志最终为 `Retired{Committed}`;Run 值 `FolioUpdate-<txn8>` 已删除;安装目录为 B 版;唯一的窗口是句柄持有期间启动的 trial,保留不变,卡片现显示「Updated.」;持有期间在该窗口做的更改(如设置)保留。释放句柄后普通启动 Folio 立即到达相同终态,不再启动 B 的第二个进程 |
 | ☐ | W14m | 更新 → 重启;Run 值一出现(暂存集合已验证过),监视器以 `Read`、共享 `Read`(无 delete、无 write)打开 `H\<txn>\set\folio.exe`:(a) 一直持有到 `Moving` 写入之后再过 3 秒(从 `Moving` 起算,持有就不会在移入之前结束);(b) 60 秒 | 不断电;句柄持有覆盖 applier 把 `folio.exe` 移入安装目录的那一步(T-UPDATE-MOVE-HELD-RETRY) | (a) 移动被重试扛过去:`diagnostics.log` 有一行或多行 `` BT_UPDATE_APPLY `folio.exe` held by another program for … s: …; asked again in … ms ``,然后 `wrote [Armed, Moving, Trial, Committed, Retired]`,trial 是那扇窗,安装目录为 B 版。(b) 十秒窗口过后 `` … past the 10 s window: …; the move is given up ``,然后 `` BT_UPDATE_APPLY the move of `folio.exe` failed: another program held it open past the window: … ``,`wrote [Armed, Moving, RollbackIntent, RolledBack, Retired]`;旧版以 `--update-failed <journal> --update-journal-held <错误> --update-held-file folio.exe` 打开,卡片标题是 *Another program held folio.exe open: <Windows 的错误>*(中文界面为 *另一个程序占用了 folio.exe：<Windows 的错误>*),下面是 *Previous version restored.*;Run 值已删,安装目录为 A 版 |
 | ☐ | W15 | 从 `Prepared` 起以 `Read`、共享 `None` 持有 `H\<txn>\rescue\folio.exe` 40 秒,再按「重启」 | 不断电 | `its applier could not be started` → `Abandoned`,无文件被移动;旧 Folio `leaving after an update: started …`,普通方式打开一次。(启动仅迟缓、应答未在 15 秒 `HANDOFF_DEADLINE` 内到达的路径由单元测试 `a_hand_over_with_no_answer_in_time_still_opens_folio_once` 覆盖) |
-| — | W16 / U-35 | **Not staged by hand; covered by the harness.** The cell needs a holder that leaves `Moving` with B live, its own trial neither launched nor recorded, and then has both B and the rescue refused by the operating system. Denying execute on B does not reach it: P's own trial launch fails first and P declares and performs the rollback before its exit guard runs. The only release-build road there is a journal write P cannot make (W14-like), and then the reservation's own write fails too. | — | Pinned instead by `update_apply::exit_guard_tests::u35_the_last_trial_requires_two_os_launch_refusals` (the 27-cell created / refused / unacknowledged table) and, in the Windows sandbox, `update_apply_windows::tests::u35_two_windows_launch_refusals_reserve_exactly_one_last_trial` (journal `TrialStarting` with the reserved nonce at the third process creation), `u35_a_ready_last_trial_commits_itself_without_any_rescue_process`, `u35_an_unready_last_trial_commits_nothing_and_the_recovery_ends_it` and `u35_the_guard_and_a_start_agree_on_the_reserved_trial`. Windows only; macOS has no such cell. |
+| — | W16 / U-35 | **不手工布置;由测试覆盖。** 这一格需要一个持有者:在 B 已在位时离开 `Moving`,它自己的 trial 既没启动也没记录,随后 B 和 rescue 都被操作系统拒绝启动。拒绝 B 的执行权限到不了这一格:P 自己的 trial 先启动失败,P 在退出守卫运行之前就宣布并执行了回滚。发布构建里通往这一格的唯一一条路,是一次 P 写不进去的日志写入(类似 W14),而那时预留自身的写入也会失败。 | — | 改由以下测试钉住:`update_apply::exit_guard_tests::u35_the_last_trial_requires_two_os_launch_refusals`(27 格的 created / refused / unacknowledged 表),以及 Windows 沙箱里的 `update_apply_windows::tests::u35_two_windows_launch_refusals_reserve_exactly_one_last_trial`(第三次创建进程时,日志为带预留 nonce 的 `TrialStarting`)、`u35_a_ready_last_trial_commits_itself_without_any_rescue_process`、`u35_an_unready_last_trial_commits_nothing_and_the_recovery_ends_it` 和 `u35_the_guard_and_a_start_agree_on_the_reserved_trial`。仅 Windows;macOS 没有这一格。 |
 | ☐ | E7 | 从 `Prepared` 起不共享地持有 `THIRD-PARTY-NOTICES.md` 200 秒,按「重启」 | 不断电 | `nothing is moved: held open by another process`,`wrote [Armed, Prepared]`,删 Run 值,旧版重新打开(约 60 秒无窗,D-15);放开后重启卡从暂存集合再按一次 → 提交 |
 | ☐ | rollback | 更新 → 重启;trial 一启动就被结束 | 不断电 | `the trial <pid> ended without a receipt` → `RollbackIntent, RolledBack, Retired`;旧版按摘要复原;`--update-failed` 卡 *The new version did not start. / Previous version restored.* |
 | ☐ | console1、console2 | 按键驱动在按下「重启」后退出(启动 Folio 的控制台随之消失) | 不断电 | 交接与提交照常,trial 是那扇窗(与 U-31 D-5 无关的对照) |
@@ -973,7 +973,7 @@ macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 9
 `rehearsal_destructive`、outcome `rehearsal_rolled_back`、header `v` 2、phase `RehearsalRolledBack`、
 layout `RehearsalMembers`、adapter `RehearsalOurs`、`Retired.outcome` `RehearsalRolledBack`),并把
 receipt 写成 v2;**C** 是版本号加一的 B。**A-mut** 是从第二条用完即弃的分支构建的 A,逃生口的
-各个分支都改回 E1 之前的行为(启动遇到未知 header 时照常继续、不出卡,去掉「暂停写入继续」,
+每一处处理都改回 E1 之前的行为(启动遇到未知 header 时照常继续、不出卡,去掉「扣住写入继续运行」这条路,
 Windows 退出守卫的 `Installed{failed:false}`,持有者的 `Left`/`Refused`,门只看 header 就退出)。
 B 和 C 用发布身份签名(B -> C 的更新需要它);A 和 A-mut 不必。
 
@@ -997,7 +997,7 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 ... -Snapshot amut-instal
 
 **RV 行**就是上表的 W 行,只是跑在 B -> C 上,在哨兵时刻有一处不同(`guest\watch.ps1 -OverlayZip`):
 冻结的进程被结束(每个都在 `$KillWithinMs` 之内;运行中或挂起的 `folio.exe` 一直打开着自己的
-映像,无法被覆盖),A 的归档的每个成员都写到安装目录上并刷盘,`.folio-update` 原样不动,然后才
+映像,无法被覆盖),A 归档里的每个成员都写到安装目录上并刷盘,`.folio-update` 原样不动,然后才
 写哨兵、断电。之后与每个断电行一样:登录(+45 秒)、start1、start2。
 
 **植入行**不跑更新:宿主拿 B 的日志替换一个词,写成 `H\journal.json`(`rows.ps1` 的
@@ -1009,14 +1009,14 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 ... -Snapshot amut-instal
 
 | ✓ | 行 | 词 / rescue | 预期(A,带逃生口) | 预期(A-mut:变异列) |
 | --- | --- | --- | --- | --- |
-| ☐ | RV-W1 … RV-W12 | B 自己的日志;盖上 A | A 从不删除或改写它没有了结的日志:两次收集之间日志若有变化,那段时间里必有 rescue 的 `BT_UPDATE_RECOVER … recovery ended` 行,或者变化之前的 header 是 `terminal`、`preparing` 或 `deferred`(A1);最后有一扇 Folio 窗。**RV-W4**(Handoff、Run 值已写、Armed 之前)驱动够不着:两次都是监视器在 Run 值上冻结时日志已经是 `Moving`(这段窗口只有几毫秒宽);留给 0.4.9(E1-b-rest) | — |
+| ☐ | RV-W1 … RV-W12 | B 自己的日志;盖上 A | A 从不删除或改写它没有了结的日志:两次收集之间日志若有变化,那段时间里必有 rescue 的 `BT_UPDATE_RECOVER … recovery ended` 行,或者变化之前的 header 是 `terminal`、`preparing` 或 `deferred`(A1);最后有一扇 Folio 窗。**RV-W4**(Handoff、Run 值已写、Armed 之前)驱动够不着:两次都是监视器在 Run 值上冻结时日志已经是 `Moving`(这个时间窗只有几毫秒);留给 0.4.9(E1-b-rest) | — |
 | ☐ | RV-W6 | 同上,在 `Moving` 断电 | B 的 rescue 发现两套文件都没有完整在位 → `Stuck`,并打开它的 rescue 副本,副本显示 *Update incomplete.* 并指出文件夹(T-RESCUE-COPY-CARD)——前提是 B 带有这个修复;在它之前构建的 B 打开 rescue 副本,但不出卡 | — |
 | ☐ | BC-class … BC-retired-outcome | 每个词;B 的 rescue(装着 B) | B 读得懂自己的词并了结:`recovery ended RolledBack`,日志删掉,*Previous version restored.* | — |
 | ☐ | RW-class-B、RW-outcome-B、RW-v-B | header 词;B 的 rescue | A 把它交给 B 的 rescue(`an update is being finished by …\rescue\folio.exe`),由后者照上一行了结 | A 照常继续,什么都不交出,不出卡(`… is left as it is`) |
-| ☐ | RW-class-none、-held(及 outcome、v) | header 词;无 rescue / B 的 rescue 被以共享 None 持有 | 暂停写入继续:`could not be started; Folio starts with its writes held`,日志逐字节不变,*An update by a newer Folio is not finished.* … *Changes made in this session are not kept.* | 同上 |
+| ☐ | RW-class-none、-held(及 outcome、v) | header 词;无 rescue / B 的 rescue 被不共享地持有 | 扣住写入继续运行:`could not be started; Folio starts with its writes held`,日志逐字节不变,*An update by a newer Folio is not finished.* … *Changes made in this session are not kept.* | 同上 |
 | ☐ | RW-class-A(及 outcome、v) | header 词;把 A 放作 rescue(R2-19) | 作为恢复进程的 A 让开(`recovery ended StoodAside(`),退出守卫打开 rescue 副本,从不以普通方式打开已安装的构建,那扇窗显示较新 Folio 的卡片(T-RESCUE-COPY-CARD:rescue 副本读真正 home 里的日志;在此之前,rescue 副本读的是它自己的 home,不出卡) | 同上 |
 | ☐ | RW-phase-B、RW-layout-B、RW-adapter-B | 正文词;B 的 rescue | header 让它交出去;B 了结它 | 相同(对照) |
-| ☐ | RW-phase-none、-held(及 layout、adapter) | 正文词;无 rescue / 被持有 | 暂停写入继续;只要 A 读不全日志,卡片就是较新 Folio 的那张(`update_startup::unfinished`),带「更改不保留」那一句 | 照常继续(`Folio starts without it`),不出卡 |
+| ☐ | RW-phase-none、-held(及 layout、adapter) | 正文词;无 rescue / 被持有 | 扣住写入继续运行;只要 A 读不全日志,卡片就是较新 Folio 的那张(`update_startup::unfinished`),带「更改不保留」那一句 | 照常继续(`Folio starts without it`),不出卡 |
 | ☐ | RW-phase-A(及 layout、adapter) | 正文词;A 作 rescue | 同 RW-class-A:让开,rescue 副本的窗显示较新 Folio 的卡片 | `recovery ended Left(`,rescue 副本的窗,不出卡 |
 | ☐ | RW-retired-outcome-B | `Retired.outcome`(终态 header) | A 凭它冻结的 header 让它退役(A1):日志删掉,什么都不交出,不出卡(一次普通启动) | 相同 |
 | ☐ | RW-receipt-v2 | 活行:装着 A,经源 A -> B(A 和 B 由同一身份签名;首次运行已应答) | 作为 trial 的 B 把 receipt 写成 v2;A 的持有者从不接受它:`BT_UPDATE_APPLY the receipt: version 2 is not one this build reads`,截止时没有 receipt,回滚(`RolledBack`),日志删掉,A 复原并显示 *The new version did not start. / Previous version restored.*(各格读自 `t240` 和 `then` 两次收集) | — |
@@ -1086,10 +1086,10 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 ... -Snapshot amut-instal
 和 `folio.msix` 在 `<包文件夹>\folio-<version>\` 里;用 `folio` 启动、开着一个窗格的 Folio,模块列表
 里有那个文件夹的 `conpty.dll`(`(Get-Process folio).Modules | Where-Object ModuleName -eq 'conpty.dll'`),
 `diagnostics.log` 里**没有** `ConPTY: this pane runs on the Windows inbox ConPTY` 这一行;
-`winget uninstall WeiyiShi.Folio` 之后不留包文件夹、`PATH` 条目和链接。
+`winget uninstall WeiyiShi.Folio` 之后包文件夹、`PATH` 条目和链接都不留下。
 
 只记录、不判定:winget 的 `Archive scan detected malware. Proceeding due to --ignore-local-archive-malware-scan`
-那一行,以及每个解压出的文件的 `Zone.Identifier` 流里的 `ZoneId=3`(RELEASING.md 的
+那一行,以及解压出的每个文件 `Zone.Identifier` 流里的 `ZoneId=3`(RELEASING.md 的
 Troubleshooting)。
 
 红格:
@@ -1121,14 +1121,14 @@ Troubleshooting)。
 5. **W-b**:第 3 步的命令,原样。
 
 证据:`vm-live\winget\a-image\` 和 `vm-live\winget\b-current\`,各含操作日志、提升权限安装的输出
-和截图。在该行的那一行里报两个客户端的版本:`PASS on <current> / PASS on <image's>`,或哪一格红了
-及它在 `diagnostics.log` 里的原话。
+和截图。这一行的结果里写明两个客户端的版本:`PASS on <current> / PASS on <image's>`;或写明哪一格
+红了,以及它在 `diagnostics.log` 里的原话。
 
 ### 4.6 锁定下的 Windows PowerShell(每次发版)
 
-规则是 RULES §38:Windows PowerShell 5.1 窗格只在该版本答复 `FullLanguage` 时才用上 Folio 的
+规则是 RULES §38:Windows PowerShell 5.1 窗格只在 5.1 答出 `FullLanguage` 时才用上 Folio 的
 PSReadLine;在 5.1 以受限语言模式运行的机器上,这个窗格与关掉 Shell 整合的窗格完全一样。开发机上
-的测试进不了锁定状态(`__PSLockdownPolicy` 只从机器级的那一块读取,写它需要管理员),所以靠这两行
+的测试进不了锁定状态(`__PSLockdownPolicy` 只从机器级环境变量读取,写它需要管理员),所以靠这两行
 来证明。**在 `folio-win11` 上,客户机里开提升权限的 shell,先回 `clean` 快照;发版时由协调者跑。**
 
 | 行 | 制造锁定 | 检查 |
@@ -1167,7 +1167,7 @@ pwsh -File scripts/release/cleanvm/run-load-row.ps1 -Vmx <folio-win11.vmx> -VmPa
 **这一行跑时首次运行卡已经应答过。** 启动候选版之前,客户机脚本把 `guest/load-row-settings.json`
 放成干净账户的 `%APPDATA%\Folio\settings.json`:一份 schema 25 的文档,除 PowerShell 邀请
 (`Declined`)外每个值都是出厂默认值。候选版自己的迁移把它升到自己的版本,v31 → v32 那一步写入
-`first_run_card: Shown`——产品的规则是回头的用户不会再遇到这张卡。所以欢迎卡和邀请都不会盖在
+`first_run_card: Shown`——产品的规则是老用户不会再看到这张卡。所以欢迎卡和邀请都不会盖在
 窗格上,它们也不是这里要测的;首次运行卡另有自己的一行。客户机里已有 `settings.json` 的,原样不动。
 
 驱动的操作一次都没到达 Folio 的阶段打印为 `NOT EXERCISED`,其各格不算结果。跑这一行之前让客户机
@@ -1178,7 +1178,7 @@ pwsh -File scripts/release/cleanvm/run-load-row.ps1 -Vmx <folio-win11.vmx> -VmPa
 `-Tag after` 用修复后的构建;报告带两张表。
 
 **2026-10-21 实测**(folio-win11,2 个逻辑处理器,所以 hog 跑 4 个 Normal 优先级的自旋任务)。
-before3 是不带修复的插桩构建(7d00c2ed);after10 是修复(1b911da7,含 main 453c0c7c),驱动在
+before3 是不带修复的插桩构建(7d00c2ed);after10 是带修复的构建(1b911da7,含 main 453c0c7c),驱动在
 81779f7a:
 
 | 格 | before3(7d00c2ed) | after10(1b911da7) |
