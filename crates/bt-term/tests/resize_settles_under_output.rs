@@ -23,7 +23,7 @@ use bt_term::{
     ResizeTraceKind,
 };
 
-fn nz(value: u32) -> NonZeroU32 {
+fn nonzero_extent(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("a positive dimension")
 }
 
@@ -57,18 +57,18 @@ struct PrintingPane {
 
 impl PrintingPane {
     /// A pane narrowed to [`NARROW`] columns at its first layout and settled there, quiet.
-    fn settled(capacity: usize) -> Self {
+    fn settled_pane(capacity: usize) -> Self {
         let clock = Instant::now();
         let mut session = DualPlaneSession::with_frozen_quota(
-            nz(100),
-            nz(ROWS),
+            nonzero_extent(100),
+            nonzero_extent(ROWS),
             NonZeroUsize::new(capacity).expect("a positive capacity"),
         );
         session.feed_at(b"PS> ", clock).expect("a prompt");
         session
-            .resize_at(nz(NARROW), nz(ROWS), clock)
+            .resize_at(nonzero_extent(NARROW), nonzero_extent(ROWS), clock)
             .expect("the resize reflows");
-        session.mark_pty_resize_requested_at(nz(NARROW), nz(ROWS), clock);
+        session.mark_pty_resize_requested_at(nonzero_extent(NARROW), nonzero_extent(ROWS), clock);
         assert!(
             session
                 .finish_resize_if_quiescent(clock + QUIET)
@@ -84,7 +84,7 @@ impl PrintingPane {
 
     /// Feed one drain turn at `step` past the clock. Answers whether the end-of-turn ask closed
     /// the transaction.
-    fn turn(&mut self, bytes: &[u8], step: Duration) -> bool {
+    fn feed_one_turn(&mut self, bytes: &[u8], step: Duration) -> bool {
         self.clock += step;
         self.feed_only(bytes);
         self.session
@@ -122,10 +122,13 @@ impl PrintingPane {
     /// Resize mid-output and tell the child at once, as the window's release does.
     fn resize_and_tell(&mut self, columns: u32) {
         self.session
-            .resize_at(nz(columns), nz(ROWS), self.clock)
+            .resize_at(nonzero_extent(columns), nonzero_extent(ROWS), self.clock)
             .expect("the resize reflows");
-        self.session
-            .mark_pty_resize_requested_at(nz(columns), nz(ROWS), self.clock);
+        self.session.mark_pty_resize_requested_at(
+            nonzero_extent(columns),
+            nonzero_extent(ROWS),
+            self.clock,
+        );
         assert!(self.session.resize_transaction_open());
     }
 
@@ -149,7 +152,7 @@ impl PrintingPane {
     }
 
     /// The numbers of the frozen lines that begin with one, oldest first.
-    fn frozen_numbers(&self) -> Vec<usize> {
+    fn frozen_line_numbers(&self) -> Vec<usize> {
         self.session
             .transcript()
             .frozen()
@@ -182,7 +185,7 @@ const fn cells_one_slice_adds() -> usize {
 /// it held then.
 #[test]
 fn a_flood_that_never_pauses_settles_at_the_staging_budget() {
-    let mut pane = PrintingPane::settled(2_000);
+    let mut pane = PrintingPane::settled_pane(2_000);
     pane.print_quietly_until(500);
     pane.resize_and_tell(WIDER);
     let at_request = pane.staged_cells();
@@ -190,7 +193,7 @@ fn a_flood_that_never_pauses_settles_at_the_staging_budget() {
     let mut settled = false;
     while pane.lines < 3_500 && !settled {
         let slice = pane.next_slice(3_500);
-        settled = pane.turn(&slice, Duration::from_millis(1));
+        settled = pane.feed_one_turn(&slice, Duration::from_millis(1));
         most = most.max(pane.staged_cells());
     }
     assert!(
@@ -211,16 +214,16 @@ fn a_flood_that_never_pauses_settles_at_the_staging_budget() {
 #[test]
 fn the_tail_the_reflow_pushed_off_is_not_counted_against_the_budget() {
     let clock = Instant::now();
-    let mut session = DualPlaneSession::new(nz(200), nz(1_000));
+    let mut session = DualPlaneSession::new(nonzero_extent(200), nonzero_extent(1_000));
     let mut screen = Vec::new();
     for number in 0..999 {
         screen.extend_from_slice(format!("{number:06}{}\r\n", "z".repeat(190)).as_bytes());
     }
     session.feed_at(&screen, clock).expect("plain text");
     session
-        .resize_at(nz(WIDER), nz(1_000), clock)
+        .resize_at(nonzero_extent(WIDER), nonzero_extent(1_000), clock)
         .expect("the resize reflows");
-    session.mark_pty_resize_requested_at(nz(WIDER), nz(1_000), clock);
+    session.mark_pty_resize_requested_at(nonzero_extent(WIDER), nonzero_extent(1_000), clock);
     let pushed_off: usize = session
         .transcript()
         .resize_staged_rows()
@@ -248,7 +251,7 @@ fn the_tail_the_reflow_pushed_off_is_not_counted_against_the_budget() {
 /// nothing to move.
 #[test]
 fn a_settle_under_the_flood_moves_nothing() {
-    let mut pane = PrintingPane::settled(10_000);
+    let mut pane = PrintingPane::settled_pane(10_000);
     pane.print_quietly_until(500);
     pane.resize_and_tell(WIDER);
     let mut settled_screen = None;
@@ -278,7 +281,7 @@ fn a_settle_under_the_flood_moves_nothing() {
         .map(|line| line.text.strip_prefix("PS> ").unwrap_or(&line.text))
         .collect::<String>();
     let last = pane
-        .frozen_numbers()
+        .frozen_line_numbers()
         .last()
         .copied()
         .expect("history holds the flood");
@@ -302,13 +305,13 @@ fn a_settle_under_the_flood_moves_nothing() {
 /// for never lies past the bound while it spins.
 #[test]
 fn a_spinner_that_never_pauses_settles_at_the_bound() {
-    let mut pane = PrintingPane::settled(2_000);
+    let mut pane = PrintingPane::settled_pane(2_000);
     pane.print_quietly_until(300);
     pane.resize_and_tell(WIDER);
     let told = pane.clock;
     let mut settled_at = None;
     for tick in 0..30 {
-        if pane.turn(spinner_frame(tick).as_bytes(), FRAME) {
+        if pane.feed_one_turn(spinner_frame(tick).as_bytes(), FRAME) {
             settled_at = Some(pane.clock);
             break;
         }
@@ -331,7 +334,7 @@ fn a_spinner_that_never_pauses_settles_at_the_bound() {
 /// while the program keeps writing.
 #[test]
 fn a_formula_printed_under_a_spinner_is_typeset_after_the_bound() {
-    let mut pane = PrintingPane::settled(2_000);
+    let mut pane = PrintingPane::settled_pane(2_000);
     pane.print_quietly_until(300);
     pane.session.run_workers(&|_| None);
     pane.resize_and_tell(WIDER);
@@ -339,9 +342,9 @@ fn a_formula_printed_under_a_spinner_is_typeset_after_the_bound() {
     for line in 0..ROWS + 6 {
         answer.push_str(&format!("answer line {line}\r\n"));
     }
-    pane.turn(answer.as_bytes(), FRAME);
+    pane.feed_one_turn(answer.as_bytes(), FRAME);
     for tick in 0..16 {
-        pane.turn(spinner_frame(tick).as_bytes(), FRAME);
+        pane.feed_one_turn(spinner_frame(tick).as_bytes(), FRAME);
         pane.session.run_workers(&|_| None);
     }
     assert!(
@@ -354,16 +357,16 @@ fn a_formula_printed_under_a_spinner_is_typeset_after_the_bound() {
 /// cannot be harvested against a size the child does not hold.
 #[test]
 fn nothing_settles_before_the_child_is_told() {
-    let mut pane = PrintingPane::settled(2_000);
+    let mut pane = PrintingPane::settled_pane(2_000);
     pane.print_quietly_until(300);
     pane.session
-        .resize_at(nz(WIDER), nz(ROWS), pane.clock)
+        .resize_at(nonzero_extent(WIDER), nonzero_extent(ROWS), pane.clock)
         .expect("the resize reflows");
     let reflowed_at = pane.clock;
     while pane.lines < 2_000 {
         let slice = pane.next_slice(2_000);
         assert!(
-            !pane.turn(&slice, FRAME),
+            !pane.feed_one_turn(&slice, FRAME),
             "a transaction settled at {} lines before its child was told",
             pane.lines
         );
