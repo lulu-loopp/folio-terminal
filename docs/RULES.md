@@ -528,11 +528,17 @@ the dirty gate (`restore::DirtyGate`), which answers raised, nothing to ask, or
 busy — and **a busy gate never authorises the operation that found it busy**
 (2026-09-25, ticket 58): only nothing to ask lets the verb go on; a request that
 finds another question up is dropped, and that question keeps its own request.
-**The last ordinary window's close is the summoned terminal's shut too**
-(2026-10-09, T-SUMMON-DIRTY-PREVIEW): before the run ends, the summoned terminal's
-gate is put the run's end (`GateRequest::ShutWithTheRun`) and, when it asks, the
-summoned terminal is brought up holding the card; Save all or Discard re-runs that
-window's close, and Cancel leaves it open — the summoned terminal never stands alone.
+**The last ordinary window's close is the summoned terminal's shut too when that
+close ends the run** (2026-10-09, T-SUMMON-DIRTY-PREVIEW): with Keep running when
+closed off, or for a last window whose shells all exited. Before the run ends, the
+summoned terminal's gate is put the run's end (`GateRequest::ShutWithTheRun`) and,
+when it asks, the summoned terminal is brought up holding the card; Save all or
+Discard re-runs that window's close, and Cancel leaves it open. **With the switch on
+(the default, 2026-11-14), that close puts the window away instead** (0.4.10 row 87):
+nothing is asked, the summoned terminal stays as it was, and both go when the run
+goes, which is only at a quit, the system's end or the outside quit message. A
+put-away run the system restarts comes back on the glass: the layout keeps no
+put-away bit. The summoned terminal never stands alone.
 **From.** §7.1.3; §7.1.3q; §7.1.3s *undo lives on the buffer, and the dirty dot is
 a position in it*; §7.1.3v *a buffer knows which disk state it is holding, and a
 read is answered against the body it was issued for* (`T-EDIT-DISK`); §7.1.3w;

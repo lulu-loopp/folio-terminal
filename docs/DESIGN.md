@@ -3722,7 +3722,7 @@ HKCU\Software\Classes\AppUserModelId\Folio.Terminal
 * **`IconUri` 不写。** 它要的是盘上一个真实图片文件的绝对路径，而 Folio 一个图片文件都不发——理由与 §7.4 拒绝随二进制发一个 `.ico` 完全相同。写一个不存在的路径是往注册表里写一句谎话。等哪天产品有了图标文件，这个值和它一起来。**只写 `DisplayName` 时署名照样是「Folio」**（实机截图 `artifacts/win-landing/notifications/shot-4-two-windows-toast.png`），只是图标位置是平台的占位方块。
 * **一条开发机上的坑，本片把 spike 的「疑似」坐实了：署名会被通知平台按 AUMID 缓存住。** 本片一度看到 toast 署名是裸的 `Folio.Terminal` 而不是 `Folio`——`DisplayName` 明明写着。对照实验：同一支探针换一个**全新** AUMID，署名立刻正确；把探针的 AUMID 强行改成 `Folio.Terminal` 并把 `DisplayName` 写成 `PROBE-NAME-CHECK`，署名仍旧是 `Folio.Terminal`。这个身份是 win-landing spike 几周前用同一个字符串跑过留下的缓存。解法是 `ToastNotificationManager.History.Clear("<AUMID>")`（或重启 explorer），清完之后同一个 build 的署名当场变回 `Folio`。**这是开发机现象不是产品缺陷**：没见过这个 AUMID 的机器上，注册的 `DisplayName` 一次就生效。
 * **放弃的是「冷激活」，而那不是缺口。** 没有 COM server，就没法在 Folio 已经退出之后由系统把它拉起来；通知中心里一条隔夜的旧 toast 点了不会有反应。这是诚实的结果：它指的那个 pane 已经随进程一起没了。终端的实际情形只有两种——在跑（进程内 `Activated` 就够）或者已退出（那就没有可去的地方）。
-* **注册是懒的，而这是一个承诺不是优化。** 构造 `Notifier` 会写注册表，所以它挂在**第一条真正通过闸门的 toast** 上：把设置关掉、或者干脆没有程序发过通知的读者，机器上不会多出 `AppUserModelId` 下的键，Windows 的通知设置里也不会多出 Folio 一项。
+* **注册是懒的，而这是一个承诺不是优化。** 构造 `Notifier` 会写注册表，所以它挂在**第一条真正通过闸门的 toast** 上：把设置关掉的读者，机器上不会多出 `AppUserModelId` 下的键，Windows 的通知设置里也不会多出 Folio 一项。（**2026-11-19 改，0.4.10 计划行 87 的 87d，§7.54f**：原文还写着「或者干脆没有程序发过通知的读者」。在 Windows 上，第一次关掉最后一扇窗把它收起时 Folio 自己发一条「Folio is still running」，那就是第一条过闸的 toast；所以如今成立的是：通知关着，没有键；通知开着，第一条 toast——某个程序的，或 Folio 自己这一条——写下它。）
 * **关掉开关不删注册表，这一条是被实测改过来的。** 那个键是 Windows 用来存**用户自己**对 Folio 通知的选择（横幅开不开、响不响、Focus Assist 里的优先级）的地方；`Off` 删掉它等于把用户的选择连同我们的键一起扔了，`On` 回来时是个陌生人。而且探针在这台机器上直接量到：把平台自己的 `Notifications\Settings\<AUMID>` 从活着的会话底下删掉，会**把这个身份之后的每一条 toast 都卡住**。所以 Off 的含义是「不发」，那也是一个开关唯一能诚实承诺的事——这与 §7.4「卸载只删自己造的那一个键」不矛盾：那里删的是**用户看得见的一条菜单**，这里留的是**用户自己写下的偏好**。
 * **`notifier.Setting()` 故意不读。** 一个全新身份的第一次调用它答 `0x80070490 "Element not found"`（平台还没建自己的设置项），而 `Show` 照样成功。把它读成「通知被关了」会在每台机器上静音第一条通知一次，而且只在什么都没出错的机器上。
 * **XML 逃逸是承重的，不是装饰。** 正文是管道另一端来的任意文本，构建日志里全是 `&`、`<`、`"`；平台把这串东西当 XML 解析，一个没逃逸的 `&` 不是一个花掉的词，而是一份加载失败的文档——也就是一条恶意输出让这个终端从此不再通知。`launch` 属性同样逃逸：那串是**我们自己**写的、看起来最安全，而它偏偏就是含 `&` 的那一个。
@@ -8143,7 +8143,7 @@ transaction open does nothing, which is that hidden pane's ordinary answer.
 ② **闪帧：10 轮显隐 × 每轮 10 张截图 = 100 帧，均亮度最小值与最大值相等（都是 0.9894）**——一帧也没偏离稳态，既无黑帧也无白帧。（那个 0.99 是亮色主题下终端本身的亮度，不是白闪。）**局限写明**：`CopyFromScreen` 一张要十几毫秒，一帧级的闪可能拍不到；结构上不应当有，因为 `show_quake_window` 把两次 present 都放在 `set_visible(true)` **之前**，这正是启动那扇门一直在用的顺序。
 ③ **跨 DPI：修前三块屏中两块 FAIL（上面那两个比例），修后三块全 PASS**：`GetWindowRect` 与 `BT_QUAKE` 那一行请求的矩形逐位相等。
 
-**一扇没人能看见的窗不能把进程护着。** 这是本片自己引入的唯一真风险，写在这里。快捷终端是这个程序能拿在手里的唯一一扇「既不在屏上、也不在退场中」的窗。读者关掉自己看得见的最后一扇窗之后，剩下就是一个留在任务列表里、屏上无物、任务栏上无按钮的 `folio.exe`，而回去的路只剩一把他可能几周前绑的键。所以 `open_window_count` 把它排除在外——那句注释本来就写着「没有一扇是人看得见、移得进 tab、关得掉的窗」，这只是把同一条标准用到了第二种情形上——而它在最后一扇可见窗被告知的那一转跟着走，走的是每一扇窗都走的那扇门（`close_window(true)`）。**它一点东西也不会丢**：它的那一段和每一扇窗一样写进了文档，下一次启动它带着原样回来。红门 `a_window_nobody_can_see_does_not_keep_the_run_alive`（变异：拆掉 `open_window_count` 那个 filter，最后一扇可见窗的关闭不再是一次运行的结束，它把自己归了 Recent 而进程不退；拆掉 `close` 里的那一句，数对了却没人告诉它）。**明账**：想要一个常驻的快捷终端的人会发现它随最后一扇窗一起走，那需要的是一枚托盘图标而不是一扇看不见的窗，本单不做。（**这笔账已结**：7.54b ⑤。图标开着的时候，上面那句不再成立；关着的时候逐字有效。）
+**一扇没人能看见的窗不能把进程护着。**(**2026-11-14 起,开关开着时被 §7.54f 改写**:一扇收起的窗护着进程,因为通知区域的图标是回去的路。)这是本片自己引入的唯一真风险，写在这里。快捷终端是这个程序能拿在手里的唯一一扇「既不在屏上、也不在退场中」的窗。读者关掉自己看得见的最后一扇窗之后，剩下就是一个留在任务列表里、屏上无物、任务栏上无按钮的 `folio.exe`，而回去的路只剩一把他可能几周前绑的键。所以 `open_window_count` 把它排除在外——那句注释本来就写着「没有一扇是人看得见、移得进 tab、关得掉的窗」，这只是把同一条标准用到了第二种情形上——而它在最后一扇可见窗被告知的那一转跟着走，走的是每一扇窗都走的那扇门（`close_window(true)`）。**它一点东西也不会丢**：它的那一段和每一扇窗一样写进了文档，下一次启动它带着原样回来。红门 `a_window_nobody_can_see_does_not_keep_the_run_alive`（变异：拆掉 `open_window_count` 那个 filter，最后一扇可见窗的关闭不再是一次运行的结束，它把自己归了 Recent 而进程不退；拆掉 `close` 里的那一句，数对了却没人告诉它）。**明账**：想要一个常驻的快捷终端的人会发现它随最后一扇窗一起走，那需要的是一枚托盘图标而不是一扇看不见的窗，本单不做。（**这笔账已结**：7.54b ⑤。图标开着的时候，上面那句不再成立；关着的时候逐字有效。）
 
 **没做的:下拉动画。** 第一刀直切显隐,先量闪帧。理由是量得到:一扇透明、置顶、反复显隐的窗到底有没有黑白帧,是一件用真机看得出来的事,而一条动画会把它盖住。
 
@@ -8218,6 +8218,8 @@ transaction open does nothing, which is that hidden pane's ordinary answer.
 **高度不为这道缝买单,窗是往下挪的,不是被裁的。** 读者那个百分比回答的是「这块屏的多少」,一个悄悄比它说的少十二像素的百分比,在每一个缩放下都是不同的数。代价明写在这里而不是藏起来:**取满一百的时候,下边缘现在落在工作区下面十二个逻辑像素**,压住那里停着的东西。
 
 缝是逻辑像素而矩形是物理像素,所以要被召唤上去的那块屏的 dpi 是一个**参数**而不是这个函数能自己读的东西——它正在往一块本进程可能还没有窗的屏上摆窗,而它**有**窗的那块屏的缩放是错的那个数。`tear_out_rect` 因为同一件事读同一对(`dpi_at(鼠标)`)。**记住的矩形不吃这道缝**:那是读者自己摆的,他摆哪就是哪。
+
+> **【图标以另一种形状回来,2026-11-14,见 §7.54f】** 0.4.10 计划行 87 的通知区域图标不是这一桩的托盘:它属于整个运行而不是快捷终端,只在开关开着时立着。下面的撤销说明照旧是 2026-09-05 那一次的记录。
 
 > **【已撤,2026-09-05】** 这一桩整个撤销:托盘图标、它的菜单、`tray_icon` 那一格、以及它带来的常驻规则,全部没有了。撤的理由不是这段论证错了,是**它回答的那个问题不再存在**——用户裁决「快捷终端与 Folio 同生同死」,快捷终端是伴随物而不是第二个程序,所以没有「一个没有窗的 Folio」这个状态需要一扇门。原文一字未删,因为 §7.54e ① 反驳的正是它。`crates/bt-platform/src/tray.rs` 已删除,`bt-app` 里所有读它的地方已撤。
 
@@ -8333,6 +8335,8 @@ transaction open does nothing, which is that hidden pane's ordinary answer.
 
 这一节五桩,而它们是**同一句话的五个面**:快捷终端不是第二个程序,是 Folio 手里的一扇窗。托盘之所以撤,是因为它把这扇窗说成了一个可以独立活着的东西;一个 × 之所以够,是因为「收起」是这扇窗唯一的告别方式;呼出规则之所以要写成一个函数,是因为一扇窗只该有一个位置的答案;恢复之所以有三档,是因为它是一扇**常驻**的窗而不是一次性的;设置之所以独立一栏,是因为一扇窗值得一页而不是别人页脚上的四行。
 
+> **【开关开着时已推翻,2026-11-14,见 §7.54f】** 在 Windows 上,`Keep running when closed` 开着(默认)时,最后一扇普通窗的关闭把窗收起来,运行留着,通知区域的图标是回去的路;开关关着时下面这一桩逐字有效。原文一字未删。
+
 **① 托盘取消,常驻回到 §7.54 的第一个答案。** 用户裁决:「快捷终端与 Folio 同生同死;Folio 在跑热键就有效;普通窗全关即进程退出,隐藏着的快捷终端随之消失(它是伴随物不是独立窗)。」
 
 7.54b ⑤ 把托盘图标立起来的理由是**可达性**——「一个屏上无物、任务栏上无按钮的 `folio.exe`,回去的路只剩一把可能几周前绑的键」——那段论证一个字都不用改,而它现在没有主语了:没有图标,就没有「一个没有窗还在跑的 Folio」这个状态。§7.54 自己那句「一扇没人能看见的窗不能把进程护着」于是**恢复为全部答案**,`a_run_ends_with_its_last_visible_window` 是它写成的一行规则,`close` 与 `reap_leaving_windows` 两扇门读同一行。
@@ -8398,6 +8402,29 @@ transaction open does nothing, which is that hidden pane's ordinary answer.
 - **不弹恢复窗**,这是裁决明写的:这扇窗按键才出现,读者看不见,也就无从回答——`plan_windows` 早在选举开始之前就把它拎出去(§7.54 ③),这一节没有改动那一段。
 - **`--version` / CLI 一字未动。**
 - **无标记的 profile 上把 pin 钮灰掉——这一条没有照做,理由写在这里,等复议。** 裁决写的是「无标记的 profile pin 钮灰掉并写明原因」。没做的原因是 pin 在这扇窗上**不只**决定恢不恢复命令:它同时决定 tab 在条上的分区(pin 的靠左),而那件事在一台 `cmd.exe` 的机器上照样有意义。灰掉它会为了一句解释拿走一个还在工作的动词。**改成写在说明句上**:`What comes back` 那一行现在说「只有会上报命令的 shell 才有命令可恢复」,而没有整合的 pane 写进文档的是空字符串——那是诚实的答案,不是从屏幕上刮来的猜测。如果用户要的就是灰掉,这一条一句话就能加回来:判据是 `profiles::integration(index)` 落在 `CmdPrompt | None`(`PowerShellOptIn` 静态上说不了,因为它是 opt-in 的)。
+
+#### 7.54f 关掉最后一扇窗不再等于退出:窗收起来,整个运行留着,一个开关管它(用户裁决,2026-11-14;0.4.10 计划行 87;87a `crates/bt-app/src/{main,runtime/windows,frame,exit_diagnostics}.rs`、`crates/bt-platform/src/session_end.rs`、`vendor/winit`;87d `crates/bt-app/src/{settings,first_run,i18n,notify,settings_bundle,settings_merge}.rs`、`crates/bt-app/src/runtime/{settings,configuration,windows}.rs`、`crates/bt-persist/src/{settings,migrate,lib}.rs`)
+
+**这一节推翻 §7.54e ①,但只推翻一半。** 2026-09-05 那句「普通窗全关即进程退出」的理由是可达性:一个屏上无物、任务栏上无按钮的 `folio.exe` 没有人回得去。2026-11-14 用户裁决(R1):在 Windows 上,运行中最后一扇普通窗的关闭把窗**收起来**,壳和 agent 继续跑;通知区域里的图标(87b)就是回去的路,再启动一次 Folio、点 Folio 的任何一条通知也是。这一次可达性有了主语,所以 §7.54e ① 的论证一字不改,它的前提不再成立。**开关关着时 §7.54e ① 逐字有效**:关掉最后一扇窗就是结束运行,和 0.4.9 一模一样。
+
+**开关(87a 立、87d 给它一行)。** `settings.json` 的 `close_keeps_running`(v41,迁移写成开),每次关窗时由 `FolioApp::the_close_keeps_the_run` 现读,所以设置页上按一下,下一次关窗就照新的答,不等重启。87d 把它放进「常规」页,紧挨在「启动时打开」下面:上一行说再次启动 Folio 给你什么,这一行说关掉它最后一扇窗做什么——一次运行的两头。行名「Keep running when closed」;描述一句话(R2):Windows 上「Closing the last window leaves Folio running in the notification area.」,Mac 上「Closing the last window leaves shells and agents running.」。**这一行在 Mac 上暂时不出现**(`Capability::KeepRunningWhenClosed`,只答 Windows):Mac 的关窗还没有收起这一步(87c),一行按了什么也不改变的开关在设置页上就是一句假话;Mac 那一列的句子已经写好并量过行宽,87c 只需把这个能力的那一臂给 macOS。
+
+**关掉开关时,收起着的窗回来(R8)。** 无论是这一行、导入一份设置,还是手改 `settings.json`——后两者走同一扇门 `Runtime::apply_imported_setting`——关掉开关都记一笔 `App::bring_back_requested`,事件循环在门口用唯一那扇回去的门 `FolioApp::bring_the_window_back` 花掉它。关就是旧行为,不留一扇藏着、图标又已撤掉、只有再启动一次才找得回的窗。打开开关不动任何窗。
+
+**第一次收起时说一句,一台机器只说一次(R12)。** Windows 11 把新出现的通知区域图标收进溢出区,于是第一次关掉最后一扇窗在读者看来就是退出了。所以第一次收起时发一条通知:标题「Folio is still running」,正文「Its icon in the notification area brings the window back.」。三个条件,由 `notify::first_hide_toast_owed` 一处回答:平台是 Windows;这台机器的回执 `first_hide_toast`(`settings.json` v42,迁移写成 `NotShown`)说还没说过;「通知」那一行放行——问的是每一条 toast 都过的那道闸 `notify::interruption`,不另读一遍开关。通知被关着时什么也不发,回执也不花,等通知打开后的下一次收起再说。**回执在交给通知台的那一刻就花掉**,不管平台答什么:这条通知没人要过,它要待的那扇窗已经藏起来了,平台拒绝时通知台已经说过它那一行 stderr 并闩住。点它时启动串是 `notify::BRING_BACK_LAUNCH`,不指向任何 pane(`NotificationRoute::parse` 拒绝它),由点任何一条 Folio 通知都先走的那扇门把窗带回来。
+
+**通知台是后端的一扇门(R7)。** `App::notifications` 现在是 `Backend::Toasts`(`window_seam::ToastDoor`):产品的是 `NotificationDesk`,照旧在第一条过闸的 toast 上才建;测试套件的是 `headless::HeadlessToasts`,只把交给它的每一条记下来,什么也不碰。没有这扇门,87a 那些把窗收起来的无头测试会在每台跑测试的机器上写下通知身份、弹出真的通知。
+
+**回执是这台机器的事实,不是偏好。** 和 `first_run_card`、`cards_gesture_hint_offer`、`web_pages_used` 一样,导入一份设置时它原样不动(`settings_bundle::plan_settings` 不为它生成改动);手改本机的 `settings.json` 时它照常合并,因为那是对这台机器的陈述(`settings_merge::take_receipts`)。
+
+**通知身份的注册时机因此提前(§7.6)。** §7.6 写着注册是懒的:没有程序发过通知的读者机器上不会多出 `AppUserModelId` 下的键。开关开着、通知开着时,第一次收起本身就是第一条真正过闸的 toast,所以那把键在那一刻写下。§7.6 已按这句改过。
+
+**红门(变异证在各自的文档注释里,标签 `87d-P…`)。**
+
+- `bt-app/src/runtime/close_switch_tests.rs`(只在 Windows 上编,87c 之前收起只有 Windows 有):`the_first_put_away_says_folio_is_still_running_once_ever`(P18)、`with_notifications_off_the_first_put_away_says_nothing_and_stays_owed`(P32)、`a_machine_that_was_told_is_not_told_again`、`a_click_on_it_brings_the_window_back_and_opens_nothing`(P34)、`the_rows_press_is_the_switch_the_next_close_reads`(P35)、`turning_the_switch_off_brings_a_put_away_window_back`(P36)、`turning_the_switch_on_moves_no_window`。
+- `bt-app/src/notify.rs`:`the_first_put_away_is_owed_its_notification_on_windows_once_and_unsilenced`(P33,三个平台都跑)。
+- `bt-app/src/settings.rs`:`a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got`(P19,`NOT_ON_A_MAC` 第四行)。
+- `bt-persist/src/migrate.rs`:`migrate_settings_v41_to_v42_writes_the_receipt_not_shown_and_leaves_every_sibling_alone`(P37)。
 
 ### 7.55 一个浮着的意图框:五类内容分段不混排,文件那一段有一张有界的索引(0.2 聚焦搜索,`crates/bt-app/src/{palette.rs,palette_index.rs}`(新)、`crates/bt-app/src/{main,shortcuts,i18n,files,webhost}.rs`)
 
