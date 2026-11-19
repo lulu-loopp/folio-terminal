@@ -1735,12 +1735,15 @@ fn the_tab_layout_and_sidebar_mode_survive_the_round_trip_through_the_session() 
 /// is the first test's arm. A caller that went back to "stop only when this
 /// raised it" would reopen R1 for its own verb.
 ///
+/// The tab's close is `close_tab_by`, which holds the gate for every road that
+/// closes a tab; `close_tab` only names the verb's road (0.4.10 plan row 103).
+///
 /// MUTATION: write `if self.raise_dirty_gate(..)? == GateRaise::Raised`
-/// in `close_tab` — the first assertion goes red.
+/// in `close_tab_by` — the first assertion goes red.
 #[test]
 fn every_producer_of_the_dirty_gate_goes_on_only_when_there_was_nothing_to_ask() {
     for (name, request) in [
-        ("close_tab", "restore::GateRequest::CloseTab(index)"),
+        ("close_tab_by", "restore::GateRequest::CloseTab(index)"),
         ("close_pane", "restore::GateRequest::ClosePane(seat)"),
         (
             "run_term_menu_row",
@@ -1760,7 +1763,7 @@ fn every_producer_of_the_dirty_gate_goes_on_only_when_there_was_nothing_to_ask()
         [
             "ask_before_the_verb",
             "close_pane",
-            "close_tab",
+            "close_tab_by",
             "on_window_event",
             "run_term_menu_row",
             "the_summon_lets_the_run_end",

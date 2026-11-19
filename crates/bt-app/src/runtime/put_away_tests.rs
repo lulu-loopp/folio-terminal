@@ -12,7 +12,7 @@ use crate::headless::{
     headless_window,
 };
 use crate::test_support::{ringing_tab, tab_texts};
-use crate::{CloseRoad, carry_pass::CarryAsk};
+use crate::{CloseFate, carry_pass::CarryAsk};
 use std::cell::RefCell;
 use std::path::PathBuf;
 use winit::event::WindowEvent;
@@ -168,8 +168,8 @@ impl PutAway {
 /// keeps its sentinel, no Recent row is filed and the loop is not asked to exit; and the layout
 /// is written down as it was put away.
 ///
-/// PLANT P1: drop the `CloseRoad::PutAway` arm of `FolioApp::on_window_event` and the
-/// `CloseRoad::PutAway` return of `FolioApp::close` — the close ends the run.
+/// PLANT P1: drop the `CloseFate::PutAway` arm of `FolioApp::on_window_event` and the
+/// `CloseFate::PutAway` return of `FolioApp::close` — the close ends the run.
 #[test]
 fn with_the_switch_on_the_last_windows_close_puts_it_away() {
     let mut run = PutAway::open("on", true);
@@ -201,14 +201,14 @@ fn with_the_switch_on_the_last_windows_close_puts_it_away() {
 /// already put away is ignored**: there is no `×` on a hidden window, and the tool that sent it
 /// does not end the run.
 ///
-/// PLANT: answer `CloseRoad::AlreadyAway` as `CloseRoad::Shut` in `FolioApp::close_road` — the
+/// PLANT: answer `CloseFate::AlreadyAway` as `CloseFate::Shut` in `FolioApp::close_fate` — the
 /// second close ends the run.
 #[test]
 fn a_close_that_reaches_a_put_away_window_is_ignored() {
     let mut run = PutAway::open("again", true);
     let _ = run.close();
     let id = run.application.id;
-    assert_eq!(run.application.folio.close_road(id), CloseRoad::AlreadyAway);
+    assert_eq!(run.application.folio.close_fate(id), CloseFate::AlreadyAway);
     let effects = run.close();
     assert!(
         !effects.contains(&WindowEffect::Exit),
@@ -241,7 +241,7 @@ fn with_the_switch_off_the_last_windows_close_ends_the_run() {
 /// (`Runtime::vault_this_window`), as a window going and not the run ending: only the close that
 /// would end the run puts its window away.
 ///
-/// PLANT P3: answer `CloseRoad::PutAway` for every window in `FolioApp::close_road` — the window
+/// PLANT P3: answer `CloseFate::PutAway` for every window in `FolioApp::close_fate` — the window
 /// is put away and nothing is filed.
 #[test]
 fn a_window_that_is_not_the_last_closes_into_recent_with_the_switch_on() {
@@ -270,12 +270,21 @@ fn a_window_that_is_not_the_last_closes_into_recent_with_the_switch_on() {
 /// RED (T4; R4) — **with the switch on, a last window whose final shell exited ends the run**: the
 /// close its final tab asked for is the run's end, as before.
 ///
-/// PLANT P4: drop the `shell_exit_close_requested` term from `FolioApp::the_close_keeps_the_run`
-/// — the window is put away.
+/// The close is asked as the final tab asks it when every shell has exited: by Folio's own request,
+/// whose road (`OwnCloseRoad::ShellsExited`) the request carries (0.4.10 plan row 103).
+///
+/// PLANT P4: drop the shells'-exit term (`the_close_was_asked_by_the_shells_exit`) from
+/// `FolioApp::the_close_keeps_the_run` — the window is put away.
 #[test]
 fn a_last_window_whose_shells_exited_ends_the_run_with_the_switch_on() {
     let mut run = PutAway::open("exited", true);
-    run.window().shell_exit_close_requested = true;
+    let id = run.application.id;
+    run.application
+        .folio
+        .runtime(id)
+        .expect("the window")
+        .request_window_close(bt_platform::close_road::OwnCloseRoad::ShellsExited)
+        .expect("the request is made");
     let _ = run.close();
     let window = run.window();
     assert!(!window.put_away, "nothing is put away");

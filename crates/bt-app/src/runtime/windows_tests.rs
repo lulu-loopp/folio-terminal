@@ -2338,10 +2338,16 @@ fn the_keyboard_is_taken_through_the_foreground_door() {
         folio.runtime().give_foreground_with_retry().is_err(),
         "a window the system would not give the keyboard says so"
     );
-    folio.runtime().request_window_close().expect("asked");
+    folio
+        .runtime()
+        .request_window_close(bt_platform::close_road::OwnCloseRoad::CaptionButton)
+        .expect("asked");
     assert_eq!(
         folio.ledger.take(),
-        [WindowEffect::ForegroundTaken, WindowEffect::CloseRequested]
+        [
+            WindowEffect::ForegroundTaken,
+            WindowEffect::CloseRequested(bt_platform::close_road::OwnCloseRoad::CaptionButton)
+        ]
     );
     let seat = folio.window.tabs[0].seats.identity();
     folio
@@ -2781,5 +2787,801 @@ fn the_close_and_quit_harnesses_keep_every_storage_asker_on_one_lane() {
         off(&mut quitting),
         Vec::<&str>::new(),
         "on one working lane"
+    );
+}
+
+// ── a window's close says which window and how (0.4.10 plan row 103) ──
+
+/// What the close witness saw of a request that came from another program, `road` by
+/// `delivery`, with the window not in front and the pointer `pointer`.
+fn foreign_close(
+    road: bt_platform::close_road::CloseRoad,
+    delivery: bt_platform::close_road::CloseDelivery,
+    pointer: bt_platform::close_road::ClosePointer,
+) -> bt_platform::close_road::CloseArrival {
+    bt_platform::close_road::CloseArrival {
+        road,
+        delivery: Some(delivery),
+        foreground: Some(false),
+        pointer,
+    }
+}
+
+/// The close witness hands window `id` `arrival`, as its hooks would when the message reached it.
+fn arrives(
+    application: &mut HeadlessApplication,
+    id: u64,
+    arrival: bt_platform::close_road::CloseArrival,
+) {
+    application
+        .folio
+        .runtime(WindowId::from(id))
+        .expect("the window is open")
+        .window
+        .window
+        .closes
+        .borrow_mut()
+        .push_back(arrival);
+}
+
+/// One window event to window `id`, dispatched as the loop dispatches it.
+fn event_to(application: &mut HeadlessApplication, id: u64, event: WindowEvent) {
+    application
+        .folio
+        .on_window_event(&application.event_loop, WindowId::from(id), event);
+}
+
+/// **How a close of the run's last visible window begins its line on this host** (0.4.10 plan
+/// row 103): `last window closed — ` where the run ends with it, and `window closed — ` where the
+/// application outlives its last window (macOS), so the same close ends nothing
+/// (`a_run_ends_with_its_last_visible_window`).
+fn closing_the_last_window_begins() -> &'static str {
+    if bt_platform::host_platform().an_application_outlives_its_last_window() {
+        "Folio: window closed — "
+    } else {
+        "Folio: last window closed — "
+    }
+}
+
+/// The whole line a close of the run's last visible window writes on this host: `body` after
+/// [`closing_the_last_window_begins`], and `; windows left=0` where the close ends nothing.
+fn closing_the_last_window_says(body: &str) -> String {
+    let tail = if bt_platform::host_platform().an_application_outlives_its_last_window() {
+        "; windows left=0"
+    } else {
+        ""
+    };
+    format!("{}{body}{tail}", closing_the_last_window_begins())
+}
+
+/// The close lines said since the ledger was last read, in order; the ledger is emptied.
+fn close_lines(application: &HeadlessApplication) -> Vec<String> {
+    application
+        .event_loop
+        .ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            WindowEffect::Noted(line)
+                if line.starts_with("Folio: window closed")
+                    || line.starts_with("Folio: last window closed") =>
+            {
+                Some(line)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The own roads Folio's requests carried since the ledger was last read; the ledger is emptied.
+fn own_requests(ledger: &Ledger) -> Vec<bt_platform::close_road::OwnCloseRoad> {
+    ledger
+        .take()
+        .into_iter()
+        .filter_map(|effect| match effect {
+            WindowEffect::CloseRequested(road) => Some(road),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **The first point, scanning the caption band, whose chrome target `wanted` accepts**.
+fn chrome_point(
+    runtime: &mut crate::Runtime<'_, crate::headless::Headless>,
+    wanted: impl Fn(crate::seats::ChromeTarget) -> bool,
+) -> PhysicalPosition<f64> {
+    (0..40)
+        .flat_map(|row| (0..600).map(move |column| (column, row)))
+        .map(|(column, row)| {
+            PhysicalPosition::new(1199.0 - f64::from(column) * 2.0, f64::from(row) * 2.0 + 1.0)
+        })
+        .find(|at| runtime.chrome_target_at(*at).is_some_and(&wanted))
+        .expect("the caption band holds the target")
+}
+
+/// A one-tab window holding an edited file, asked nothing yet — so its close is gate ③'s.
+fn one_dirty_window(tag: &str) -> HeadlessApplication {
+    let path = host_spelling(r"C:\w\closing.md");
+    let mut buffer = buffer_saying(&path, "closing.md", "one\n");
+    let mut caret = preview_edit::EditCaret::default();
+    let body = buffer.content().cloned().expect("the head landed");
+    caret.place(&body, 4, false);
+    assert!(
+        buffer.edit_by_caret(&mut caret, |content, caret| {
+            preview_edit::insert(content, caret, "typed by hand")
+        }),
+        "the keystroke landed"
+    );
+    let (tab, _) = tab_with_a_preview(1, vec![buffer]);
+    HeadlessApplication::of(the_close_switch_off(HeadlessFolio::with_tabs(
+        tag,
+        vec![tab],
+        0,
+    )))
+}
+
+/// **The close switch off** (`close_keeps_running`, 0.4.10 plan row 87, part 87a): the run's last
+/// ordinary window's close ends the run, as the close lines these tests read are said for; with
+/// the switch on, as a new run's settings have it, that close puts the window away instead.
+fn the_close_switch_off(mut folio: HeadlessFolio) -> HeadlessFolio {
+    let mut settings = folio.app.settings_store.loaded().clone();
+    settings.close_keeps_running = false;
+    assert!(
+        folio.app.settings_store.store(settings),
+        "the switch is off"
+    );
+    folio
+}
+
+/// Two ordinary windows, `1` and `2`, nothing asked in either.
+fn two_open_windows(tag: &str) -> HeadlessApplication {
+    let folio = HeadlessFolio::with_tabs(tag, vec![ringing_tab(1, 2)], 0);
+    let second = headless_window(
+        &folio.app,
+        HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),
+        vec![ringing_tab(2, 1)],
+        0,
+    );
+    let mut application = HeadlessApplication::of(folio);
+    application.folio.windows.insert(WindowId::from(2), second);
+    application.event_loop.ledger.take();
+    application
+}
+
+/// RED (mutation: `ChromeTarget::CloseWindow` asking as `OwnCloseRoad::FinalTab`) — **the
+/// caption `×` asks the window's close as the caption button**: a real pointer press on the
+/// chrome's close target. What the close then says is
+/// `an_own_request_with_nothing_to_ask_ends_the_run_saying_its_road`'s claim, and the windows
+/// left are `a_close_that_does_not_end_the_run_says_the_windows_left`'s (review N10).
+#[test]
+fn the_caption_close_button_asks_as_itself() {
+    use winit::event::{DeviceId, ElementState, MouseButton};
+    let mut application = two_open_windows("close-road-caption");
+    let at = chrome_point(&mut application.runtime(), |target| {
+        target == crate::seats::ChromeTarget::CloseWindow
+    });
+    for event in [
+        WindowEvent::CursorMoved {
+            device_id: DeviceId::dummy(),
+            position: at,
+        },
+        WindowEvent::MouseInput {
+            device_id: DeviceId::dummy(),
+            state: ElementState::Pressed,
+            button: MouseButton::Left,
+        },
+    ] {
+        event_to(&mut application, 1, event);
+    }
+    assert_eq!(
+        own_requests(&application.event_loop.ledger),
+        [bt_platform::close_road::OwnCloseRoad::CaptionButton],
+        "the press asks the close by the caption road"
+    );
+}
+
+/// RED (mutation: `close_tab` asking as `OwnCloseRoad::CaptionButton`) — **closing a window's
+/// only tab asks the window's close as the final tab**.
+#[test]
+fn closing_the_only_tab_asks_as_the_final_tab() {
+    let mut folio = HeadlessFolio::with_tabs("close-road-final-tab", vec![ringing_tab(1, 1)], 0);
+    folio.runtime().close_tab(0).expect("the tab closes");
+    assert_eq!(
+        own_requests(&folio.ledger),
+        [bt_platform::close_road::OwnCloseRoad::FinalTab]
+    );
+}
+
+/// RED (mutation: the reaper closing the final tab with `close_tab`) — **a window whose only
+/// tab's shells have all exited asks its close as the shells' exit**: the road rides in the
+/// request, where the deleted bit rode beside it.
+#[test]
+fn a_final_tab_whose_shells_exited_asks_as_the_shells_exit() {
+    let mut leaf = crate::test_support::leaf_saying("终了 ended");
+    leaf.session.life.land(Some(bt_pty::PtySession::fake_exited(
+        std::time::Duration::from_secs(60),
+        23,
+        b"",
+        false,
+    )));
+    let mut folio = HeadlessFolio::with_tabs(
+        "close-road-shells-exited",
+        vec![crate::test_support::tab_holding(leaf)],
+        0,
+    );
+    folio
+        .runtime()
+        .reap_exited_tabs(Instant::now())
+        .expect("the reaper takes its turn");
+    assert_eq!(
+        own_requests(&folio.ledger),
+        [bt_platform::close_road::OwnCloseRoad::ShellsExited]
+    );
+}
+
+/// RED (mutation: `exited_tabs_the_loop_may_close` passing every exited tab) — **a final tab whose
+/// shells exited beside unsaved edits is never the shells' close**: the loop leaves it standing,
+/// asking nothing and requesting nothing, and the close that ends it is the person's own, asked
+/// through the gate and said as the final tab (0.4.10 plan row 103). The shells' road never meets
+/// the tab's question, which is why `GateRequest::CloseTab` carries no road; the window's own
+/// close, gate ③, keeps the road that asked (R7).
+#[test]
+fn a_final_tab_whose_shells_exited_beside_unsaved_edits_closes_only_as_the_persons() {
+    let mut application = one_dirty_window("close-road-exited-dirty");
+    {
+        let mut runtime = application.runtime();
+        for (_, leaf) in runtime.window.tabs[0].leaves_mut() {
+            leaf.life.land(Some(bt_pty::PtySession::fake_exited(
+                std::time::Duration::from_secs(60),
+                23,
+                b"",
+                false,
+            )));
+        }
+        runtime
+            .reap_exited_tabs(Instant::now())
+            .expect("the reaper takes its turn");
+    }
+    assert!(
+        own_requests(&application.event_loop.ledger).is_empty(),
+        "the loop asks no close of a tab whose close would ask"
+    );
+    assert_eq!(
+        application.runtime().window.dirty_gate.request(),
+        None,
+        "the loop puts no question"
+    );
+    assert_eq!(application.runtime().window.tabs.len(), 1, "the tab stands");
+    application
+        .runtime()
+        .close_tab(0)
+        .expect("the person's close asks");
+    assert_eq!(
+        application.runtime().window.dirty_gate.request(),
+        Some(&restore::GateRequest::CloseTab(0)),
+        "the person's close asks first"
+    );
+    application
+        .runtime()
+        .answer_dirty_gate(restore::GateAnswer::Discard)
+        .expect("the answer is spent");
+    assert_eq!(
+        own_requests(&application.event_loop.ledger),
+        [bt_platform::close_road::OwnCloseRoad::FinalTab]
+    );
+    application.window_event(WindowEvent::CloseRequested);
+    assert_eq!(
+        close_lines(&application),
+        [closing_the_last_window_says(
+            "the person closed it; window=ordinary 1; \
+          road=final-tab; delivery=posted; foreground=yes; pointer=unread; tabs=1; panes=2"
+        )]
+    );
+}
+
+/// RED (mutation: `FolioApp::close` saying `ClosedHow::Asked` with no arrival) — **Folio's own
+/// request, nothing to ask, ends the run on one line that names its road and delivery**.
+#[test]
+fn an_own_request_with_nothing_to_ask_ends_the_run_saying_its_road() {
+    let mut application = HeadlessApplication::of(the_close_switch_off(HeadlessFolio::with_tabs(
+        "close-road-own",
+        vec![ringing_tab(1, 1)],
+        0,
+    )));
+    application
+        .runtime()
+        .request_window_close(bt_platform::close_road::OwnCloseRoad::CaptionButton)
+        .expect("asked");
+    application.window_event(WindowEvent::CloseRequested);
+    assert_eq!(
+        close_lines(&application),
+        [closing_the_last_window_says(
+            "the person closed it; window=ordinary 1; \
+          road=caption-button; delivery=posted; foreground=yes; pointer=unread; tabs=1; panes=1"
+        )]
+    );
+}
+
+/// RED (mutation: `closed_cause` answering `the person closed it` for `CloseRoad::CloseMessage`)
+/// — **a close message from another program is not the person**: it says a close message, posted,
+/// and where the pointer was.
+#[test]
+fn another_programs_close_message_says_so() {
+    let mut application = HeadlessApplication::of(the_close_switch_off(HeadlessFolio::with_tabs(
+        "close-road-foreign",
+        vec![ringing_tab(1, 1)],
+        0,
+    )));
+    arrives(
+        &mut application,
+        1,
+        foreign_close(
+            bt_platform::close_road::CloseRoad::CloseMessage,
+            bt_platform::close_road::CloseDelivery::Posted,
+            bt_platform::close_road::ClosePointer::Outside,
+        ),
+    );
+    application.window_event(WindowEvent::CloseRequested);
+    assert_eq!(
+        close_lines(&application),
+        [closing_the_last_window_says(
+            "a close message; window=ordinary 1; road=close-message; \
+          delivery=posted; foreground=no; pointer=outside; tabs=1; panes=1"
+        )]
+    );
+}
+
+/// RED (mutation: an unwitnessed request read as the person's) — **a close request nothing
+/// witnessed says so, and reads its unknowns as unread**.
+#[test]
+fn a_close_request_nothing_witnessed_says_unmarked() {
+    let mut application = HeadlessApplication::of(the_close_switch_off(HeadlessFolio::with_tabs(
+        "close-road-unmarked",
+        vec![ringing_tab(1, 1)],
+        0,
+    )));
+    application.window_event(WindowEvent::CloseRequested);
+    assert_eq!(
+        close_lines(&application),
+        [closing_the_last_window_says(
+            "an unmarked close request; window=ordinary 1; \
+          road=unmarked; delivery=unread; foreground=unread; pointer=unread; tabs=1; panes=1"
+        )]
+    );
+}
+
+/// RED (mutation: `FolioApp::close` reading the arrival afresh, `take_close_arrival`, instead of
+/// the one held) — **a close held by gate ③ and answered `Discard` says the road of the request
+/// that started it (R7)**.
+#[test]
+fn a_close_held_by_the_question_keeps_the_road_that_asked() {
+    let mut application = one_dirty_window("close-road-held");
+    arrives(
+        &mut application,
+        1,
+        foreign_close(
+            bt_platform::close_road::CloseRoad::SystemClose(
+                bt_platform::close_road::SystemCloseFrom::Keyboard,
+            ),
+            bt_platform::close_road::CloseDelivery::SentHere,
+            bt_platform::close_road::ClosePointer::Outside,
+        ),
+    );
+    application.window_event(WindowEvent::CloseRequested);
+    assert_eq!(
+        application.runtime().window.dirty_gate.request(),
+        Some(&restore::GateRequest::Shut),
+        "the close asks first"
+    );
+    assert!(close_lines(&application).is_empty(), "nothing has closed");
+    application
+        .runtime()
+        .answer_dirty_gate(restore::GateAnswer::Discard)
+        .expect("the answer is spent");
+    application.window_event(WindowEvent::Focused(true));
+    assert_eq!(
+        close_lines(&application),
+        [closing_the_last_window_says(
+            "the system's close command; window=ordinary 1; \
+          road=system-close (keyboard); delivery=sent here; foreground=no; pointer=outside; \
+          tabs=1; panes=2"
+        )]
+    );
+}
+
+/// RED (mutation: drop the `close_rerun` marker in `FolioApp::settle_close_waits`) — **the wait's
+/// re-run of a held close is not a new request**: the window goes saying the road of the request
+/// that started the wait, not an unmarked one.
+#[test]
+fn the_waits_rerun_keeps_the_road_of_the_close_it_reruns() {
+    let mut saving = Saving::open("close-road-rerun", &["等 wait.md"]);
+    saving.press_save(0);
+    arrives(
+        &mut saving.application,
+        1,
+        foreign_close(
+            bt_platform::close_road::CloseRoad::CloseMessage,
+            bt_platform::close_road::CloseDelivery::SentFromAnotherThread,
+            bt_platform::close_road::ClosePointer::Outside,
+        ),
+    );
+    saving.application.window_event(WindowEvent::CloseRequested);
+    assert!(saving.waits(), "the shut waits for the save");
+    saving.application.event_loop.ledger.take();
+    saving.serve(None);
+    saving.turn();
+    assert!(saving.leaving(1), "the save landed: the window goes");
+    assert_eq!(
+        close_lines(&saving.application),
+        [
+            "Folio: window closed — a close message; window=ordinary 1; road=close-message; \
+          delivery=sent from another thread; foreground=no; pointer=outside; tabs=1; panes=2; \
+          windows left=1"
+        ]
+    );
+}
+
+/// RED (mutation: `Runtime::note_close_arrival` keeping a held arrival over a new one) — **a held
+/// close that was cancelled does not lend its road to the next request**: the next one says its
+/// own.
+#[test]
+fn a_cancelled_close_does_not_lend_its_road_to_the_next() {
+    let mut application = one_dirty_window("close-road-cancelled");
+    arrives(
+        &mut application,
+        1,
+        foreign_close(
+            bt_platform::close_road::CloseRoad::CloseMessage,
+            bt_platform::close_road::CloseDelivery::Posted,
+            bt_platform::close_road::ClosePointer::Outside,
+        ),
+    );
+    application.window_event(WindowEvent::CloseRequested);
+    application
+        .runtime()
+        .answer_dirty_gate(restore::GateAnswer::Cancel)
+        .expect("the answer is spent");
+    application
+        .runtime()
+        .request_window_close(bt_platform::close_road::OwnCloseRoad::CaptionButton)
+        .expect("asked");
+    application.window_event(WindowEvent::CloseRequested);
+    application
+        .runtime()
+        .answer_dirty_gate(restore::GateAnswer::Discard)
+        .expect("the answer is spent");
+    application.window_event(WindowEvent::Focused(true));
+    let lines = close_lines(&application);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with(&format!(
+            "{}the person closed it; window=ordinary 1; road=caption-button; ",
+            closing_the_last_window_begins()
+        )),
+        "{lines:?}"
+    );
+}
+
+/// RED (mutation: `FolioApp::close` taking the held arrival before
+/// `the_summon_lets_the_run_end`) — **a close the summoned terminal held while its own question
+/// was answered says the road of the request that started it (R7)**.
+///
+/// Not on macOS (CONVENTIONS H1 rule 2): the summoned terminal is asked only by a close that ends
+/// the run, and there the application outlives its last window, so no close ends it and none is
+/// held; that arm is `a_run_ends_with_its_last_visible_window`'s, pinned by
+/// `only_a_mac_keeps_an_application_standing_with_no_window_left` in `main.rs`.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_close_the_summon_held_keeps_the_road_that_asked() {
+    let path = host_spelling(r"C:\w\summoned.md");
+    let mut buffer = buffer_saying(&path, "summoned.md", "one\n");
+    let mut caret = preview_edit::EditCaret::default();
+    let body = buffer.content().cloned().expect("the head landed");
+    caret.place(&body, 4, false);
+    assert!(buffer.edit_by_caret(&mut caret, |content, caret| {
+        preview_edit::insert(content, caret, "typed by hand")
+    }));
+    let (summoned_tab, _) = tab_with_a_preview(2, vec![buffer]);
+    let folio = the_close_switch_off(HeadlessFolio::with_tabs(
+        "close-road-summon-held",
+        vec![ringing_tab(1, 1)],
+        0,
+    ));
+    let summoned = headless_window(
+        &folio.app,
+        HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),
+        vec![summoned_tab],
+        0,
+    );
+    let mut application = HeadlessApplication::of(folio);
+    application
+        .folio
+        .windows
+        .insert(WindowId::from(2), summoned);
+    application
+        .folio
+        .runtime(WindowId::from(2))
+        .expect("the summoned terminal is open")
+        .settle_seat_set_change()
+        .expect("its tab takes its layout");
+    application.runtime().app.quake.adopt(WindowId::from(2));
+    arrives(
+        &mut application,
+        1,
+        foreign_close(
+            bt_platform::close_road::CloseRoad::CloseMessage,
+            bt_platform::close_road::CloseDelivery::Posted,
+            bt_platform::close_road::ClosePointer::Outside,
+        ),
+    );
+    event_to(&mut application, 1, WindowEvent::CloseRequested);
+    assert!(
+        !is_leaving(&mut application, WindowId::from(1)),
+        "the summoned terminal's question holds the close"
+    );
+    assert!(close_lines(&application).is_empty(), "nothing has closed");
+    application
+        .folio
+        .runtime(WindowId::from(2))
+        .expect("the summoned terminal is open")
+        .answer_dirty_gate(restore::GateAnswer::Discard)
+        .expect("the answer is spent");
+    event_to(&mut application, 2, WindowEvent::Focused(true));
+    assert!(
+        is_leaving(&mut application, WindowId::from(1)),
+        "the run ends"
+    );
+    let lines = close_lines(&application);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with(
+            "Folio: last window closed — a close message; window=ordinary 1; road=close-message; "
+        ),
+        "{lines:?}"
+    );
+}
+
+/// RED (mutation: `closed_facts` answering `ClosedWindow::Ordinary` for every window) — **a
+/// close message to the hidden summoned terminal closes it alone, saying it was the summon, and
+/// the run goes on (R4)**.
+#[test]
+fn a_close_message_to_the_hidden_summon_closes_it_alone_and_says_so() {
+    let mut application = two_open_windows("close-road-hidden-summon");
+    application.runtime().app.quake.adopt(WindowId::from(2));
+    arrives(
+        &mut application,
+        2,
+        foreign_close(
+            bt_platform::close_road::CloseRoad::CloseMessage,
+            bt_platform::close_road::CloseDelivery::Posted,
+            bt_platform::close_road::ClosePointer::Outside,
+        ),
+    );
+    event_to(&mut application, 2, WindowEvent::CloseRequested);
+    assert_eq!(
+        close_lines(&application),
+        [
+            "Folio: window closed — a close message; window=summon 2; road=close-message; \
+          delivery=posted; foreground=no; pointer=outside; tabs=1; panes=1; windows left=1"
+        ]
+    );
+    assert!(is_leaving(&mut application, WindowId::from(2)));
+    assert!(
+        !is_leaving(&mut application, WindowId::from(1)),
+        "the run goes on"
+    );
+}
+
+/// RED (mutation: drop the spend from the showing summon's arm) — **the showing summoned
+/// terminal's `×` is a hide: it spends the witness's record of the request and says nothing**,
+/// so the next close of that window reads its own.
+#[test]
+fn the_showing_summons_close_spends_its_record_and_says_nothing() {
+    let mut application = two_open_windows("close-road-showing-summon");
+    {
+        let runtime = application.runtime();
+        runtime.app.quake.adopt(WindowId::from(2));
+        runtime.app.quake.shown_over(None);
+    }
+    arrives(
+        &mut application,
+        2,
+        foreign_close(
+            bt_platform::close_road::CloseRoad::SystemClose(
+                bt_platform::close_road::SystemCloseFrom::Pointer,
+            ),
+            bt_platform::close_road::CloseDelivery::SentHere,
+            bt_platform::close_road::ClosePointer::OnCloseButton,
+        ),
+    );
+    event_to(&mut application, 2, WindowEvent::CloseRequested);
+    assert!(
+        close_lines(&application).is_empty(),
+        "a hide is not a close"
+    );
+    assert!(!is_leaving(&mut application, WindowId::from(2)));
+    assert!(
+        application.runtime().app.quake.take_press(),
+        "the × set the chord's own bit"
+    );
+    assert!(
+        application
+            .folio
+            .runtime(WindowId::from(2))
+            .expect("the summoned terminal is open")
+            .window
+            .window
+            .closes
+            .borrow()
+            .is_empty(),
+        "the witness's record is spent"
+    );
+}
+
+/// RED (mutation: `note_close_arrival` mapping every point in the window to `Window`) — **the
+/// pointer is named by the window's own chrome**: on the caption `×` it is the close button, on
+/// another part of the chrome it is the chrome, on a pane it is the window, and off the window it
+/// is outside.
+#[test]
+fn the_pointer_at_a_close_is_named_by_the_windows_chrome() {
+    let mut folio = HeadlessFolio::with_tabs("close-road-pointer", vec![ringing_tab(1, 1)], 0);
+    let mut runtime = folio.runtime();
+    let on_close = chrome_point(&mut runtime, |target| {
+        target == crate::seats::ChromeTarget::CloseWindow
+    });
+    let on_chrome = chrome_point(&mut runtime, |target| {
+        target != crate::seats::ChromeTarget::CloseWindow
+    });
+    let on_pane = PhysicalPosition::new(600.0, 500.0);
+    assert_eq!(
+        runtime.chrome_target_at(on_pane),
+        None,
+        "a pane, not chrome"
+    );
+    let at = |position: PhysicalPosition<f64>| bt_platform::close_road::ClosePointer::InWindow {
+        x: position.x as i32,
+        y: position.y as i32,
+    };
+    for (pointer, named) in [
+        (
+            at(on_close),
+            crate::exit_diagnostics::PointerAtClose::CloseButton,
+        ),
+        (
+            at(on_chrome),
+            crate::exit_diagnostics::PointerAtClose::Chrome,
+        ),
+        (at(on_pane), crate::exit_diagnostics::PointerAtClose::Window),
+        (
+            bt_platform::close_road::ClosePointer::OnCloseButton,
+            crate::exit_diagnostics::PointerAtClose::CloseButton,
+        ),
+        (
+            bt_platform::close_road::ClosePointer::Outside,
+            crate::exit_diagnostics::PointerAtClose::Outside,
+        ),
+        (
+            bt_platform::close_road::ClosePointer::Unread,
+            crate::exit_diagnostics::PointerAtClose::Unread,
+        ),
+    ] {
+        runtime
+            .window
+            .window
+            .closes
+            .borrow_mut()
+            .push_back(foreign_close(
+                bt_platform::close_road::CloseRoad::CloseMessage,
+                bt_platform::close_road::CloseDelivery::Posted,
+                pointer,
+            ));
+        runtime.note_close_arrival();
+        assert_eq!(
+            runtime.window.close_asked.map(|asked| asked.pointer),
+            Some(named),
+            "{pointer:?}"
+        );
+    }
+}
+
+/// RED (mutation: drop `gone.window.unwatch_closes()` from `FolioApp::reap_leaving_windows`) —
+/// **a closed window leaves the close witness's book when it is reaped** (review P2-3): the
+/// witness forgets it, once, and the window is gone from the registry.
+#[test]
+fn a_reaped_window_leaves_the_close_witness() {
+    let mut application = two_open_windows("close-road-reaped");
+    event_to(&mut application, 2, WindowEvent::CloseRequested);
+    assert!(is_leaving(&mut application, WindowId::from(2)));
+    application.event_loop.ledger.take();
+    let after =
+        Instant::now() + crate::quit::PAGE_TEARDOWN_DEADLINE + std::time::Duration::from_secs(1);
+    application
+        .folio
+        .reap_leaving_windows(&application.event_loop, after)
+        .expect("the reap takes its turn");
+    assert!(
+        !application.folio.windows.contains(WindowId::from(2)),
+        "reaped"
+    );
+    assert_eq!(
+        application
+            .event_loop
+            .ledger
+            .take()
+            .into_iter()
+            .filter(|effect| *effect == WindowEffect::ClosesUnwatched)
+            .count(),
+        1,
+        "the witness forgets the reaped window, once"
+    );
+}
+
+/// RED (mutation: drop the `say_window_closed` call from `FolioApp::transfer_tab`) — **a window
+/// emptied by its last tab moving out says so on its close line** (R4, row 14; review P2-4), with
+/// what it holds as it shuts, after the move took its tab (`tabs=0; panes=0`; re-review R-N4),
+/// and the window the run goes on with.
+#[test]
+fn a_window_whose_last_tab_moved_out_says_so() {
+    let mut application = two_open_windows("close-road-moved-out");
+    let tab = application
+        .folio
+        .windows
+        .get_mut(WindowId::from(2))
+        .map(|window| window.tabs[0].id)
+        .expect("window 2 holds a tab");
+    let moved = application
+        .folio
+        .transfer_tab(tab, WindowId::from(1))
+        .expect("the move is answered");
+    assert!(
+        matches!(moved, crate::TransferOutcome::Moved(_)),
+        "the tab moved"
+    );
+    assert_eq!(
+        close_lines(&application),
+        [
+            "Folio: window closed — the last tab moved to another window; window=ordinary 2; \
+          road=tab-moved-out; delivery=unread; foreground=unread; pointer=unread; tabs=0; \
+          panes=0; windows left=1"
+        ]
+    );
+}
+
+/// RED (mutation: `end_capture` reading the tab in front through the facade again, `Some(self.id)`
+/// — a panic) — **a refused tear-out shuts the window it opened, which nothing arrived in, without
+/// a fault, and the close witness forgets it** (re-review R-N2). `FolioApp::settle_tear_out`
+/// empties that window (`abandon_a_window_nothing_arrived_in`) and shuts it through
+/// `close_window`, the road the tabless crash also sat on. The refusal here is the tab gone before
+/// the settle (`TransferRefusal::NoSuchTab`): `PageKept` needs a live page's handover refused,
+/// which no headless window holds, and every refusal takes the same road after `transfer_tab`.
+#[test]
+fn a_refused_tear_out_shuts_its_empty_window_and_the_witness_forgets_it() {
+    let mut application = two_open_windows("close-road-refused-tear-out");
+    application
+        .folio
+        .settle_tear_out(
+            crate::TearOut {
+                tab: crate::TabId(99),
+                from: WindowId::from(1),
+                promoted: false,
+                at: None,
+            },
+            WindowId::from(2),
+        )
+        .expect("the refusal is settled");
+    assert!(
+        !application.folio.windows.contains(WindowId::from(2)),
+        "the window nothing arrived in is gone"
+    );
+    assert_eq!(
+        application
+            .event_loop
+            .ledger
+            .take()
+            .into_iter()
+            .filter(|effect| *effect == WindowEffect::ClosesUnwatched)
+            .count(),
+        1,
+        "the witness forgets it, once"
     );
 }

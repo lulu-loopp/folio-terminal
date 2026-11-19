@@ -59,8 +59,12 @@ impl<B: Backend> Runtime<'_, B> {
         take_owned_keyboard_focus(&self.window.window)
     }
 
-    pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
-        request_owned_window_close(&self.window.window)
+    /// Ask this window to close, as Folio's own request by `road` (0.4.10 plan row 103).
+    pub(in crate::runtime) fn request_window_close(
+        &self,
+        road: bt_platform::close_road::OwnCloseRoad,
+    ) -> Result<()> {
+        request_owned_window_close(&self.window.window, road)
     }
 }
 
@@ -1889,6 +1893,70 @@ impl<B: Backend> Runtime<'_, B> {
         self.window.window_close_requested.take()
     }
 
+    /// **A close request has reached this window: note which road it came by** (0.4.10 plan row
+    /// 103) — the close witness's record of it, taken once, and where the pointer was, named by
+    /// this window's own chrome ([`Self::pointer_at_close`]). The wait's re-run of a held close
+    /// (`WindowRuntime::close_rerun`) is not a request and keeps the arrival it re-runs;
+    /// every other request replaces whatever was held (R7). Nothing is decided here: the gate and
+    /// the close go on exactly as before (不当保姆).
+    pub(crate) fn note_close_arrival(&mut self) {
+        if std::mem::take(&mut self.window.close_rerun) {
+            return;
+        }
+        let arrival = self.window.window.take_close_arrival();
+        let pointer = self.pointer_at_close(arrival.map(|arrival| arrival.pointer));
+        self.window.close_asked = Some(crate::exit_diagnostics::CloseAsked { arrival, pointer });
+    }
+
+    /// **The held close's arrival, spent by the close it belongs to** (0.4.10 plan row 103, R7):
+    /// `FolioApp::close` takes it when the close is performed. Every write of
+    /// `WindowRuntime::close_asked` is in this module, with [`Self::note_close_arrival`].
+    pub(crate) fn take_close_asked(&mut self) -> Option<crate::exit_diagnostics::CloseAsked> {
+        self.window.close_asked.take()
+    }
+
+    /// **The next `CloseRequested` is (or is not) the wait's re-run of a held close** —
+    /// `FolioApp::settle_close_waits` says which before it re-runs one (0.4.10 plan row 103, R7).
+    pub(crate) fn mark_close_rerun(&mut self, rerun: bool) {
+        self.window.close_rerun = rerun;
+    }
+
+    /// **The showing summoned terminal's `×` is a hide, not a close**: the close witness's record
+    /// of the request is spent and nothing is held; a wait's re-run brought no record of its own
+    /// (0.4.10 plan row 103).
+    pub(crate) fn spend_close_arrival(&mut self) {
+        if !std::mem::take(&mut self.window.close_rerun) {
+            let _ = self.window.window.take_close_arrival();
+        }
+    }
+
+    /// **What this window is as it closes** (0.4.10 plan row 103): ordinary or the summoned
+    /// terminal (`summon`), its id, how many tabs and panes it holds, and the ordinary windows
+    /// left when the run goes on.
+    pub(crate) fn closed_facts(
+        &self,
+        summon: Option<WindowId>,
+        windows_left: Option<usize>,
+    ) -> crate::exit_diagnostics::ClosedFacts {
+        let id = self.window.window.id();
+        crate::exit_diagnostics::ClosedFacts {
+            window: if summon == Some(id) {
+                crate::exit_diagnostics::ClosedWindow::Summon
+            } else {
+                crate::exit_diagnostics::ClosedWindow::Ordinary
+            },
+            id: u64::from(id),
+            tabs: self.window.tabs.len(),
+            panes: self
+                .window
+                .tabs
+                .iter()
+                .map(|tab| tab.seats.pane_count())
+                .sum(),
+            windows_left,
+        }
+    }
+
     /// **What this window would lose if the process left now**, by name.
     ///
     /// One window's contribution to the summary card's one list. Two classes,
@@ -3053,8 +3121,11 @@ fn take_owned_keyboard_focus(window: &impl WindowHost) -> Result<()> {
     }
 }
 
-fn request_owned_window_close(window: &impl WindowHost) -> Result<()> {
-    window.request_close().map_err(|error| anyhow!(error))
+fn request_owned_window_close(
+    window: &impl WindowHost,
+    road: bt_platform::close_road::OwnCloseRoad,
+) -> Result<()> {
+    window.request_close(road).map_err(|error| anyhow!(error))
 }
 
 /// The `(bounds, maximized)` pair a snapshot should record.
