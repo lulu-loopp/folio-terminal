@@ -469,3 +469,378 @@ fn the_update_hand_overs_answer_is_heard_once_and_the_way_out_reads_it() {
     drop(application);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ── The quit asks while something runs (0.4.10 plan row 87, part 87e; T-TRAY-87E-QUIT-ASKS) ──
+
+/// A command started in an integrated shell: prompt, input, `OSC 133` `C`, and no `D`.
+const A_COMMAND_STARTS: &[u8] = b"\x1b]133;A\x07PS> \x1b]133;B\x07cargo build\r\n\x1b]133;C\x07";
+
+/// The line the card says for one command running.
+const ONE_COMMAND_LINE: &str = "A command is running; quitting ends it.";
+
+/// A headless application of one window and one tab of one shell, the shell shaped by `shape`
+/// first — fed bytes, its agent's turns heard.
+fn a_run_whose_shell(
+    tag: &str,
+    shape: impl FnOnce(&mut ShellSession),
+) -> crate::headless::HeadlessApplication {
+    let mut tab = crate::test_support::ringing_tab(1, 1);
+    let seat = tab.seats.terminals()[0];
+    shape(
+        &mut tab
+            .sessions
+            .get_mut(&seat)
+            .expect("the fixture's seat holds a shell")
+            .session,
+    );
+    crate::headless::HeadlessApplication::of(crate::headless::HeadlessFolio::with_tabs(
+        tag,
+        vec![tab],
+        0,
+    ))
+}
+
+/// A run whose one shell has a command running.
+fn a_run_with_a_command(tag: &str) -> crate::headless::HeadlessApplication {
+    a_run_whose_shell(tag, |shell| fed(shell, A_COMMAND_STARTS))
+}
+
+/// The shell fed `bytes`, as the drain feeds it.
+fn fed(shell: &mut ShellSession, bytes: &[u8]) {
+    shell.session.feed(bytes).expect("the bytes parse");
+}
+
+/// An agent typed into the shell, its turn begun (`Some(true)`) or ended (`Some(false)`) as its
+/// hooks said, or never heard (`None`).
+fn an_agent_typed(shell: &mut ShellSession, turn: Option<bool>) {
+    fed(shell, A_COMMAND_STARTS);
+    let steps: &[attention_map::TurnStep] = match turn {
+        None => &[],
+        Some(true) => &[attention_map::TurnStep::Began],
+        Some(false) => &[
+            attention_map::TurnStep::Began,
+            attention_map::TurnStep::Ended,
+        ],
+    };
+    for (seq, step) in (1_u64..).zip(steps) {
+        shell.turn_account.hear_turn_step(
+            *step,
+            attention_map::CLAUDE_CODE,
+            agent_resume::Child::Shell(shell.session.command_marks()),
+            seq,
+        );
+    }
+}
+
+/// A person's quit asked for `reason` through the one door, and the loop's begin of it: the step
+/// the quit owes.
+fn asked(
+    application: &mut crate::headless::HeadlessApplication,
+    reason: quit::Reason,
+) -> quit::QuitStep {
+    let app = application.folio.app.as_mut().expect("the application");
+    app.quit_reason = reason;
+    app.ask_to_quit();
+    application
+        .folio
+        .begin_quit_if_asked()
+        .expect("the quit begins");
+    step(application)
+}
+
+/// What the quit owes now.
+fn step(application: &mut crate::headless::HeadlessApplication) -> quit::QuitStep {
+    application
+        .folio
+        .app
+        .as_ref()
+        .and_then(|app| app.quit.as_ref())
+        .map(quit::Quit::step)
+        .expect("a quit is under way")
+}
+
+/// The card on the window, as it is drawn: its question and its lines.
+fn card(
+    application: &mut crate::headless::HeadlessApplication,
+) -> Option<(&'static str, Vec<String>)> {
+    application
+        .runtime()
+        .quit_card_layout()
+        .map(|layout| restore::quit_card_text(&layout))
+}
+
+/// RED (T10a; R8) — **every person's door asks once while a command runs**: the chord, the menu
+/// bar's Quit, the tray's Quit and the Settings card's Uninstall (each `Reason::Asked` through
+/// the one door, as `every_door_onto_the_quit_records_the_same_debt` pins), an update's Restart,
+/// and AppKit's quit when no system reason is given. One card, which says what runs; its Quit
+/// goes on to the documents and nothing asks again.
+///
+/// PLANT 87e-P33: ask only on names in `Quit::begin_asking` — no card stands.
+#[test]
+fn every_persons_door_asks_once_while_a_command_runs() {
+    let txn = crate::update_txn::TxnId::new([0x0a; 16]);
+    for (door, reason, title) in [
+        ("asked", Some(quit::Reason::Asked), "Quit Folio?"),
+        (
+            "restart",
+            Some(quit::Reason::UpdateRestart { txn }),
+            "Restart Folio?",
+        ),
+        ("dock", None, "Quit Folio?"),
+    ] {
+        let mut application = a_run_with_a_command(&format!("87e-door-{door}"));
+        let step_now = match reason {
+            Some(reason) => asked(&mut application, reason),
+            None => {
+                application
+                    .folio
+                    .begin_the_systems_quit_for(bt_platform::QuitReason::NoneGiven);
+                application
+                    .folio
+                    .begin_quit_if_asked()
+                    .expect("the quit begins");
+                step(&mut application)
+            }
+        };
+        assert_eq!(step_now, quit::QuitStep::Ask, "{door}: the quit asks");
+        assert_eq!(
+            card(&mut application),
+            Some((title, vec![ONE_COMMAND_LINE.to_owned()])),
+            "{door}: one card, saying what runs"
+        );
+        application
+            .runtime()
+            .answer_quit_card(quit::QuitAnswer::Quit)
+            .expect("the answer is spent");
+        assert_eq!(
+            step(&mut application),
+            quit::QuitStep::Documents,
+            "{door}: Quit goes on"
+        );
+        assert_eq!(
+            card(&mut application),
+            None,
+            "{door}: and asks nothing again"
+        );
+    }
+
+    let mut idle = a_run_whose_shell("87e-door-idle", |shell| {
+        fed(shell, &[A_COMMAND_STARTS, b"\x1b]133;D;0\x07"].concat());
+    });
+    assert_eq!(
+        asked(&mut idle, quit::Reason::Asked),
+        quit::QuitStep::Documents,
+        "a command that ended asks nothing"
+    );
+}
+
+/// RED (T10b; R2) — **an agent mid-turn asks, and an agent waiting at its prompt does not**,
+/// though the command it was typed as is still running in its shell's eyes; an agent whose hooks
+/// were never heard is read by its shell, as any pane is.
+///
+/// PLANT 87e-P32: read the shell's `working` for a bound agent's pane — the idle agent asks.
+#[test]
+fn an_agents_turn_asks_and_an_idle_agent_does_not() {
+    let mut working = a_run_whose_shell("87e-agent-working", |shell| {
+        an_agent_typed(shell, Some(true));
+    });
+    assert_eq!(
+        asked(&mut working, quit::Reason::Asked),
+        quit::QuitStep::Ask
+    );
+    assert_eq!(
+        card(&mut working),
+        Some((
+            "Quit Folio?",
+            vec!["An agent is working; quitting ends it.".to_owned()]
+        ))
+    );
+
+    let mut waiting = a_run_whose_shell("87e-agent-waiting", |shell| {
+        an_agent_typed(shell, Some(false));
+    });
+    assert_eq!(
+        asked(&mut waiting, quit::Reason::Asked),
+        quit::QuitStep::Documents,
+        "an agent between turns is not working"
+    );
+
+    let mut unheard = a_run_whose_shell("87e-agent-unheard", |shell| {
+        an_agent_typed(shell, None);
+    });
+    assert_eq!(
+        asked(&mut unheard, quit::Reason::Asked),
+        quit::QuitStep::Ask
+    );
+    assert_eq!(
+        card(&mut unheard).map(|(_, lines)| lines),
+        Some(vec![ONE_COMMAND_LINE.to_owned()]),
+        "unbound, the pane is its shell's: a command running"
+    );
+}
+
+/// RED (T10c; item 19) — **a command holding the full screen is running work**: `vim`, `less`, an
+/// `ssh` end on quit as surely as a build. The tab's breath does not count it, and the quit does.
+///
+/// PLANT 87e-P17: read the pane by its breath (`session_is_breathing`) — no card.
+#[test]
+fn a_full_screen_command_is_running_work() {
+    let mut application = a_run_whose_shell("87e-full-screen", |shell| {
+        fed(shell, &[A_COMMAND_STARTS, b"\x1b[?1049h"].concat());
+    });
+    assert!(
+        !application.runtime().window.tabs[0].fleet_working(),
+        "the fixture's own precondition: the tab does not breathe"
+    );
+    assert_eq!(
+        asked(&mut application, quit::Reason::Asked),
+        quit::QuitStep::Ask
+    );
+    assert_eq!(
+        card(&mut application).map(|(_, lines)| lines),
+        Some(vec![ONE_COMMAND_LINE.to_owned()])
+    );
+}
+
+/// RED (T10d; item 14, R5) — **unsaved names and running work are one card**: the unsaved card's
+/// question and its three buttons, the names, and the running-work line last.
+///
+/// PLANT 87e-P34: leave the running-work line off a card that names files — the last line goes.
+#[test]
+fn unsaved_names_and_running_work_are_one_card() {
+    let mut application = a_run_with_a_command("87e-one-card");
+    let work = application
+        .folio
+        .running_work()
+        .expect("the windows are read");
+    assert_eq!(
+        work,
+        running_work::RunningWork {
+            agents: 0,
+            commands: 1
+        }
+    );
+    let names = vec!["notes.md".to_owned()];
+    let mut lines = restore::unsaved_lines(&names);
+    lines.push(ONE_COMMAND_LINE.to_owned());
+    application
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .quit = Some(quit::Quit::begin_asking(names, work, quit::Reason::Asked));
+    assert_eq!(
+        card(&mut application),
+        Some((i18n::Text::QuitTitle.text(), lines))
+    );
+    let layout = application
+        .runtime()
+        .quit_card_layout()
+        .expect("the card stands");
+    let (save, _, _) = restore::quit_button_rects(&layout);
+    assert!(save.is_some(), "Save all is on it");
+}
+
+/// RED (T10e; R4) — **Enter and Esc both cancel the running-work card**: the focused answer is
+/// Cancel on it as on every question about losing something, and the windows stay. Each key's
+/// answer is spent as the keyboard spends it (`Runtime::answer_quit_card`).
+///
+/// PLANT 87e-P39: make `QUIT_FOCUSED_ANSWER` the card's Quit — Enter leaves.
+#[test]
+fn enter_and_esc_cancel_the_running_work_card() {
+    for (key, answer) in [
+        ("enter", quit::QUIT_FOCUSED_ANSWER),
+        ("esc", quit::QuitAnswer::Cancel),
+    ] {
+        let mut application = a_run_with_a_command(&format!("87e-keys-{key}"));
+        assert_eq!(
+            asked(&mut application, quit::Reason::Asked),
+            quit::QuitStep::Ask
+        );
+        application
+            .runtime()
+            .answer_quit_card(answer)
+            .expect("the answer is spent");
+        assert_eq!(
+            step(&mut application),
+            quit::QuitStep::Abandon,
+            "{key}: the quit is cancelled"
+        );
+    }
+}
+
+/// RED (T18; R1, R9) — **AppKit's quit asks only for a person's reason, and the system's end is
+/// never held by the running-work card**: the Dock's Quit (no reason) asks; a log-out, a restart,
+/// a shut-down and an unknown reason do not; a shut-down that finds a `Cmd+Q`'s running-work card
+/// standing answers it Quit; a quit a person asked for that the loop had not yet begun is begun
+/// and answered at once; and the unsaved card stands for a shut-down as it always has.
+///
+/// PLANT 87e-P20: count `QuitReason::Other` as a person's — the unknown reason asks.
+#[test]
+fn the_systems_quit_asks_only_for_a_persons_reason() {
+    use bt_platform::QuitReason;
+    for (reason, asks) in [
+        (QuitReason::NoneGiven, true),
+        (QuitReason::LogOut, false),
+        (QuitReason::Restart, false),
+        (QuitReason::ShutDown, false),
+        (QuitReason::Other(0x7175_6974), false),
+    ] {
+        let mut application = a_run_with_a_command(&format!("87e-system-{reason:?}"));
+        application.folio.begin_the_systems_quit_for(reason);
+        application
+            .folio
+            .begin_quit_if_asked()
+            .expect("the quit begins");
+        assert_eq!(
+            step(&mut application) == quit::QuitStep::Ask,
+            asks,
+            "{reason:?}"
+        );
+    }
+
+    let mut standing = a_run_with_a_command("87e-system-standing");
+    assert_eq!(
+        asked(&mut standing, quit::Reason::Asked),
+        quit::QuitStep::Ask
+    );
+    standing
+        .folio
+        .begin_the_systems_quit_for(QuitReason::ShutDown);
+    assert_eq!(
+        step(&mut standing),
+        quit::QuitStep::Documents,
+        "the shut-down answers the standing card"
+    );
+    assert_eq!(card(&mut standing), None, "and takes it down");
+
+    let mut pending = a_run_with_a_command("87e-system-pending");
+    pending
+        .folio
+        .app
+        .as_mut()
+        .expect("the application")
+        .ask_to_quit();
+    pending.folio.begin_the_systems_quit_for(QuitReason::LogOut);
+    assert_eq!(
+        step(&mut pending),
+        quit::QuitStep::Documents,
+        "the person's pending quit is begun and answered"
+    );
+
+    let mut unsaved = a_run_with_a_command("87e-system-unsaved");
+    let work = unsaved.folio.running_work().expect("the windows are read");
+    unsaved.folio.app.as_mut().expect("the application").quit = Some(quit::Quit::begin_asking(
+        vec!["notes.md".to_owned()],
+        work,
+        quit::Reason::Asked,
+    ));
+    unsaved
+        .folio
+        .begin_the_systems_quit_for(QuitReason::ShutDown);
+    assert_eq!(
+        step(&mut unsaved),
+        quit::QuitStep::Ask,
+        "the unsaved card stands"
+    );
+}

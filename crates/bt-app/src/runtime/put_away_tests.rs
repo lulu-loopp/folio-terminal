@@ -1149,3 +1149,135 @@ fn a_put_away_window_publishes_nothing_and_its_first_frame_back_is_built_then() 
         frame_says(shown)
     );
 }
+
+// ── The quit asks while something runs (0.4.10 plan row 87, part 87e; T-TRAY-87E-QUIT-ASKS) ──
+
+impl PutAwayRun {
+    /// A command started in the first pane's shell: `OSC 133` `C`, and no `D`.
+    fn a_command_runs(&mut self) {
+        let tab = &mut self.window().tabs[0];
+        let seat = tab.seats.terminals()[0];
+        tab.sessions
+            .get_mut(&seat)
+            .expect("the fixture's seat holds a shell")
+            .session
+            .session
+            .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07cargo build\r\n\x1b]133;C\x07")
+            .expect("the bytes parse");
+    }
+
+    /// Whether no quit was begun or asked for: nothing could have asked.
+    fn no_quit(&mut self) -> bool {
+        let app = self.app();
+        app.quit.is_none() && !app.quit_requested
+    }
+}
+
+/// RED (T10f; the coordinator's item 18) — **the system's end, the Restart Manager's close and the
+/// quit from outside never ask**, a command running or not: nobody is there to answer. None of the
+/// three begins Folio's quit: the system's question is answered and the window stays; the close
+/// and the outside quit leave, every window let go.
+///
+/// PLANT 87e-P35: in `FolioApp::settle_session_end_keeping_in`, answer `Settled::Closed` by asking
+/// for Folio's own quit (`app.ask_to_quit()`) instead of leaving — the close's case asks.
+#[test]
+fn the_system_end_the_restart_managers_close_and_the_outside_quit_never_ask() {
+    let _news = crate::test_support::EndSessionHome::new("87e-never-ask");
+    for road in ["end", "close", "outside"] {
+        let mut run = PutAwayRun::open(&format!("87e-never-{road}"), true);
+        run.a_command_runs();
+        assert!(
+            run.application
+                .folio
+                .running_work()
+                .expect("the windows are read")
+                .any(),
+            "{road}: the fixture's own precondition: a command runs"
+        );
+        match road {
+            "end" => assert_eq!(crate::test_support::the_system_asks(), Some(1)),
+            "close" => {
+                assert_eq!(crate::test_support::the_system_asks(), Some(1));
+                assert_eq!(
+                    bt_platform::session_end::answer(
+                        bt_platform::session_end::WM_ENDSESSION,
+                        1,
+                        bt_platform::session_end::ENDSESSION_CLOSEAPP,
+                        &crate::session_end::hear
+                    ),
+                    Some(0)
+                );
+            }
+            _ => {
+                let quit = 0xC123;
+                assert_eq!(
+                    bt_platform::session_end::answer_outside_quit(
+                        quit,
+                        quit,
+                        &crate::session_end::hear,
+                        &|_| {}
+                    ),
+                    Some(0)
+                );
+            }
+        }
+        let recovery = run.dir.join(crate::preview::RECOVERED_FOLDER);
+        let _ = run
+            .application
+            .folio
+            .settle_session_end_keeping_in(&run.application.event_loop, &recovery);
+        assert!(run.no_quit(), "{road}: nothing asks");
+        assert_eq!(
+            run.application.folio.windows.len(),
+            usize::from(road == "end"),
+            "{road}: leaves, or stays for the end"
+        );
+    }
+}
+
+/// RED (T10h; R7) — **a put-away run's quit brings the window back before it asks**: a question
+/// needs a window on the glass, so the one door back is taken first, and the card stands on it.
+/// A quit that asks nothing leaves without showing it.
+///
+/// PLANT 87e-P37: drop the bring-back from `FolioApp::begin_quit_if_asked` — the card stands on a
+/// window nobody can see.
+#[test]
+fn a_put_away_runs_tray_quit_brings_the_window_back_before_it_asks() {
+    let mut run = PutAwayRun::open("87e-brought", true);
+    let _ = run.close();
+    assert!(run.window().put_away, "the fixture's window is put away");
+    run.a_command_runs();
+    run.app().ask_to_quit();
+    run.application
+        .folio
+        .begin_quit_if_asked()
+        .expect("the quit begins");
+    let effects = run.application.event_loop.ledger.take();
+    assert!(
+        effects.contains(&WindowEffect::Visible(true)),
+        "the window is shown: {effects:?}"
+    );
+    assert!(!run.window().put_away, "it is back on the glass");
+    assert!(
+        run.application.runtime().quit_card_layout().is_some(),
+        "and the card stands on it"
+    );
+
+    let mut idle = PutAwayRun::open("87e-not-brought", true);
+    let _ = idle.close();
+    idle.app().ask_to_quit();
+    idle.application
+        .folio
+        .begin_quit_if_asked()
+        .expect("the quit begins");
+    assert!(
+        !idle
+            .application
+            .event_loop
+            .ledger
+            .take()
+            .contains(&WindowEffect::Visible(true)),
+        "a quit that asks nothing does not show the window"
+    );
+    assert!(idle.window().put_away);
+}

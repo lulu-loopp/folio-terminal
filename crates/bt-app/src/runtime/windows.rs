@@ -2088,6 +2088,18 @@ impl<B: Backend> Runtime<'_, B> {
             .collect()
     }
 
+    /// **What this window's panes are running** (0.4.10 plan row 87, part 87e): every tab's, on
+    /// [`Self::quit_dirty_names`]' own reasoning — a command running on a tab nobody is looking at
+    /// ends on quit all the same. The one reader is [`crate::running_work`].
+    pub(crate) fn running_work(&self) -> crate::running_work::RunningWork {
+        self.window
+            .tabs
+            .iter()
+            .fold(crate::running_work::RunningWork::NONE, |work, tab| {
+                work + tab.running_work()
+            })
+    }
+
     /// **What this window's buffers came to under the quit's `Save`, said on its card**
     /// (S-6c; `FolioApp::settle_the_quits_saves`): the buffers whose saves did not land —
     /// refused, failed, met another writer's bytes, or edited since they were handed over —

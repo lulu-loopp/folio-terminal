@@ -6712,8 +6712,15 @@ impl<B: Backend> Runtime<'_, B> {
         }
         // **One line per file** (B1), through the same maker the gate uses: the
         // card is about a list, and a list drawn as a wrapped sentence is a list
-        // nobody can count.
-        let lines = restore::unsaved_lines(quit.names());
+        // nobody can count. **And what is running, last** (0.4.10 plan row 87, part 87e;
+        // the coordinator's item 14): one card, the running-work line under the names.
+        let work = quit.running_work();
+        let mut lines = restore::unsaved_lines(quit.names());
+        lines.extend(crate::i18n::quit_running_work(work.agents, work.commands));
+        let words = restore::quit_card_words(
+            quit.card(),
+            matches!(quit.reason(), crate::quit::Reason::UpdateRestart { .. }),
+        );
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.scale_factor() as f32;
@@ -6728,20 +6735,23 @@ impl<B: Backend> Runtime<'_, B> {
             })
             .collect();
         let content = restore::QuitContent {
+            words,
             message_lines,
-            save_text_width: renderer.measure_chrome_text(
-                gpu,
-                restore::quit_save_text(),
-                restore::BUTTON_FONT_LOGICAL_PX * scale,
-            ),
+            save_text_width: words.saves.then(|| {
+                renderer.measure_chrome_text(
+                    gpu,
+                    restore::quit_save_text(),
+                    restore::BUTTON_FONT_LOGICAL_PX * scale,
+                )
+            }),
             cancel_text_width: renderer.measure_chrome_text(
                 gpu,
                 restore::gate_cancel_text(),
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
-            discard_text_width: renderer.measure_chrome_text(
+            leave_text_width: renderer.measure_chrome_text(
                 gpu,
-                restore::gate_discard_all_text(),
+                words.leave,
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
         };

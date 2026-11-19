@@ -180,6 +180,7 @@ mod recent_folders;
 mod recovered;
 mod rejected_copies;
 mod restore;
+mod running_work;
 mod runtime;
 mod scheme_watch;
 mod schemes;
@@ -16929,6 +16930,16 @@ impl ShellSession {
             turn: self.turn_account.agent_turn(),
         }
     }
+
+    /// **What this one pane is running, for the one reader of running work** (0.4.10 plan row
+    /// 87, part 87e): the two facts [`Self::session_facts`] hands the claim — the shell's command
+    /// flag and the agent's turns — read by [`running_work::pane_work`]'s rule.
+    fn running_work(&self) -> running_work::RunningWork {
+        running_work::pane_work(
+            self.session.status().working,
+            self.turn_account.agent_turn(),
+        )
+    }
 }
 
 // **`TabState` used to dereference to its focused leaf**, so that the two hops
@@ -29094,6 +29105,16 @@ impl TabState {
         self.sessions
             .values()
             .any(|TerminalPane { session: leaf, .. }| session_is_breathing(leaf.session.status()))
+    }
+
+    /// **What this tab's panes are running**, pane by pane (0.4.10 plan row 87, part 87e; the
+    /// one reader of running work, [`running_work`]). Not [`Self::fleet_working`]: that is the
+    /// breath, a union that drops the alternate screen and reads no agent's turns.
+    fn running_work(&self) -> running_work::RunningWork {
+        self.sessions.values().fold(
+            running_work::RunningWork::NONE,
+            |work, TerminalPane { session: leaf, .. }| work + leaf.running_work(),
+        )
     }
 
     /// The progress reading the ring shows: the first one reported, in seat
@@ -45198,6 +45219,10 @@ mod quit_transaction_tests {
             restore::quit_answer(QuitTarget::Cancel),
             Some(QuitAnswer::Cancel)
         );
+        assert_eq!(
+            restore::quit_answer(QuitTarget::Quit),
+            Some(QuitAnswer::Quit)
+        );
         assert_eq!(restore::quit_answer(QuitTarget::Panel), None);
         assert_eq!(
             quit::QUIT_FOCUSED_ANSWER,
@@ -45214,10 +45239,11 @@ mod quit_transaction_tests {
     #[test]
     fn the_three_buttons_stand_in_the_order_windows_taught() {
         let content = restore::QuitContent {
+            words: restore::quit_card_words(quit::QuitCard::Unsaved, false),
             message_lines: vec!["Unsaved: a.txt, b.md".to_owned()],
-            save_text_width: 30.0,
+            save_text_width: Some(30.0),
             cancel_text_width: 40.0,
-            discard_text_width: 50.0,
+            leave_text_width: 50.0,
         };
         let layout = restore::quit_layout(&content, 1600.0, 900.0, 1.0);
         let save = restore::quit_hit(&layout, 0.0, 0.0);
@@ -45229,6 +45255,7 @@ mod quit_transaction_tests {
             )
         };
         let (save, discard, cancel) = restore::quit_button_rects(&layout);
+        let save = save.expect("the unsaved card has Save all");
         assert!(save[2] <= discard[0], "Save all is left of Discard all");
         assert!(discard[2] <= cancel[0], "and Discard all is left of Cancel");
         for (rect, target) in [
@@ -45244,6 +45271,49 @@ mod quit_transaction_tests {
         // whether it meant all four or the one at the top.
         assert_eq!(restore::quit_save_text(), "Save all");
         assert_eq!(restore::gate_discard_all_text(), "Discard all");
+    }
+
+    /// PIN (0.4.10 plan row 87, part 87e; R4, R5) — **the running-work card is the gate's two
+    /// buttons: Quit, then Cancel, and no Save all** — Restart on an update's Restart, under its
+    /// own question. Nothing is unsaved there, so a Save would save nothing.
+    #[test]
+    fn the_running_work_card_is_quit_and_cancel() {
+        for (restart, title, leave) in [
+            (false, "Quit Folio?", "Quit"),
+            (true, "Restart Folio?", "Restart"),
+        ] {
+            let words = restore::quit_card_words(quit::QuitCard::RunningWork, restart);
+            assert_eq!((words.title, words.leave), (title, leave));
+            assert!(!words.saves);
+            let content = restore::QuitContent {
+                words,
+                message_lines: vec!["A command is running; quitting ends it.".to_owned()],
+                save_text_width: None,
+                cancel_text_width: 40.0,
+                leave_text_width: 30.0,
+            };
+            let layout = restore::quit_layout(&content, 1600.0, 900.0, 1.0);
+            let (save, leave, cancel) = restore::quit_button_rects(&layout);
+            assert_eq!(save, None, "no Save all on the running-work card");
+            assert!(leave[2] <= cancel[0], "{leave:?} stands left of Cancel");
+            let centre = |rect: [f32; 4]| {
+                (
+                    f64::from((rect[0] + rect[2]) / 2.0),
+                    f64::from((rect[1] + rect[3]) / 2.0),
+                )
+            };
+            let (x, y) = centre(leave);
+            assert_eq!(restore::quit_hit(&layout, x, y), quit::QuitTarget::Quit);
+            let (x, y) = centre(cancel);
+            assert_eq!(restore::quit_hit(&layout, x, y), quit::QuitTarget::Cancel);
+            assert_eq!(restore::quit_card_text(&layout).0, title);
+        }
+        let unsaved = restore::quit_card_words(quit::QuitCard::Unsaved, true);
+        assert_eq!(
+            (unsaved.title, unsaved.leave, unsaved.saves),
+            ("Save changes before quitting?", "Discard all", true),
+            "the unsaved card keeps its question and its three buttons, Restart or not"
+        );
     }
 
     /// PIN (user ruling 2026-08-25, B1) — **the exit card gives every unsaved
@@ -49521,13 +49591,64 @@ impl<B: Backend> FolioApp<B> {
             }
             return;
         }
+        let reason = answer.reason();
         self.termination = Some(answer);
-        if let Some(app) = self.app.as_mut() {
-            if app.quit.is_none() && !app.quit_requested {
-                app.quit_reason = quit::Reason::LaunchWireQuit;
-            }
-            app.ask_to_quit();
+        self.begin_the_systems_quit_for(reason);
+    }
+
+    /// **AppKit's quit, by why it was asked** (0.4.10 plan row 87, part 87e; the coordinator's item
+    /// 17 and R1, R9): the quit the one door opens carries whether a person asked
+    /// ([`quit::the_systems_quit_is_a_persons`]), which decides whether it asks about running
+    /// work. Its own method so that the reason is a seam a test can drive on every platform: the
+    /// handle AppKit waits on is built by `bt-platform` alone.
+    ///
+    /// **And the system's end is never held by the running-work card** (R9): a log-out, a restart
+    /// or a shut-down begins at once the quit a person asked for and the loop had not yet begun,
+    /// and answers the running-work card Quit — whether it was standing already (a `Cmd+Q` nobody
+    /// answered) or has just been put up — so the session's end goes on. The unsaved card stands
+    /// as it always has: what it asks about is lost, and only a person can say so.
+    fn begin_the_systems_quit_for(&mut self, reason: bt_platform::QuitReason) {
+        let by_a_person = quit::the_systems_quit_is_a_persons(reason);
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        if app.quit.is_none() && !app.quit_requested {
+            app.quit_reason = quit::Reason::LaunchWireQuit { by_a_person };
         }
+        app.ask_to_quit();
+        if by_a_person {
+            return;
+        }
+        let answered = self
+            .begin_quit_if_asked()
+            .and_then(|()| self.answer_the_running_work_card_for_the_systems_end());
+        if let Err(error) = answered {
+            diagnostics::note(&format!(
+                "{APP_NAME}: the quit card was not answered for the system's end: {error:#}"
+            ));
+        }
+    }
+
+    /// **The running-work card, answered Quit for the system's end** (R9), and taken down on every
+    /// window it stood on. Nothing when no quit asks, or when the card asking is the unsaved one.
+    fn answer_the_running_work_card_for_the_systems_end(&mut self) -> Result<()> {
+        let answered = self.app.as_mut().is_some_and(|app| {
+            app.quit.as_mut().is_some_and(|quit| {
+                quit.is_asking()
+                    && quit.card() == quit::QuitCard::RunningWork
+                    && quit.answer(quit::QuitAnswer::Quit) != quit::QuitStep::Ask
+            })
+        });
+        if !answered {
+            return Ok(());
+        }
+        self.for_each_window(|runtime| {
+            if runtime.refresh_overlay() {
+                runtime.present_chrome_change()
+            } else {
+                Ok(())
+            }
+        })
     }
 
     /// **Answer the quit the system asked for**, once, at the end of the
@@ -51291,7 +51412,7 @@ impl<B: Backend> FolioApp<B> {
                         .map(quit::Quit::reason)
                     {
                         Some(quit::Reason::Asked) => exit_diagnostics::LastWindowCause::Quit,
-                        Some(quit::Reason::LaunchWireQuit) => {
+                        Some(quit::Reason::LaunchWireQuit { .. }) => {
                             exit_diagnostics::LastWindowCause::LaunchWireQuit
                         }
                         Some(quit::Reason::UpdateRestart { .. }) => {
@@ -51471,6 +51592,19 @@ impl<B: Backend> FolioApp<B> {
         Ok(true)
     }
 
+    /// **What every window is running** (0.4.10 plan row 87, part 87e): the one reader of running
+    /// work ([`running_work`]) summed over every window that is not on its way out — the summoned
+    /// terminal and a put-away window among them, since a quit ends theirs too. What the quit's Ask
+    /// step counts ([`Self::begin_quit_if_asked`]).
+    fn running_work(&mut self) -> Result<running_work::RunningWork> {
+        let mut work = running_work::RunningWork::NONE;
+        self.for_each_window(|runtime| {
+            work = work + runtime.running_work();
+            Ok(())
+        })?;
+        Ok(work)
+    }
+
     /// Open the transaction, if a chord asked for one and none is under way.
     ///
     /// **The scan is the first thing that happens and it reads every window**,
@@ -51489,20 +51623,31 @@ impl<B: Backend> FolioApp<B> {
             names.extend(runtime.quit_dirty_names());
             Ok(())
         })?;
+        let mut work = self.running_work()?;
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
         let reason = std::mem::replace(&mut app.quit_reason, quit::Reason::Asked);
+        let leaving_without = app.swap_leave_without(None);
+        // **A question answered is not put again** (0.4.10 plan row 87, part 87e; R8): the quit
+        // a cancelled quit's choice resumes leaves without asking about running work when that
+        // quit's own card had said what was running and been answered to leave.
+        if leaving_without
+            .as_ref()
+            .is_some_and(quit::Cancelled::running_work_was_answered)
+        {
+            work = running_work::RunningWork::NONE;
+        }
         // **Only the card's choice leaves without a change** (revision (d)2): the documents
         // it named are dropped for this run, each named in `diagnostics.log` before the way
         // out; a quit asked any other way drops nothing and runs the transaction again.
-        let dropped = quit::dropped_on_begin(app.swap_leave_without(None));
+        let dropped = quit::dropped_on_begin(leaving_without);
         if !dropped.is_empty() {
             for line in app.with_documents(|documents| quit::drop_documents(documents, &dropped)) {
                 diagnostics::note(&line);
             }
         }
-        app.quit = Some(quit::Quit::begin_for(names, reason));
+        app.quit = Some(quit::Quit::begin_asking(names, work, reason));
         // The card, on every window — one question, and no window left taking
         // keys behind it. A quit with nothing to ask about raises none, so this
         // costs a rebuilt overlay stack only when there is something to draw.
@@ -51511,6 +51656,11 @@ impl<B: Backend> FolioApp<B> {
             .as_ref()
             .is_some_and(|app| app.quit.as_ref().is_some_and(quit::Quit::is_asking))
         {
+            // **A question needs a window on the glass** (0.4.10 plan row 87, part 87e; R7): a
+            // put-away run's quit — the tray's Quit, an *Update and restart* that came due while
+            // the window was away — brings it back through the one door before it asks. A quit
+            // that asks nothing leaves without showing it.
+            self.bring_the_window_back()?;
             self.for_each_window(|runtime| {
                 if runtime.refresh_overlay() {
                     runtime.present_chrome_change()
@@ -63215,7 +63365,10 @@ mod quit_with_no_window_tests {
             "the chord no longer records the debt through the one door"
         );
         assert!(
-            method_body("FolioApp", "begin_the_systems_quit").contains("app.ask_to_quit();"),
+            method_body("FolioApp", "begin_the_systems_quit")
+                .contains("self.begin_the_systems_quit_for(reason);")
+                && method_body("FolioApp", "begin_the_systems_quit_for")
+                    .contains("app.ask_to_quit();"),
             "AppKit's own quit request no longer records it through the one door"
         );
         // And nothing writes the flag behind that door's back. Counted over the
@@ -63262,7 +63415,9 @@ mod quit_with_no_window_tests {
         assert!(asked < opened, "{settle}");
         let begin = method_body("FolioApp", "begin_the_systems_quit");
         assert!(
-            begin.contains("app.ask_to_quit();"),
+            begin.contains("self.begin_the_systems_quit_for(reason);")
+                && method_body("FolioApp", "begin_the_systems_quit_for")
+                    .contains("app.ask_to_quit();"),
             "the system's quit is the one quit"
         );
         assert!(

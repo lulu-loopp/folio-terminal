@@ -2190,32 +2190,79 @@ pub fn gate_build(
 // names is collected once across every window (see [`crate::quit::Quit`]) rather
 // than re-derived from a pool every frame.
 
+/// **The words of the card the Ask step puts up** (0.4.10 plan row 87, part 87e): its question,
+/// and the button beside Cancel with the answer it gives. [`quit_card_words`] chooses them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuitWords {
+    pub title: &'static str,
+    /// The word on the button beside Cancel.
+    pub leave: &'static str,
+    /// What that button is: [`crate::quit::QuitTarget::Discard`] on the unsaved card,
+    /// [`crate::quit::QuitTarget::Quit`] on the running-work card.
+    pub leave_target: crate::quit::QuitTarget,
+    /// Whether the card has `Save all` — the unsaved card's alone.
+    pub saves: bool,
+}
+
+/// **The words of `card`** (0.4.10 plan row 87, part 87e; the coordinator's items 14 and 16 of
+/// 2026-11-14, R4 and R5 of 2026-11-19). The unsaved card keeps its own question and its three
+/// buttons whatever else it says; the running-work card asks "Quit Folio?" with Quit and Cancel —
+/// "Restart Folio?" with Restart when the quit is an update's Restart (`restart`), because that is
+/// what the person pressed.
+#[must_use]
+pub fn quit_card_words(card: crate::quit::QuitCard, restart: bool) -> QuitWords {
+    use crate::i18n::Text;
+    use crate::quit::{QuitCard, QuitTarget};
+    match card {
+        QuitCard::Unsaved => QuitWords {
+            title: Text::QuitTitle.text(),
+            leave: gate_discard_all_text(),
+            leave_target: QuitTarget::Discard,
+            saves: true,
+        },
+        QuitCard::RunningWork => QuitWords {
+            title: if restart {
+                Text::QuitRestartTitle.text()
+            } else {
+                Text::QuitRunningTitle.text()
+            },
+            leave: if restart {
+                Text::QuitRunningRestart.text()
+            } else {
+                Text::QuitRunningQuit.text()
+            },
+            leave_target: QuitTarget::Quit,
+            saves: false,
+        },
+    }
+}
+
 /// Everything the summary card draws that had to be measured with a real font.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct QuitContent {
-    /// [`crate::i18n::quit_unsaved_message`], already broken to lines that fit
-    /// [`content_width`].
+    /// The card's words ([`quit_card_words`]).
+    pub words: QuitWords,
+    /// The names and the running-work line ([`crate::i18n::quit_running_work`]), already broken
+    /// to lines that fit [`content_width`].
     pub message_lines: Vec<String>,
-    pub save_text_width: f32,
+    /// `Save all`'s width, on a card that has it ([`QuitWords::saves`]).
+    pub save_text_width: Option<f32>,
     pub cancel_text_width: f32,
-    pub discard_text_width: f32,
+    /// The width of the button beside Cancel ([`QuitWords::leave`]).
+    pub leave_text_width: f32,
 }
 
 /// Every rectangle the summary card draws and hit-tests.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuitLayout {
     scale: f32,
+    words: QuitWords,
     frame: [f32; 4],
     title: [f32; 4],
     message: Vec<(String, [f32; 4])>,
-    save: [f32; 4],
+    save: Option<[f32; 4]>,
     cancel: [f32; 4],
-    discard: [f32; 4],
-}
-
-#[must_use]
-pub fn quit_title_text() -> &'static str {
-    crate::i18n::Text::QuitTitle.text()
+    leave: [f32; 4],
 }
 
 /// The word on the button that writes everything back.
@@ -2290,7 +2337,9 @@ pub fn quit_layout(
     // **`Save all`, `Discard all`, `Cancel`** (B1, user ruling 2026-08-25) —
     // the order this operating system puts them in, affirmative first. Laid out
     // from the right because the row is `flex-end`, which is why the code reads
-    // backwards from the sentence.
+    // backwards from the sentence. The running-work card has no `Save all`, and its
+    // `Quit` stands where `Discard all` does (0.4.10 plan row 87, part 87e): the
+    // gate's two-button row.
     let button_width =
         |text_width: f32| 2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + text_width;
     let cancel = [
@@ -2299,39 +2348,56 @@ pub fn quit_layout(
         content_right,
         cursor + button_height,
     ];
-    let discard = [
-        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.discard_text_width),
+    let leave = [
+        cancel[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.leave_text_width),
         cursor,
         cancel[0] - px(ACTIONS_GAP_LOGICAL_PX),
         cursor + button_height,
     ];
-    let save = [
-        discard[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(content.save_text_width),
-        cursor,
-        discard[0] - px(ACTIONS_GAP_LOGICAL_PX),
-        cursor + button_height,
-    ];
+    let save = content.save_text_width.map(|save_text_width| {
+        [
+            leave[0] - px(ACTIONS_GAP_LOGICAL_PX) - button_width(save_text_width),
+            cursor,
+            leave[0] - px(ACTIONS_GAP_LOGICAL_PX),
+            cursor + button_height,
+        ]
+    });
     QuitLayout {
         scale,
+        words: content.words,
         frame,
         title,
         message,
         save,
         cancel,
-        discard,
+        leave,
     }
 }
 
-/// The three buttons' rectangles, left to right, for the test that pins their
-/// order.
+/// The buttons' rectangles, left to right — `Save all` on a card that has it, the button beside
+/// Cancel, Cancel — for the tests that pin their order.
 ///
 /// Test-only: the window draws them out of the layout it was handed and hit-tests
 /// them through [`quit_hit`], so nothing the product does needs to read them
 /// separately.
 #[cfg(test)]
 #[must_use]
-pub fn quit_button_rects(layout: &QuitLayout) -> ([f32; 4], [f32; 4], [f32; 4]) {
-    (layout.save, layout.discard, layout.cancel)
+pub fn quit_button_rects(layout: &QuitLayout) -> (Option<[f32; 4]>, [f32; 4], [f32; 4]) {
+    (layout.save, layout.leave, layout.cancel)
+}
+
+/// The card's title and lines as they are drawn, for the tests that read the card.
+#[cfg(test)]
+#[must_use]
+pub fn quit_card_text(layout: &QuitLayout) -> (&'static str, Vec<String>) {
+    (
+        layout.words.title,
+        layout
+            .message
+            .iter()
+            .map(|(line, _)| line.clone())
+            .collect(),
+    )
 }
 
 /// What a point is over. **Always an answer**, on [`gate_hit`]'s own rule: this
@@ -2340,14 +2406,14 @@ pub fn quit_button_rects(layout: &QuitLayout) -> ([f32; 4], [f32; 4], [f32; 4]) 
 pub fn quit_hit(layout: &QuitLayout, x: f64, y: f64) -> crate::quit::QuitTarget {
     use crate::quit::QuitTarget;
     let (x, y) = (x as f32, y as f32);
-    if contains(layout.save, x, y) {
+    if layout.save.is_some_and(|save| contains(save, x, y)) {
         return QuitTarget::Save;
     }
     if contains(layout.cancel, x, y) {
         return QuitTarget::Cancel;
     }
-    if contains(layout.discard, x, y) {
-        return QuitTarget::Discard;
+    if contains(layout.leave, x, y) {
+        return layout.words.leave_target;
     }
     QuitTarget::Panel
 }
@@ -2360,6 +2426,7 @@ pub fn quit_answer(target: crate::quit::QuitTarget) -> Option<crate::quit::QuitA
         QuitTarget::Save => Some(QuitAnswer::Save),
         QuitTarget::Discard => Some(QuitAnswer::Discard),
         QuitTarget::Cancel => Some(QuitAnswer::Cancel),
+        QuitTarget::Quit => Some(QuitAnswer::Quit),
         QuitTarget::Panel => None,
     }
 }
@@ -2405,7 +2472,7 @@ pub fn quit_build(
     );
     labels.push(ChromeLabel {
         mono: false,
-        text: quit_title_text().to_owned(),
+        text: layout.words.title.to_owned(),
         rect: layout.title,
         font_size_px: px(TITLE_FONT_LOGICAL_PX),
         color: palette.dialog_title_text,
@@ -2431,11 +2498,13 @@ pub fn quit_build(
             clip: None,
         });
     }
-    for (rect, text, target) in [
-        (layout.save, quit_save_text(), QuitTarget::Save),
-        (layout.discard, gate_discard_all_text(), QuitTarget::Discard),
+    let save = layout
+        .save
+        .map(|save| (save, quit_save_text(), QuitTarget::Save));
+    for (rect, text, target) in save.into_iter().chain([
+        (layout.leave, layout.words.leave, layout.words.leave_target),
         (layout.cancel, gate_cancel_text(), QuitTarget::Cancel),
-    ] {
+    ]) {
         push_button(
             &mut quads,
             &mut labels,

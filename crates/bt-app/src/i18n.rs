@@ -2527,6 +2527,31 @@ text_entries! {
     QuitTitle,
     /// The word on the button that writes everything back before leaving.
     QuitSave,
+    /// **The running-work card's question** (0.4.10 plan row 87, part 87e; the coordinator's item
+    /// 16 of 2026-11-14): nothing is unsaved, and an agent is working or a command is running.
+    QuitRunningTitle,
+    /// The same card's question when the quit is an update's Restart (R4 of 2026-11-19).
+    QuitRestartTitle,
+    /// The running-work card's affirmative: leave, ending what runs.
+    QuitRunningQuit,
+    /// The same, on an update's Restart (R4).
+    QuitRunningRestart,
+    /// **The running-work line, by count** ([`quit_running_work_in`]; R6): one agent working.
+    QuitRunningAgent,
+    /// `{agents}` agents working.
+    QuitRunningAgents,
+    /// One command running.
+    QuitRunningCommand,
+    /// `{commands}` commands running.
+    QuitRunningCommands,
+    /// One agent working and one command running.
+    QuitRunningAgentCommand,
+    /// One agent working and `{commands}` commands running.
+    QuitRunningAgentCommands,
+    /// `{agents}` agents working and one command running.
+    QuitRunningAgentsCommand,
+    /// `{agents}` agents working and `{commands}` commands running.
+    QuitRunningAgentsCommands,
     /// **The card a quit that could not write `session.json` raises** (slice E2
     /// phase ③).
     ///
@@ -5126,6 +5151,56 @@ impl Text {
             // button reading `Save` over four of them leaves a reader to work
             // out whether it means all four or the one they are looking at.
             Self::QuitSave => pick(lang, "Save all", "全部保存"),
+            // **The running-work card** (0.4.10 plan row 87, part 87e; the coordinator's items 14
+            // and 16 of 2026-11-14, R4 and R6 of 2026-11-19). Whole sentences by shape, so that the
+            // Chinese is written sentence by sentence; the Chinese is owed (`CHINESE_PENDING`), and
+            // stands on the English until written.
+            Self::QuitRunningTitle => pick(lang, "Quit Folio?", "Quit Folio?"),
+            Self::QuitRestartTitle => pick(lang, "Restart Folio?", "Restart Folio?"),
+            Self::QuitRunningQuit => pick(lang, "Quit", "Quit"),
+            Self::QuitRunningRestart => pick(lang, "Restart", "Restart"),
+            Self::QuitRunningAgent => pick(
+                lang,
+                "An agent is working; quitting ends it.",
+                "An agent is working; quitting ends it.",
+            ),
+            Self::QuitRunningAgents => pick(
+                lang,
+                "{agents} agents are working; quitting ends them.",
+                "{agents} agents are working; quitting ends them.",
+            ),
+            Self::QuitRunningCommand => pick(
+                lang,
+                "A command is running; quitting ends it.",
+                "A command is running; quitting ends it.",
+            ),
+            Self::QuitRunningCommands => pick(
+                lang,
+                "{commands} commands are running; quitting ends them.",
+                "{commands} commands are running; quitting ends them.",
+            ),
+            Self::QuitRunningAgentCommand => pick(
+                lang,
+                "An agent is working and a command is running; quitting ends them.",
+                "An agent is working and a command is running; quitting ends them.",
+            ),
+            Self::QuitRunningAgentCommands => pick(
+                lang,
+                "An agent is working and {commands} commands are running; quitting ends them.",
+                "An agent is working and {commands} commands are running; quitting ends them.",
+            ),
+            Self::QuitRunningAgentsCommand => pick(
+                lang,
+                "{agents} agents are working and a command is running; quitting ends them.",
+                "{agents} agents are working and a command is running; quitting ends them.",
+            ),
+            Self::QuitRunningAgentsCommands => pick(
+                lang,
+                "{agents} agents are working and {commands} commands are running; quitting ends \
+                 them.",
+                "{agents} agents are working and {commands} commands are running; quitting ends \
+                 them.",
+            ),
             Self::QuitSessionNotWritten => pick(
                 lang,
                 "session.json could not be written. Nothing was closed.",
@@ -7068,9 +7143,55 @@ impl Text {
     ];
 
     /// The entries whose Chinese is owed, by column: the English stands in both until the
-    /// Chinese pass writes it.
+    /// Chinese pass writes it (0.4.10 plan row 87, part 87e: the running-work card).
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &{
+        use HostPlatform::{MacOs, OtherUnix, Windows};
+        use Text::{
+            QuitRestartTitle, QuitRunningAgent, QuitRunningAgentCommand, QuitRunningAgentCommands,
+            QuitRunningAgents, QuitRunningAgentsCommand, QuitRunningAgentsCommands,
+            QuitRunningCommand, QuitRunningCommands, QuitRunningQuit, QuitRunningRestart,
+            QuitRunningTitle,
+        };
+        [
+            (QuitRunningTitle, Windows),
+            (QuitRunningTitle, MacOs),
+            (QuitRunningTitle, OtherUnix),
+            (QuitRestartTitle, Windows),
+            (QuitRestartTitle, MacOs),
+            (QuitRestartTitle, OtherUnix),
+            (QuitRunningQuit, Windows),
+            (QuitRunningQuit, MacOs),
+            (QuitRunningQuit, OtherUnix),
+            (QuitRunningRestart, Windows),
+            (QuitRunningRestart, MacOs),
+            (QuitRunningRestart, OtherUnix),
+            (QuitRunningAgent, Windows),
+            (QuitRunningAgent, MacOs),
+            (QuitRunningAgent, OtherUnix),
+            (QuitRunningAgents, Windows),
+            (QuitRunningAgents, MacOs),
+            (QuitRunningAgents, OtherUnix),
+            (QuitRunningCommand, Windows),
+            (QuitRunningCommand, MacOs),
+            (QuitRunningCommand, OtherUnix),
+            (QuitRunningCommands, Windows),
+            (QuitRunningCommands, MacOs),
+            (QuitRunningCommands, OtherUnix),
+            (QuitRunningAgentCommand, Windows),
+            (QuitRunningAgentCommand, MacOs),
+            (QuitRunningAgentCommand, OtherUnix),
+            (QuitRunningAgentCommands, Windows),
+            (QuitRunningAgentCommands, MacOs),
+            (QuitRunningAgentCommands, OtherUnix),
+            (QuitRunningAgentsCommand, Windows),
+            (QuitRunningAgentsCommand, MacOs),
+            (QuitRunningAgentsCommand, OtherUnix),
+            (QuitRunningAgentsCommands, Windows),
+            (QuitRunningAgentsCommands, MacOs),
+            (QuitRunningAgentsCommands, OtherUnix),
+        ]
+    };
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -8203,6 +8324,37 @@ pub fn files_listed_in(lang: Lang, files: &[&str], bound: Option<usize>) -> Stri
             .replace("{names}", &names.join(separator))
             .replace("{last}", last),
     }
+}
+
+/// **The running-work card's line** (0.4.10 plan row 87, part 87e; the coordinator's item 16 of
+/// 2026-11-14 and R6 of 2026-11-19): what is running, by count, in digits; a part whose count is
+/// zero left out; "it" for one thing and "them" otherwise. `None` when nothing runs.
+#[must_use]
+pub fn quit_running_work(agents: usize, commands: usize) -> Option<String> {
+    quit_running_work_in(current(), agents, commands)
+}
+
+/// [`quit_running_work`] in a named language. One whole sentence per shape, so that each language
+/// writes its own order and measure words.
+#[must_use]
+pub fn quit_running_work_in(lang: Lang, agents: usize, commands: usize) -> Option<String> {
+    let entry = match (agents, commands) {
+        (0, 0) => return None,
+        (1, 0) => Text::QuitRunningAgent,
+        (_, 0) => Text::QuitRunningAgents,
+        (0, 1) => Text::QuitRunningCommand,
+        (0, _) => Text::QuitRunningCommands,
+        (1, 1) => Text::QuitRunningAgentCommand,
+        (1, _) => Text::QuitRunningAgentCommands,
+        (_, 1) => Text::QuitRunningAgentsCommand,
+        (_, _) => Text::QuitRunningAgentsCommands,
+    };
+    Some(
+        entry
+            .in_lang(lang)
+            .replace("{agents}", &agents.to_string())
+            .replace("{commands}", &commands.to_string()),
+    )
 }
 
 /// **The cancelled quit's card** (T-QUIT-DOCUMENTS): `settings.json could not be
@@ -9800,6 +9952,49 @@ fn move_refusal_notice_in(lang: Lang, said: &str, pane_is_now_a_tab: bool) -> St
 mod tests {
     use super::*;
     use bt_source::{Index, ItemQuery};
+
+    /// RED (0.4.10 plan row 87, part 87e; R6) — **the running-work line says each shape**: what
+    /// runs, by count in digits, a part at zero left out, "it" for one thing and "them" otherwise,
+    /// and nothing when nothing runs.
+    ///
+    /// PLANT 87e-P38: send one agent to the plural entry — "1 agents are working" goes red.
+    #[test]
+    fn the_running_work_line_says_each_shape() {
+        let line = |agents, commands| quit_running_work_in(Lang::English, agents, commands);
+        assert_eq!(line(0, 0), None);
+        for (agents, commands, said) in [
+            (1, 0, "An agent is working; quitting ends it."),
+            (3, 0, "3 agents are working; quitting ends them."),
+            (0, 1, "A command is running; quitting ends it."),
+            (0, 2, "2 commands are running; quitting ends them."),
+            (
+                1,
+                1,
+                "An agent is working and a command is running; quitting ends them.",
+            ),
+            (
+                1,
+                4,
+                "An agent is working and 4 commands are running; quitting ends them.",
+            ),
+            (
+                2,
+                1,
+                "2 agents are working and a command is running; quitting ends them.",
+            ),
+            (
+                12,
+                30,
+                "12 agents are working and 30 commands are running; quitting ends them.",
+            ),
+        ] {
+            assert_eq!(
+                line(agents, commands).as_deref(),
+                Some(said),
+                "{agents} agents, {commands} commands"
+            );
+        }
+    }
 
     /// RED (T-ABOUT-NITS) — **"Last checked" counts in the singular at one,
     /// in every unit**, and Chinese reads the same count either way.
