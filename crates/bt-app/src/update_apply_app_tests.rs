@@ -114,7 +114,7 @@ fn every_owner_door_takes_its_own_token_by_value() {
         owner_door::set_visible;
     let _: fn(WaitToken<'_, doors::SetCursor>, &std::sync::Arc<Window>, winit::window::Cursor) =
         owner_door::set_cursor;
-    let _: fn(WaitToken<'_, doors::PlaceHidden>, &std::sync::Arc<Window>) -> bool =
+    let _: fn(WaitToken<'_, doors::PlaceHidden>, &std::sync::Arc<Window>, bool) -> bool =
         window_is_hidden;
     let _: fn(WaitToken<'_, doors::PlaceExposure>, &std::sync::Arc<Window>) -> bool =
         window_is_exposed;

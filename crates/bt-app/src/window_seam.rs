@@ -263,9 +263,18 @@ pub(crate) trait WindowHost {
     /// The work area of the display this window is on — `bt_platform::get_work_area`; `None`
     /// where the platform will not say.
     fn work_area(&self) -> Option<bt_platform::WindowRect>;
+    /// **Every display the platform names now, as the layout restore judges against them** —
+    /// `restore_monitors_of` over the window's own monitor list, primary first; empty where the
+    /// platform will not say (0.4.10 plan row 87, part 87a: the way back of a put-away window).
+    fn monitors_to_restore_on(&self) -> Vec<crate::RestoreMonitor>;
     /// **The window stood at an outer rectangle on whichever display it names** —
     /// `bt_platform::stand_window_at`, which says it again until the display's scale has settled.
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String>;
+    /// **The rectangle a hidden window takes when it is next shown normal** — restored from
+    /// minimised or un-maximised — written without showing it and without changing its posture:
+    /// `bt_platform::set_hidden_window_normal_rect`, for a window that is not normal, whose own
+    /// rectangle is the system's (0.4.10 plan row 87, part 87a, re-review P1-4).
+    fn keep_normal_rect_while_hidden(&self, rect: bt_platform::WindowRect) -> Result<(), String>;
     /// **Who owns the glass at a point on the screen**, physical pixels: this window, another
     /// one, or nobody the platform will name — `bt_platform::top_level_window_at` asked about
     /// this window's own handle.
@@ -476,8 +485,17 @@ impl WindowHost for Arc<Window> {
             .ok()
             .and_then(|native| bt_platform::get_work_area(native).ok())
     }
+    fn monitors_to_restore_on(&self) -> Vec<crate::RestoreMonitor> {
+        crate::restore_monitors_of(
+            Window::primary_monitor(self),
+            Window::available_monitors(self),
+        )
+    }
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
         bt_platform::stand_window_at(native_or_say(self)?, rect)
+    }
+    fn keep_normal_rect_while_hidden(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
+        bt_platform::set_hidden_window_normal_rect(native_or_say(self)?, rect)
     }
     fn glass_at(&self, x: i32, y: i32) -> crate::GlassHere {
         let Ok(mine) = crate::native_window_of(self) else {
@@ -577,7 +595,16 @@ impl WindowHost for Arc<Window> {
         ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         let native = crate::native_window_of(self).ok()?;
-        bt_platform::session_end::SessionEndWatch::install(native, hear, reason, ending).ok()
+        // The window's note door is `diagnostics::note` (`Self::note`), handed down as itself: the
+        // subclass says the outside quit's arrival through it (0.4.10 plan row 87, part 87a).
+        bt_platform::session_end::SessionEndWatch::install(
+            native,
+            hear,
+            Box::new(crate::diagnostics::note),
+            reason,
+            ending,
+        )
+        .ok()
     }
     fn page_address(
         &self,

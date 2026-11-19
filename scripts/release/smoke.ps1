@@ -24,7 +24,10 @@
          the window Folio opened equals `GetDpiForMonitor` for the monitor it
          opened on. Stated as an agreement rather than as "96", so the same
          check is the 200% check on a machine set to 200%.
-      6. It shuts down when asked, rather than being killed.
+      6. Its window's close puts it away, and the process stays (0.4.10 plan
+         row 87, part 87a); and it shuts down when asked by Folio's quit from
+         outside — the registered message an installer, an update's rollback
+         and the uninstaller send — rather than being killed.
       7. The file a bug report actually arrives as — `diagnostics.log`, written
          by an ordinary run with no trace variable set — opens with the same
          build line `--version` printed, and says whether this build may update
@@ -104,9 +107,12 @@
 
     **`-ExpectSigned` alone means `on`**, because a signed release is what that
     switch is for. A signed build that is not a release — a candidate — is
-    smoked with `-ExpectSigned -Updater off`, which says so out loud. Neither
-    given, the answer is printed and not held to anything: the clean-machine
-    run starts whatever archive it was handed.
+    smoked with `-ExpectSigned -Updater off`, which says so out loud. **A
+    release packed without a signature is still a release** (0.4.10 plan row
+    102: the release statement, not the Authenticode signature, is what lets a
+    copy update itself), so it is smoked with `-Updater on` and without
+    `-ExpectSigned`. Neither given, the answer is printed and not held to
+    anything: the clean-machine run starts whatever archive it was handed.
 
 .PARAMETER Archive
     The release archive to check against the manifest its `folio.exe` carries.
@@ -171,6 +177,8 @@ if (-not $here) {
 $root = (Resolve-Path (Join-Path (Join-Path $here '..') '..')).Path
 # The archive's member list and the manifest `folio.exe` carries of it.
 . (Join-Path $here 'release-manifest.ps1')
+# How two distinguished names are compared: as names, not as strings.
+. (Join-Path $here 'signer-names.ps1')
 
 # **Every path this script was handed is made absolute here, before anything
 # reads it.** A relative path has two answers on Windows and they are allowed to
@@ -213,6 +221,17 @@ if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { throw "no folio.exe at 
 # out under `-Artifacts` first. Those are the same bytes — an entry is copied
 # out of the archive, not repacked — so the signature and the manifest read the
 # same as they will on the machine that extracts the release.
+# **The versioned release archives in `$Directory`**: `folio-<version>-windows-x64.zip`,
+# or `folio-<version>-windows-x64-unsigned.zip` for a release packed without a
+# signature (0.4.10 plan row 102, ruling R6). The copy under the stable name,
+# `folio-windows-x64.zip`, is not one of them.
+function Get-VersionedArchive {
+    param([string] $Directory)
+
+    return @(Get-ChildItem -LiteralPath $Directory -File -Filter 'folio-*-windows-x64*.zip' |
+        Where-Object { $_.Name -match '^folio-\d+\.\d+\.\d+([-+][0-9A-Za-z.]+)?-windows-x64(-unsigned)?\.zip$' })
+}
+
 function Resolve-PackageFile {
     param([string] $Path, [string] $Into)
 
@@ -302,7 +321,7 @@ else {
         $archives = @()
         $stable = Join-Path $PackageDirectory 'folio-windows-x64.zip'
         if (Test-Path -LiteralPath $PackageDirectory -PathType Container) {
-            $archives = @(Get-ChildItem -LiteralPath $PackageDirectory -File -Filter 'folio-*-windows-x64.zip')
+            $archives = @(Get-VersionedArchive -Directory $PackageDirectory)
         }
         if ($archives.Count -gt 1) {
             throw ("$PackageDirectory holds $($archives.Count) release archives — " +
@@ -413,7 +432,7 @@ function Find-ReleaseArchive {
         return $path
     }
     if (-not (Test-Path -LiteralPath $PackageDirectory -PathType Container)) { return $null }
-    $versioned = @(Get-ChildItem -LiteralPath $PackageDirectory -File -Filter 'folio-*-windows-x64.zip')
+    $versioned = @(Get-VersionedArchive -Directory $PackageDirectory)
     if ($versioned.Count -gt 1) {
         throw ("$PackageDirectory holds $($versioned.Count) release archives — " +
                "$(($versioned | ForEach-Object { $_.Name }) -join ', ') — so which one to check is not " +
@@ -490,6 +509,7 @@ Add-Type -Namespace Smoke -Name Win32 -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
 [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessageW(string name);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
 [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
@@ -591,73 +611,6 @@ if ($ExpectSigned) {
 # It is asked of the package that shipped rather than of `packaging/msix/`: the
 # file in the tree is an input, the copy in the package is what a user registers,
 # and the version injected between them proves the two are not the same bytes.
-
-# **A distinguished name is compared as a name and not as a string.**
-# `CN=Weiyi Shi, O=Weiyi Shi` and `CN=Weiyi Shi,O=Weiyi Shi` are the same name
-# written twice: the space after a separating comma is spelling and not content,
-# and which of the two a certificate authority, a Windows API and a person
-# editing XML each produce is not something this check gets to decide. Compared
-# as text they differ, and the failure sends somebody to edit a file that was
-# already correct — which is worse than not checking at all, because it teaches
-# people to distrust the check.
-#
-# So each side is cut into its relative names at the commas that separate them,
-# and only at those: a comma inside a value is written `\,` or sits inside a
-# quoted value, and neither of those separates anything. Attribute types are
-# compared without case, because `cn` and `CN` are one attribute. Values are
-# compared with it, because `CN=Weiyi Shi` and `CN=WEIYI SHI` are two things a
-# certificate authority issued on purpose and this is not the place to decide
-# they are one person. Order is kept, because the order of the relative names is
-# part of the name.
-function Split-DistinguishedName {
-    param([string] $Name)
-
-    $parts = @()
-    $current = New-Object System.Text.StringBuilder
-    $quoted = $false
-    for ($i = 0; $i -lt $Name.Length; $i++) {
-        $character = $Name[$i]
-        # A backslash spells the next character literally. It is how a comma, a
-        # plus or a quotation mark appears inside a value, and the character it
-        # protects is kept while the backslash itself is not — the two sides are
-        # then comparable however each of them chose to write it.
-        if ($character -eq '\' -and $i + 1 -lt $Name.Length) {
-            [void] $current.Append($Name[$i + 1])
-            $i++
-            continue
-        }
-        if ($character -eq '"') { $quoted = -not $quoted; continue }
-        if ($character -eq ',' -and -not $quoted) {
-            $parts += $current.ToString()
-            [void] $current.Clear()
-            continue
-        }
-        [void] $current.Append($character)
-    }
-    $parts += $current.ToString()
-
-    return @($parts | ForEach-Object {
-        $rdn = $_.Trim()
-        $equals = $rdn.IndexOf('=')
-        if ($equals -lt 0) { return $rdn }
-        '{0}={1}' -f $rdn.Substring(0, $equals).Trim().ToUpperInvariant(), $rdn.Substring($equals + 1).Trim()
-    })
-}
-
-function Test-SameDistinguishedName {
-    param([string] $Left, [string] $Right)
-
-    # Named apart from the parameters on purpose: PowerShell's variable names do
-    # not distinguish case, so a `$left` here would be the `$Left` above, and the
-    # second line would be splitting an array it had already replaced.
-    $first = Split-DistinguishedName -Name $Left
-    $second = Split-DistinguishedName -Name $Right
-    if ($first.Count -ne $second.Count) { return $false }
-    for ($i = 0; $i -lt $first.Count; $i++) {
-        if ($first[$i] -cne $second[$i]) { return $false }
-    }
-    return $true
-}
 
 if ($ExpectSigned) {
     # **That there is a package here at all was settled at the door**, for
@@ -883,9 +836,27 @@ if ($window -ne [IntPtr]::Zero) {
     [void][Smoke.Win32]::GetDpiForMonitor($monitor, 0, [ref] $monitorDpi, [ref] $y) # MDT_EFFECTIVE_DPI
 }
 
-# Shut it the way a person does, and give it the time a clean quit takes.
+# **Close it the way a person does: the window is put away, and the run stays** (0.4.10 plan
+# row 87, part 87a). `close_keeps_running` is on in a home of its own, which is this one, so
+# the last window's close hides the window and keeps the process; five seconds is far more than
+# a hide takes, and a run that ended in them is the old close.
+$putAway = $false
 if (-not $folio.HasExited -and $window -ne [IntPtr]::Zero) {
     [void][Smoke.Win32]::PostMessageW($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) # WM_CLOSE
+    $hidden = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $hidden -and [Smoke.Win32]::IsWindowVisible($window) -and -not $folio.HasExited) {
+        Start-Sleep -Milliseconds 100
+    }
+    Start-Sleep -Milliseconds 500
+    $putAway = -not $folio.HasExited -and -not [Smoke.Win32]::IsWindowVisible($window)
+}
+
+# **Then ask it to quit the way the installer and the uninstaller do** — Folio's quit from
+# outside (`bt_platform::session_end::OUTSIDE_QUIT_MESSAGE`), which is heard on a hidden window
+# as on a shown one — and give it the time a clean quit takes.
+$outsideQuit = [Smoke.Win32]::RegisterWindowMessageW('Folio.QuitFromOutside.v1')
+if (-not $folio.HasExited -and $window -ne [IntPtr]::Zero -and $outsideQuit -ne 0) {
+    [void][Smoke.Win32]::PostMessageW($window, $outsideQuit, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 $closed = $folio.WaitForExit(20000)
 
@@ -921,9 +892,11 @@ Write-Host ("dpi: window and monitor agree at {0} ({1:P0} scaling)." -f $windowD
 
 # ── 6 ────────────────────────────────────────────────────────────────────────
 
-if (-not $closed) { throw 'the window did not close when it was asked to' }
+if (-not $putAway) { throw 'the window close did not put Folio away: the window stayed up, or the run ended' }
+Write-Host 'its window close put it away, and the process stayed.'
+if (-not $closed) { throw 'Folio did not quit when asked by its quit from outside' }
 if ($folio.ExitCode -ne 0) { throw "folio exited $($folio.ExitCode)" }
-Write-Host 'it closed when asked, and exited 0.'
+Write-Host 'it quit when asked from outside, and exited 0.'
 
 # ── 7: the log an ordinary run leaves says which build left it ───────────────
 #
@@ -963,8 +936,9 @@ $second = [IntPtr]::Zero
         }
         return $true
     }, [IntPtr]::Zero) | Out-Null
-if ($second -ne [IntPtr]::Zero) {
-    [void][Smoke.Win32]::PostMessageW($second, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+# Folio's quit from outside, as gate 6 asks it: a `WM_CLOSE` would put this run away.
+if ($second -ne [IntPtr]::Zero -and $outsideQuit -ne 0) {
+    [void][Smoke.Win32]::PostMessageW($second, $outsideQuit, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 [void]$plain.WaitForExit(20000)
 if (-not $plain.HasExited) { $plain.Kill() }

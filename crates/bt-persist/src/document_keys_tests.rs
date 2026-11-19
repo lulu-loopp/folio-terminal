@@ -5,7 +5,7 @@
 //! key added without a new version is handed to every build of that version unknowingly: a
 //! dropped key comes back as its default the next time the older build writes, and a record that
 //! refuses unknown keys refuses the file. `docs/plans/DOCUMENT-KEYS.tsv` pins, for every document
-//! and version, the shape of every type a document's root reaches; this module holds the six
+//! and version, the shape of every type a document's root reaches; this module holds the seven
 //! documents this crate reads to it, and `scripts/ci/check-document-keys.ps1` holds the register
 //! to the merge base's, so a row is never edited in place.
 //!
@@ -21,7 +21,8 @@ use bt_source::{Index, ItemQuery};
 
 use crate::{
     KEYBINDINGS_SCHEMA_VERSION, PINS_SCHEMA_VERSION, PROFILES_SCHEMA_VERSION,
-    SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION, UPDATE_CHECK_SCHEMA_VERSION,
+    RELEASE_KEYS_SCHEMA_VERSION, SESSION_SCHEMA_VERSION, SETTINGS_SCHEMA_VERSION,
+    UPDATE_CHECK_SCHEMA_VERSION,
 };
 
 /// The register, as committed.
@@ -47,7 +48,7 @@ struct PinnedDocument {
     version: u32,
 }
 
-const PINNED_DOCUMENTS: [PinnedDocument; 6] = [
+const PINNED_DOCUMENTS: [PinnedDocument; 7] = [
     PinnedDocument {
         name: "session",
         root: "SessionV1",
@@ -83,6 +84,12 @@ const PINNED_DOCUMENTS: [PinnedDocument; 6] = [
         root: "UpdateCheckV1",
         constant: "UPDATE_CHECK_SCHEMA_VERSION",
         version: UPDATE_CHECK_SCHEMA_VERSION,
+    },
+    PinnedDocument {
+        name: "release-keys",
+        root: "ReleaseKeysV1",
+        constant: "RELEASE_KEYS_SCHEMA_VERSION",
+        version: RELEASE_KEYS_SCHEMA_VERSION,
     },
 ];
 
@@ -200,7 +207,7 @@ fn shapes_reached(resolver: &Resolver<'_>, root: &str) -> BTreeMap<String, Strin
 }
 
 /// RED (0.4.10 plan row 68d, D9) — **every document keeps its keys at its version**: for each of
-/// the six documents this crate reads, the types its root reaches are exactly the register's rows
+/// the seven documents this crate reads, the types its root reaches are exactly the register's rows
 /// at its current version, each shape equal to the source's, and the register names no version
 /// above it. A key added, an optional key added, a type newly reached: red until the version is
 /// bumped, its migration step added and the new version's rows written.
@@ -332,8 +339,8 @@ fn versions_passed_to_the_chain(body: &str, found: &mut BTreeSet<String>) {
 
 /// RED (0.4.10 plan row 68d, D10) — **every versioned document has its register rows**: the
 /// version constants `lib.rs` passes to `read_with_fallback`, `read_with_fallback_bytes` and
-/// `parse_document` are exactly the six documents' of this test, and the register names no
-/// document but those six and `bt-app`'s three records. A seventh document cannot land unpinned.
+/// `parse_document` are exactly the seven documents' of this test, and the register names no
+/// document but those seven and `bt-app`'s three records. An eighth document cannot land unpinned.
 ///
 /// MUTATION: a seventh `read_with_fallback` call with a version constant of its own
 /// (`plant-68d-document-without-rows.py`).
@@ -355,7 +362,7 @@ fn every_versioned_document_has_its_register_rows() {
         .collect();
     assert_eq!(
         passed, documents,
-        "the documents lib.rs reads through the fallback chain are the six this test pins; a new \
+        "the documents lib.rs reads through the fallback chain are the seven this test pins; a new \
        one needs its rows in docs/plans/DOCUMENT-KEYS.tsv and its entry in PINNED_DOCUMENTS"
     );
     let named: BTreeSet<&str> = key_register_rows().iter().map(|row| row.document).collect();
@@ -366,6 +373,6 @@ fn every_versioned_document_has_its_register_rows() {
         .collect();
     assert_eq!(
         named, expected,
-        "the register's documents are this crate's six and bt-app's three"
+        "the register's documents are this crate's seven and bt-app's three"
     );
 }

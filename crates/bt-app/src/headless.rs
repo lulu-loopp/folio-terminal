@@ -85,6 +85,8 @@ pub(crate) enum WindowEffect {
     DarkMode(bool),
     /// The window stood at an outer rectangle (`WindowHost::stand_at`).
     StoodAt(bt_platform::WindowRect),
+    /// The hidden window's normal rectangle written (`WindowHost::keep_normal_rect_while_hidden`).
+    NormalRectKept(bt_platform::WindowRect),
     /// The colour painted before the first frame, or none (`WindowHost::set_class_background`).
     ClassBackground(Option<[u8; 3]>),
     /// The keyboard and the foreground given to the window (`WindowHost::take_foreground`).
@@ -378,6 +380,8 @@ pub(crate) struct PlatformAnswers {
     pub(crate) visible: Option<bool>,
     /// `WindowHost::is_minimized`, winit's own reading: `Some(false)`.
     pub(crate) minimized: Option<bool>,
+    /// `WindowHost::is_maximized`: `false`.
+    pub(crate) maximized: bool,
     /// `WindowHost::is_iconic`: `false`.
     pub(crate) iconic: bool,
     /// `WindowHost::is_cloaked`: `false`.
@@ -388,6 +392,8 @@ pub(crate) struct PlatformAnswers {
     pub(crate) outer_rect: Option<bt_platform::WindowRect>,
     /// `WindowHost::work_area`: `None`.
     pub(crate) work_area: Option<bt_platform::WindowRect>,
+    /// `WindowHost::monitors_to_restore_on`, the one display it names: `None`, no display named.
+    pub(crate) monitor: Option<crate::RestoreMonitor>,
     /// `WindowHost::glass_at`, at every point: `GlassHere::Unknown`.
     pub(crate) glass: crate::GlassHere,
     /// `WindowHost::pointer_in_window`: `None`.
@@ -410,11 +416,13 @@ impl Default for PlatformAnswers {
         Self {
             visible: Some(true),
             minimized: Some(false),
+            maximized: false,
             iconic: false,
             cloaked: false,
             exposed: true,
             outer_rect: None,
             work_area: None,
+            monitor: None,
             glass: crate::GlassHere::Unknown,
             pointer: None,
             buttons_down: true,
@@ -458,7 +466,7 @@ impl WindowHost for HeadlessWindow {
         self.answers.get().visible
     }
     fn is_maximized(&self) -> bool {
-        false
+        self.answers.get().maximized
     }
     fn is_minimized(&self) -> Option<bool> {
         self.answers.get().minimized
@@ -515,8 +523,15 @@ impl WindowHost for HeadlessWindow {
     fn work_area(&self) -> Option<bt_platform::WindowRect> {
         self.answers.get().work_area
     }
+    fn monitors_to_restore_on(&self) -> Vec<crate::RestoreMonitor> {
+        self.answers.get().monitor.into_iter().collect()
+    }
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
         self.ledger.record(WindowEffect::StoodAt(rect));
+        Ok(())
+    }
+    fn keep_normal_rect_while_hidden(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
+        self.ledger.record(WindowEffect::NormalRectKept(rect));
         Ok(())
     }
     fn glass_at(&self, _x: i32, _y: i32) -> crate::GlassHere {
@@ -2369,6 +2384,9 @@ mod tests {
             bottom: 500,
         };
         window.stand_at(rect).expect("recorded");
+        window
+            .keep_normal_rect_while_hidden(rect)
+            .expect("recorded");
         window.set_backdrop(true).expect("recorded");
         window.set_topmost(true).expect("recorded");
         window.set_dark_mode(false).expect("recorded");
@@ -2555,6 +2573,12 @@ mod tests {
                 WindowEffect::AppIcon(1.25),
                 WindowEffect::Noted("诊断 a line, said as it is written".to_owned()),
                 WindowEffect::StoodAt(bt_platform::WindowRect {
+                    left: 10,
+                    top: 20,
+                    right: 650,
+                    bottom: 500,
+                }),
+                WindowEffect::NormalRectKept(bt_platform::WindowRect {
                     left: 10,
                     top: 20,
                     right: 650,

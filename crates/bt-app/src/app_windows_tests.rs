@@ -1406,8 +1406,11 @@ fn one_turn_asks_the_desktop_where_the_window_is_exactly_once() {
 /// ticket 62 the re-placing of a taskbar flash the lane's answer contradicts,
 /// and since 0.4.10 plan row 72 (re-review R2) the two stops that choose the
 /// window their box is owned by (`fail` and `stop_every_window_keeping_in`,
-/// pinned by `every_box_a_stop_raises_while_a_window_stands_is_owned_by_one`) —
-/// and in the arm the reading comes before the delivery that reads it.
+/// pinned by `every_box_a_stop_raises_while_a_window_stands_is_owned_by_one`), and since
+/// 0.4.10 plan row 87, part 87a, the put-away and its way back (`put_the_window_away`,
+/// `bring_the_window_back_on_the_glass`), which read the place as soon as it changes so that a
+/// delivery between turns reaches the window as it now is — and in the arm the reading comes
+/// before the delivery that reads it.
 ///
 /// MUTATION: drop `runtime.observe_window_place()` from the `AttentionSpoke`
 /// arm (the delivery would decide on the last turn's reading) — red.
@@ -1417,8 +1420,10 @@ fn a_delivery_between_turns_is_decided_on_a_fresh_reading_of_its_own() {
     assert_eq!(
         reader_names(&writers),
         vec![
+            "bring_the_window_back_on_the_glass".to_owned(),
             "dress_new_window".to_owned(),
             "fail".to_owned(),
+            "put_the_window_away".to_owned(),
             "replace_contradicted_flash".to_owned(),
             "stop_every_window_keeping_in".to_owned(),
             "turn".to_owned(),
@@ -1430,8 +1435,9 @@ fn a_delivery_between_turns_is_decided_on_a_fresh_reading_of_its_own() {
     // Four since ticket 62: re-placing a flash the taskbar lane's answer contradicts decides
     // again on a reading of its own, through the same writer. Six since 0.4.10 plan row 72
     // (re-review R2): a stop reads every window's place fresh before it chooses its box's owner,
-    // since a window left behind on another virtual desktop takes no turn.
-    assert_eq!(writers.len(), 6, "{}", writers.report(source()));
+    // since a window left behind on another virtual desktop takes no turn. Eight since 0.4.10
+    // plan row 87, part 87a: the put-away and the way back each read the place they changed.
+    assert_eq!(writers.len(), 8, "{}", writers.report(source()));
     let arm = attention_spoke_arm();
     let observed = arm
         .find("runtime.observe_window_place();")

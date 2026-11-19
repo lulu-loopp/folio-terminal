@@ -3250,6 +3250,10 @@ text_entries! {
     UpdateCardClose,
     /// The verified card's one line (C9).
     UpdateCardReady,
+    /// The verified card's sentence before Restart when the staged set is not signed by our
+    /// signing service (`update_job::SignatureNote::NotOurService`; 0.4.10 plan row 102 part 3,
+    /// R5).
+    UpdateCardMayWarn,
     /// Beside the determinate bar: received and total, in megabytes.
     UpdateCardProgress,
     /// After the reason, when the job stopped before anything installed moved.
@@ -3282,6 +3286,9 @@ text_entries! {
     ShellEndedBySystem,
     /// About > Version: no newer release is known.
     VersionUpToDate,
+    /// About > Version, after the line, when this copy is not signed by our signing service
+    /// (`update_job::SignatureNote::NotOurService`; 0.4.10 plan row 102 part 3, R4).
+    VersionNotSigned,
     /// About > Version controls and inline links.
     VersionChecking,
     VersionCheck,
@@ -3330,15 +3337,15 @@ text_entries! {
     UpdateFailedBusy,
     /// The update's folder or journal could not be written (`update_job::Stop::Journal`).
     UpdateFailedJournal,
-    /// The image is not the one the checksum document names (`update_job::Stop::Sums`).
+    /// The download is not the one the release statement lists (`update_job::Stop::Sums`).
     UpdateFailedSums,
     /// The image could not be attached (`update_job::Stop::Mount`).
     UpdateFailedMount,
     /// The new build is not the offered, signed Folio (`update_job::Stop::Identity`).
     UpdateFailedIdentity,
-    /// A signature's revocation could not be checked without the network (`update_job::Stop::Offline`;
-    /// 0.4.9 T-UPDATE-OFFLINE-IDENTITY-CARD).
-    UpdateFailedOffline,
+    /// The release statement does not vouch for the offer (`update_job::Stop::StatementRefused`;
+    /// 0.4.10 plan row 102). The Chinese is a draft (`zh pending`).
+    UpdateFailedUnvouched,
     /// The new build could not be copied off the image (`update_job::Stop::Copy`).
     UpdateFailedCopy,
     /// The rescue copy of the running build could not be made (`update_job::Stop::Clone`).
@@ -6524,6 +6531,12 @@ impl Text {
                 "Ready. Running programs will close.",
                 "准备就绪。正在运行的程序将被关闭。",
             ),
+            // The Chinese is owed (`CHINESE_PENDING`), and stands on the English until written.
+            Self::UpdateCardMayWarn => pick(
+                lang,
+                "Windows may warn about this update.",
+                "Windows may warn about this update.",
+            ),
             Self::UpdateCardProgress => pick(
                 lang,
                 "{received} / {total} MB",
@@ -6539,6 +6552,12 @@ impl Text {
             ),
             Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
             Self::VersionUpToDate => pick(lang, "Up to date", "已是最新"),
+            // The Chinese is owed (`CHINESE_PENDING`), and stands on the English until written.
+            Self::VersionNotSigned => pick(
+                lang,
+                "This copy is not signed by Microsoft's signing service.",
+                "This copy is not signed by Microsoft's signing service.",
+            ),
             Self::VersionChecking => pick(lang, "Checking…", "检查中…"),
             Self::VersionCheck => pick(lang, "Check", "检查"),
             Self::VersionUpdateAndRestart => pick(lang, "Update and restart", "更新并重启"),
@@ -6619,11 +6638,9 @@ impl Text {
             Self::UpdateFailedIdentity => {
                 pick(lang, "The update is not verified.", "更新未通过验证。")
             }
-            Self::UpdateFailedOffline => pick(
-                lang,
-                "The update could not be verified without a network.",
-                "没有网络，无法验证更新。",
-            ),
+            Self::UpdateFailedUnvouched => {
+                pick(lang, "The update is not vouched for.", "更新未经担保。")
+            }
             Self::UpdateFailedCopy => {
                 pick(lang, "The update could not be copied.", "更新无法复制。")
             }
@@ -7046,10 +7063,27 @@ impl Text {
         // — the Codex hook's refusal of a path Windows PowerShell cannot call, which
         //   `attention_codex::apply_resolved` raises only on Windows (row 69, re-review R1)
         Self::CodexHookPathBrackets,
+        // — the Ready card's sentence on a staged set not signed by our signing service, read
+        //   by `update_prepare_windows::staged_signature_note`: macOS's Prepare and resume hand
+        //   `SignatureNote::Nothing` always, so no Mac card says it (row 102 part 3)
+        Self::UpdateCardMayWarn,
     ];
 
+    /// The entries whose Chinese is owed, by column: the English stands in both until the
+    /// Chinese pass writes it (0.4.10 plan row 102 part 3).
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &{
+        use HostPlatform::{MacOs, OtherUnix, Windows};
+        use Text::{UpdateCardMayWarn, VersionNotSigned};
+        [
+            (UpdateCardMayWarn, Windows),
+            (UpdateCardMayWarn, MacOs),
+            (UpdateCardMayWarn, OtherUnix),
+            (VersionNotSigned, Windows),
+            (VersionNotSigned, MacOs),
+            (VersionNotSigned, OtherUnix),
+        ]
+    };
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -7203,6 +7237,17 @@ pub fn version_verifying_in(lang: Lang, version: &str) -> String {
     Text::VersionVerifying
         .in_lang(lang)
         .replace("{version}", version)
+}
+
+/// **Two sentences on one line** — `first`, then `second`, spaced as the language spaces them:
+/// English separates sentences with one space, and written Chinese does not
+/// ([`move_refusal_notice`]'s rule; 0.4.10 plan row 102 part 3).
+#[must_use]
+pub fn two_sentences(first: &str, second: &str) -> String {
+    match current() {
+        Lang::English => format!("{first} {second}"),
+        Lang::Chinese => format!("{first}{second}"),
+    }
 }
 
 #[must_use]

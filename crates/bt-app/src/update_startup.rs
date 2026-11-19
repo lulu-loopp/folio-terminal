@@ -4571,6 +4571,7 @@ mod tests {
                     Some(tag),
                     0,
                     Lang::English,
+                    crate::update_job::SignatureNote::Nothing,
                 );
                 assert_eq!(
                     (row.control, row.link),
@@ -4601,6 +4602,7 @@ mod tests {
                 Some(tag),
                 0,
                 Lang::English,
+                crate::update_job::SignatureNote::Nothing,
             );
             assert_eq!(
                 (row.control, row.link),
@@ -4618,6 +4620,7 @@ mod tests {
                 None,
                 0,
                 Lang::English,
+                crate::update_job::SignatureNote::Nothing,
             );
             assert_eq!(
                 row.control,

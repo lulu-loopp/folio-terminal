@@ -42,8 +42,9 @@
     The virtual machine's `.vmx` file.
 
 .PARAMETER Zip
-    The release archive to test. Defaults to the single
-    `folio-*-windows-x64.zip` under `target/release-package`.
+    The release archive to test. Defaults to the single versioned archive
+    under `target/release-package`: `folio-<version>-windows-x64.zip`, or
+    `folio-<version>-windows-x64-unsigned.zip` for one packed without `-Sign`.
 
 .PARAMETER Snapshot
     The snapshot to revert to. `clean`, and there is no reason for another.
@@ -282,15 +283,20 @@ Assert-GuestReadable -Paths $guestBound
 
 if (-not $Zip) {
     $packaged = Join-Path $root 'target\release-package'
+    # The versioned archive under either spelling (0.4.10 plan row 102, R6; the
+    # 1b+2 review's P2-8): the shape `smoke.ps1`'s `Get-VersionedArchive` reads,
+    # so the stable `folio-windows-x64.zip` beside it is never the one picked.
     $archives = @(
         if (Test-Path -LiteralPath $packaged) {
-            Get-ChildItem -LiteralPath $packaged -Filter 'folio-*-windows-x64.zip' -File
+            Get-ChildItem -LiteralPath $packaged -Filter 'folio-*-windows-x64*.zip' -File |
+                Where-Object { $_.Name -match '^folio-\d+\.\d+\.\d+([-+][0-9A-Za-z.]+)?-windows-x64(-unsigned)?\.zip$' }
         }
     )
     if ($archives.Count -ne 1) {
         throw @"
--Zip was not given and $packaged does not hold exactly one folio-*-windows-x64.zip
-(found $($archives.Count)). Build one with scripts/release/package.ps1, or name it.
+-Zip was not given and $packaged does not hold exactly one folio-<version>-windows-x64.zip
+or folio-<version>-windows-x64-unsigned.zip (found $($archives.Count)). Build one with
+scripts/release/package.ps1, or name it.
 "@
     }
     $Zip = $archives[0].FullName

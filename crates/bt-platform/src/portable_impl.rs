@@ -1227,6 +1227,20 @@ pub fn is_window_cloaked(window: NativeWindow) -> bool {
     false
 }
 
+/// **A hidden window's normal rectangle written** — on Windows, `SetWindowPlacement` with the window
+/// left hidden, for a put-away window that is maximised or minimised (0.4.10 plan row 87, part 87a,
+/// re-review P1-4).
+///
+/// Refused: only a put-away window is written through it, and a window is put away on Windows
+/// alone until 0.4.10 plan row 87, part 87c (T-TRAY-87C-MACOS) gives macOS its own road.
+pub fn set_hidden_window_normal_rect(
+    window: NativeWindow,
+    rect: crate::WindowRect,
+) -> Result<(), String> {
+    let _ = (window, rect);
+    Err(not_here("a hidden window's normal placement"))
+}
+
 /// Whether the reader can actually see this window. `NSWindowOcclusionState`;
 /// M4-6 reads it through the notification gate.
 ///

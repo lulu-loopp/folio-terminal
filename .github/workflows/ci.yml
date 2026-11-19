@@ -1374,6 +1374,13 @@ jobs:
       # process, so upstream's hundred parse snapshots are how we know the bound
       # changed nothing else.
       #
+      # **winit is the one vendored crate that is not a member** (0.4.10 plan row 87, part 87a;
+      # R11): Folio changes one arm of a Windows window procedure there, upstream's own suite
+      # is three compile-time assertions, and membership would pull its examples' and
+      # doctests' dev-dependencies into the lock and its upstream code under this workspace's
+      # clippy. See vendor/winit/CHANGES-FOLIO.md; the copy goes when a winit release carries
+      # the arm.
+      #
       # Asked of cargo, not of a grep: the manifest mentions each path twice
       # (members and [patch.crates-io]), so grepping it passes even with the
       # member deleted.
@@ -1952,6 +1959,18 @@ jobs:
       - name: package.ps1 against the release manifest
         shell: pwsh
         run: ./scripts/release/package-tests.ps1 -Binaries target/debug
+
+      # `release-statement.ps1` over a directory packed from the same build,
+      # with the check this checkout compiles (0.4.10 plan row 102, part 2):
+      # the statement it writes read back against the files, and each refusal.
+      # A signature that verifies needs a release key, which no runner holds;
+      # that half is `bt_winres::release_statement`'s own tests.
+      - name: build the release statement's check
+        run: cargo build -p bt-winres --features release-key,inflate --bin check-release-statement --locked
+
+      - name: release-statement.ps1 on a packed release
+        shell: pwsh
+        run: ./scripts/release/release-statement-tests.ps1 -Binaries target/debug -CheckBinary target/debug/check-release-statement.exe
 
       - name: install WARP
         shell: pwsh

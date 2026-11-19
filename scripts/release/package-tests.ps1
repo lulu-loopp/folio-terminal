@@ -132,7 +132,7 @@ Write-Host 'package.ps1 and smoke.ps1 -ArchiveOnly, against the release manifest
 
 $goodOutput = Join-Path $scratch 'out-good'
 $good = Invoke-Package -Output $goodOutput
-$goodArchive = @(Get-ChildItem -LiteralPath $goodOutput -File -Filter 'folio-*-windows-x64.zip' -ErrorAction SilentlyContinue)
+$goodArchive = @(Get-ChildItem -LiteralPath $goodOutput -File -Filter 'folio-*-windows-x64-unsigned.zip' -ErrorAction SilentlyContinue)
 
 # RED (U-9) — **the manifest lists every member but the two signed ones.**
 #
@@ -338,6 +338,60 @@ Test-Case 'the_archive_holds_no_psreadline_member_and_folio_exe_holds_the_module
     }
     $seen = @(Get-PsReadLineMembers -Archive $planted)
     if ($seen.Count -ne 1 -or $seen[0] -notmatch 'PSReadLine\.psd1$') { throw "the planted member was not found: $($seen -join ', ')" }
+}
+
+# RED (0.4.10 plan row 102, part 2, rulings R6 and R9) — **packed without
+# `-Sign`, the versioned archive says so in its name, the stable copy keeps its
+# own, and the two ConPTY files are checked all the same.** The name is what a
+# person installing by hand reads; the stable name is a URL that never changes;
+# and with the updater no longer asking the sidecars for Microsoft's signature,
+# packaging is the one place it is read.
+#
+# MUTATION: compose the archive's name without `-unsigned` in `package.ps1`
+# (`plant-102-2-package-signed-name`): no `-unsigned` archive is left. Put the
+# ConPTY check back under `if ($Sign)`: the run no longer says it checked them.
+Test-Case 'an_unsigned_package_names_its_archive_unsigned_and_checks_the_sidecars' {
+    if ($good.ExitCode -ne 0) { throw "package.ps1 exited $($good.ExitCode): $($good.Text)" }
+    if ($goodArchive.Count -ne 1) { throw "package.ps1 left no -unsigned archive: $(@(Get-ChildItem -LiteralPath $goodOutput -Name) -join ', ')" }
+    $name = $goodArchive[0].Name
+    if ($name -notmatch '^folio-\d+\.\d+\.\d+-windows-x64-unsigned\.zip$') { throw "the archive is called $name" }
+    $signedName = $name -replace '-unsigned\.zip$', '.zip'
+    if (Test-Path -LiteralPath (Join-Path $goodOutput $signedName)) { throw "package.ps1 also left $signedName" }
+    $stable = Join-Path $goodOutput 'folio-windows-x64.zip'
+    if (-not (Test-Path -LiteralPath $stable -PathType Leaf)) { throw 'package.ps1 left no folio-windows-x64.zip' }
+    if ((Get-FileHash -LiteralPath $stable).Hash -ne (Get-FileHash -LiteralPath $goodArchive[0].FullName).Hash) {
+        throw 'the stable copy is not the archive under another name'
+    }
+    $sums = [IO.File]::ReadAllText((Join-Path $goodOutput 'SHA256SUMS.txt'))
+    if ($sums -notmatch "(?m)^[0-9a-f]{64}  $([regex]::Escape($name))$") { throw "SHA256SUMS.txt has no line for ${name}: $sums" }
+    if ($good.Flat -notmatch 'the two ConPTY files' -or $good.Flat -notmatch '2 file\(s\) carry a valid, time-stamped signature') {
+        throw "package.ps1 did not check the two ConPTY files without -Sign: $($good.Text)"
+    }
+}
+
+# RED (0.4.10 plan row 102, part 2) — **an earlier release's statement and
+# signature are this lane's files**: `release-statement.ps1` writes them into
+# the package directory after `package.ps1` has run, so the next run empties
+# them with the rest instead of refusing the directory, and a file that is no
+# release's is still refused by its name.
+#
+# MUTATION: drop the two statement shapes from `Test-ReleasePageName`: the
+# directory holding them is refused.
+Test-Case 'package_empties_an_earlier_statement_and_still_refuses_a_stranger' {
+    $again = Join-Path $scratch 'out-again'
+    [IO.Directory]::CreateDirectory($again) | Out-Null
+    foreach ($name in @('RELEASE-STATEMENT.txt', 'RELEASE-STATEMENT.txt.sig', 'folio-0.0.1-windows-x64-unsigned.zip')) {
+        [IO.File]::WriteAllText((Join-Path $again $name), 'an earlier release')
+    }
+    $result = Invoke-Package -Output $again
+    if ($result.ExitCode -ne 0) { throw "package.ps1 refused a directory holding an earlier statement: $($result.Text)" }
+    foreach ($name in @('RELEASE-STATEMENT.txt', 'RELEASE-STATEMENT.txt.sig', 'folio-0.0.1-windows-x64-unsigned.zip')) {
+        if (Test-Path -LiteralPath (Join-Path $again $name)) { throw "package.ps1 left the earlier $name" }
+    }
+    [IO.File]::WriteAllText((Join-Path $again 'RELEASE-STATEMENT.txt.bak'), 'somebody else''s')
+    $result = Invoke-Package -Output $again
+    if ($result.ExitCode -eq 0) { throw 'package.ps1 emptied a directory holding RELEASE-STATEMENT.txt.bak' }
+    if ($result.Flat -notmatch 'RELEASE-STATEMENT\.txt\.bak') { throw "the refusal did not name the stranger: $($result.Text)" }
 }
 
 Test-Case 'package refuses a member missing from where the list says it is' {

@@ -115,6 +115,24 @@ The Apache-2.0 text is reproduced in this document under the crate listing.
 
 ---
 
+### `winit` 0.30.13, vendored and modified
+
+<https://github.com/rust-windowing/winit> — Apache License, Version 2.0.
+
+`vendor/winit/` is the crates.io 0.30.13 archive with one change by the Folio
+contributors: on Windows, the thread event-target window's procedure answers
+`WM_CLOSE` with 0 instead of handing it to `DefWindowProcW`, which destroyed the
+window and every event-loop wake after it. The one file that differs carries a
+notice at the top of the file, as section 4(b) of the Apache License requires,
+and `vendor/winit/CHANGES-FOLIO.md` indexes it.
+
+Upstream ships **no `NOTICE` file** with this crate, so there is no attribution
+notice to propagate under section 4(d). The licence text it carries is in the
+repository at `vendor/winit/LICENSE`, and the Apache-2.0 text is reproduced in
+this document under the crate listing.
+
+---
+
 ### Microsoft ConPTY sidecar — `conpty.dll` and `OpenConsole.exe`
 
 <https://github.com/microsoft/terminal> — MIT.
@@ -3664,7 +3682,7 @@ of what has to be said about a modified copy.
 
 | Licence | Packages |
 |---|---:|
-| MIT License | 477 |
+| MIT License | 478 |
 | Apache License 2.0 | 38 |
 | Unicode License v3 | 26 |
 | BSD 2-Clause "Simplified" License | 6 |
@@ -4986,8 +5004,8 @@ limitations under the License.
 
 Used by 2 package(s):
 
-- **dpi 0.1.2** — <https://github.com/rust-windowing/winit>
 - **winit 0.30.13** — <https://github.com/rust-windowing/winit>
+- **dpi 0.1.2** — <https://github.com/rust-windowing/winit>
 
 ````````text
 Apache License
@@ -9525,6 +9543,37 @@ Used by 1 package(s):
 MIT License
 
 Copyright (c) 2020 Soveu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+````````
+
+### MIT License
+
+Used by 1 package(s):
+
+- **ed25519-compact 2.6.0** — <https://github.com/jedisct1/rust-ed25519-compact>
+
+````````text
+MIT License
+
+Copyright (c) 2020-2026 Frank Denis
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

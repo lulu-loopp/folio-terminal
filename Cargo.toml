@@ -378,3 +378,4 @@ mitex = { path = "vendor/mitex" }
 mitex-parser = { path = "vendor/mitex-parser" }
 portable-pty = { path = "vendor/conpty/portable-pty" }
 vte = { path = "vendor/vte" }
+winit = { path = "vendor/winit" }

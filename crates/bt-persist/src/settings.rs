@@ -341,7 +341,15 @@ use serde::{Deserialize, Serialize};
 /// **It lands on**, which is the owner's ruling rather than a behaviour carried forward ("agent
 /// 要自动 resume, 可以有开关, 默认打开", 2026-09-18): no build before this one resumed an agent,
 /// and the row keeps the resume a choice — off, a pane comes back as its profile, as before.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 40;
+///
+/// **v41 carries `close_keeps_running`**, the switch over what closing the run's last ordinary
+/// window does (0.4.10 plan row 87, part 87a): on, the window is put away and its shells and
+/// agents keep running; off, the close ends the run, as every build before this one did.
+///
+/// **It lands on**, which is the owner's ruling (2026-11-14, R2) rather than a behaviour carried
+/// forward: the row is born now, so no reader has chosen, and a wrong "off" is the loss the row
+/// exists for (an accidental close ending every agent of the session).
+pub const SETTINGS_SCHEMA_VERSION: u32 = 41;
 
 /// The profile id a `settings.json` that has never named one is read as.
 ///
@@ -596,6 +604,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "copy_on_select": true | false,
 ///   "multiline_paste_ask": true | false,
 ///   "resume_agents": true | false,
+///   "close_keeps_running": true | false,
 ///   "update_check": true | false,
 ///   "quake_height": 20..=100,
 ///   "quake_width": 30..=100,
@@ -1138,6 +1147,15 @@ pub struct SettingsV1 {
     /// at the next start — and a restored pane comes back as its profile, as before this key.
     #[serde(default = "default_resume_agents")]
     pub resume_agents: bool,
+    /// **Whether closing the run's last ordinary window puts it away instead of ending the run**
+    /// (v41, 0.4.10 plan row 87; owner's rulings 2026-11-14, R1 and R2).
+    ///
+    /// On, the close that would end the run hides that window and keeps everything in it running
+    /// (its shells, its agents, its scrollback); a second launch or a click on one of its
+    /// notifications brings it back as it was, and only a quit ends the run. Off, the close ends
+    /// the run, as every build before this key did.
+    #[serde(default = "default_close_keeps_running")]
+    pub close_keeps_running: bool,
     /// **Whether this build asks the releases page whether a newer one exists** (v26,
     /// `docs/DESIGN.md` §7.51).
     ///
@@ -1457,6 +1475,12 @@ fn default_resume_agents() -> bool {
     true
 }
 
+/// The same door for v41's key: `false` is a reader who asked a close to end the run, which is an
+/// answer nobody gives by leaving a line out.
+fn default_close_keeps_running() -> bool {
+    true
+}
+
 impl Default for SettingsV1 {
     fn default() -> Self {
         Self {
@@ -1518,6 +1542,8 @@ impl Default for SettingsV1 {
             multiline_paste_ask: true,
             // The owner's ruling of 2026-09-18: on by default (row 195).
             resume_agents: true,
+            // The owner's ruling of 2026-11-14 (R2): on by default (row 87).
+            close_keeps_running: true,
             // A preview has no other way to say that it has been superseded.
             update_check: true,
             // Tall enough to read a command's output, short enough that the window it came down

@@ -29,7 +29,8 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::Win32::Security::WinTrust::{
     CRYPT_PROVIDER_DATA, TRUSTERROR_STEP_FINAL_POLICYPROV, TRUSTERROR_STEP_FINAL_WVTINIT,
-    WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
+    WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
+    WINTRUST_DATA_PROVIDER_FLAGS, WINTRUST_FILE_INFO, WTD_CACHE_ONLY_URL_RETRIEVAL,
     WTD_CHOICE_FILE, WTD_DISABLE_MD2_MD4, WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
     WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
@@ -220,6 +221,9 @@ pub(super) struct Engine {
         )
     )]
     stores: Vec<Store>,
+    /// Whether nothing may be retrieved over the network
+    /// ([`Policy::SystemCacheOnly`]).
+    cache_only: bool,
 }
 
 impl Engine {
@@ -228,6 +232,12 @@ impl Engine {
             Policy::System => Ok(Self {
                 handle: None,
                 stores: Vec::new(),
+                cache_only: false,
+            }),
+            Policy::SystemCacheOnly => Ok(Self {
+                handle: None,
+                stores: Vec::new(),
+                cache_only: true,
             }),
             Policy::ExclusiveRoot {
                 root,
@@ -271,6 +281,8 @@ impl Engine {
                 Ok(Self {
                     handle: Some(handle),
                     stores: vec![roots, lists],
+                    // Its own configuration already retrieves nothing.
+                    cache_only: false,
                 })
             }
         }
@@ -299,6 +311,31 @@ impl Engine {
     /// Whether this engine has a handle of its own (an exclusive-root engine).
     pub(super) const fn is_exclusive(&self) -> bool {
         self.handle.is_some()
+    }
+
+    /// **The provider flags `WinVerifyTrust` is called with**: the system's
+    /// revocation over the whole chain but the root, MD2 and MD4 refused,
+    /// and — for a cache-only engine — nothing retrieved over the network.
+    /// No `WTD_LIFETIME_SIGNING_FLAG`: the time stamp keeps a signature
+    /// valid past its certificate, and that is the point.
+    pub(super) fn provider_flags(&self) -> WINTRUST_DATA_PROVIDER_FLAGS {
+        let flags = WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT | WTD_DISABLE_MD2_MD4;
+        if self.cache_only {
+            flags | WTD_CACHE_ONLY_URL_RETRIEVAL
+        } else {
+            flags
+        }
+    }
+
+    /// **The chain flags of a chain this engine builds for a step that reads
+    /// no revocation** (the time-stamp authority's): none, or — for a
+    /// cache-only engine — no network retrieval of a missing issuer.
+    pub(super) const fn retrieval_flags(&self) -> u32 {
+        if self.cache_only {
+            CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL
+        } else {
+            0
+        }
     }
 
     /// The chain of `certificate` at `time`, valid for `usage`.
@@ -512,7 +549,7 @@ fn read_answer(status: i32, state: HANDLE) -> Result<Answer, Refusal> {
     })
 }
 
-fn win_verify_trust(path: &Path) -> Result<Answer, Refusal> {
+fn win_verify_trust(path: &Path, flags: WINTRUST_DATA_PROVIDER_FLAGS) -> Result<Answer, Refusal> {
     let file = wide(path)?;
     let mut info = WINTRUST_FILE_INFO {
         cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
@@ -529,10 +566,8 @@ fn win_verify_trust(path: &Path) -> Result<Answer, Refusal> {
             pFile: &raw mut info,
         },
         dwStateAction: WTD_STATEACTION_VERIFY,
-        // The system's revocation, the whole chain but the root; MD2 and MD4
-        // refused; and no `WTD_LIFETIME_SIGNING_FLAG`: the time stamp keeps a
-        // signature valid past its certificate, and that is the point.
-        dwProvFlags: WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT | WTD_DISABLE_MD2_MD4,
+        // `Engine::provider_flags`.
+        dwProvFlags: flags,
         ..Default::default()
     };
     let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
@@ -591,7 +626,7 @@ fn subject(leaf: &Cert) -> String {
 }
 
 fn signature_with(path: &Path, engine: &Engine) -> Result<Signature, Refusal> {
-    let answer = win_verify_trust(path)?;
+    let answer = win_verify_trust(path, engine.provider_flags())?;
 
     // Step 1. Under an exclusive root, `WinVerifyTrust`'s one expected refusal
     // is the policy's verdict on a chain that ends in a root Windows does not
@@ -640,7 +675,13 @@ fn signature_with(path: &Path, engine: &Engine) -> Result<Signature, Refusal> {
     // SAFETY: allocated by CryptoAPI and freed once.
     unsafe { CryptMemFree(Some(context.cast_const().cast())) };
     let authority_chain = engine
-        .chain(&authority, stamped_at, &authority_store, TIME_STAMPING, 0)
+        .chain(
+            &authority,
+            stamped_at,
+            &authority_store,
+            TIME_STAMPING,
+            engine.retrieval_flags(),
+        )
         .map_err(|code| Refusal::TimestampInvalid { code })?;
     let authority_error =
         authority_chain.policy_error(CERT_CHAIN_POLICY_BASE, CERT_CHAIN_POLICY_FLAGS(0));

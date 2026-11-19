@@ -686,31 +686,52 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
 
 #### 前提
 
-1. 两个候选版(A 和 B)都已签名、公证、带更新能力(`FOLIO_UPDATER=on`);A 还必须是更新
+1. 两个候选版(A 和 B)都带更新能力(`FOLIO_UPDATER=on`;macOS 的两个还须签名、公证;
+   Windows 的可以是 `-unsigned`,更新不看 Authenticode,行 102);A 还必须是更新
    卡已打开的构建(`OFFERS_ENABLED_WINDOWS` 自 U-31 起、`OFFERS_ENABLED_MACOS` 自 U-32 起)——`--update-feed`
-   只换来源,不打开卡片。B 的版本号高于 A,且 B 的发布清单里 `min_updater` 不高于 A 的版本
-   (否则 Prepare 拒绝,卡片只说 *The update is not verified.*,见 U-31 D-13)。B 不必发布到 GitHub。
+   只换来源,不打开卡片。B 的版本号高于 A,且是演练版本号(第三段不小于 1000,见前提 3);
+   B 的发布清单里 `min_updater` 不高于 A 的版本(它就是声明的 `min_from`;否则 Prepare 在大下载
+   之前以 `Stop::TooOld` 停下)。B 不必发布到 GitHub,它的声明也从不上传。
 2. A 已由 `install-candidate.ps1` 装进客户机的 `C:\folio-vm\folio\` 并打了快照;每一行都从这个
    快照开始。
 3. 后继版本 B 经命令行参数 `--update-feed <file-URL>` 注入(U-30b)。带这个参数启动的那个
-   进程,检查新版时读本地文件夹里的 `releases.json`,按「更新」时从同一文件夹拷贝两个文件,
-   不连 github.com;之后的校验和、归档读取与签名者检查一概不变——B 必须与 A 同一签名者签名,
-   测试根签的包在 Prepare 的身份检查被拒(`Stop::Identity`)。参数不落盘:不带它重启就回到
-   github.com。宿主端步骤:
+   进程,检查新版时读本地文件夹里的 `releases.json`,按「更新」时从同一文件夹拷贝发布声明、
+   它的签名和声明列出的归档,不连 github.com;之后的声明验证、归档读取与成员核对一概不变——
+   声明必须由 A 内置的密钥签名:演练与真发布一样由持钥人用 **live 密钥**签,任何二进制里都
+   没有换密钥的口子(行 104 裁决);归档的每个成员都必须是声明列出的(否则 `Stop::Identity`)。
+   Authenticode 签名不决定任何一步。参数不落盘:不带它重启就回到 github.com。宿主端步骤:
    1. **构建 B**(版本号高于 A):按 `docs/WINDOWS-CI-RELEASE.md` 第 1–3 步——
       `gh workflow run build-release.yml --ref <分支> -f ref=<B 的完整提交> -f updater=true`;
       在所有者本机用 `scripts/release/fetch-ci-build.ps1 … -Apply` 取回,再
       `scripts/release/package.ps1 -Binary target/ci-signing -Sign`(内部调用 `sign.ps1`,
-      用所有者本机的签名会话)。产物在 `target/release-package/`:
-      `folio-<B>-windows-x64.zip` 和 `SHA256SUMS.txt`。
-   2. **建源文件夹**:宿主上新建 `feed\`,放入上面两个文件,再写 `feed\releases.json`
-      (GitHub 发布列表的形状,以下字段缺一不可;`size` 是文件字节数;`draft: true` 的条目
-      不算):
+      用所有者本机的签名会话;不签时不带 `-Sign`)。产物在 `target/release-package/`:
+      `folio-<B>-windows-x64.zip`,或不签时的 `folio-<B>-windows-x64-unsigned.zip`。
+      **B 的版本号是演练版本号**:第三段不小于 1000(例如 A 是 0.4.10 时 B 取 0.4.1010)。
+      声明的语法只认三段数字和 `v<版本>`、`v<版本>-preview` 两种标签,写不进「rehearsal」
+      这样的词,所以用号码来标:没有哪个发布会用这样的号,演练声明就不会被当成发布的声明;
+      `make-feed.ps1` 拒绝更小的号。B 的检出里还要有 `check-release-statement`(`cargo build
+      --release --locked -p bt-winres --features release-key,inflate --bin check-release-statement`,
+      或用 `-CheckBinary` 指给它)。
+   2. **建源文件夹**:用 B 的检出里的 `scripts/release/cleanvm/updater/make-feed.ps1`,它用同一
+      检出的 `release-statement.ps1` 与 `Cargo.toml`,与真发布写声明是同一条路:
+
+      ```text
+      pwsh -File <B 的检出>/scripts/release/cleanvm/updater/make-feed.ps1 -Out <演练文件夹>/feed-b [-Image <Folio-<B>-macos-arm64.dmg>] [-CheckBinary <check-release-statement.exe>]
+      ```
+
+      它把归档(给了 `-Image` 时还有 dmg)拷进这个新文件夹,由 `release-statement.ps1` 写出
+      `RELEASE-STATEMENT.txt` 并打印签名命令;**持钥人用 live 密钥运行那条 `openssl pkeyutl
+      -sign` 命令**,脚本等 `RELEASE-STATEMENT.txt.sig` 出现(或用 `-Signature <文件>` 直接给),
+      再用 `check-release-statement verify` 按更新器的读法核对整个文件夹,最后写
+      `releases.json`:在声明的标签下列三个资产——声明列出的归档、声明、签名。给了 `-Image`
+      时声明陈述两半,dmg 核对过后从 Windows 源里删掉(Mac 的源由 `mac/setup.sh` 用同一份声明
+      做)。`releases.json` 的形状(GitHub 发布列表的形状;`size` 是文件字节数;`draft: true`
+      的条目不算):
 
       ```json
       [
         {
-          "tag_name": "v<B>",
+          "tag_name": "v<B>-preview",
           "name": "Folio <B>",
           "draft": false,
           "prerelease": false,
@@ -718,13 +739,24 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
             { "name": "folio-<B>-windows-x64.zip",
               "browser_download_url": "file:///C:/feed/folio-<B>-windows-x64.zip",
               "size": 12345678 },
-            { "name": "SHA256SUMS.txt",
-              "browser_download_url": "file:///C:/feed/SHA256SUMS.txt",
-              "size": 1234 }
+            { "name": "RELEASE-STATEMENT.txt",
+              "browser_download_url": "file:///C:/feed/RELEASE-STATEMENT.txt",
+              "size": 1234 },
+            { "name": "RELEASE-STATEMENT.txt.sig",
+              "browser_download_url": "file:///C:/feed/RELEASE-STATEMENT.txt.sig",
+              "size": 64 }
           ]
         }
       ]
       ```
+
+      **演练声明只放在演练文件夹里,只用于这一次运行**:从不上传;最后一行跑完,
+      `make-feed.ps1 -Out <feed 文件夹> -Remove` 删掉声明和签名(Mac 上由 `teardown.sh` 删,
+      `in/` 与 `feed/` 里的都删),客户机里的那份随每行回滚的快照一起消失。组好声明之后任何一步
+      失败(等签名超时、核对被拒),`make-feed.ps1` 当场删掉声明和签名,报错里写明 `-Remove`:
+      超时之后才写出来的签名用它删;重做时换一个新文件夹。**剩下的风险**:演练声明、它的签名和
+      B 的包若一起泄露,有人可以劝用户带 `--update-feed` 指向这几个文件启动 0.4.10 及以后的
+      Folio,装上 B;挡住它的只有「从不上传、跑完即删」,最坏时撤换 live 密钥。
    3. **拷进客户机** `C:\feed\`:`run-row.ps1 -Feed <宿主上的 feed 文件夹>` 每一行都逐个文件拷入。
    4. **带参数启动 A**:`guest/keys.ps1` 的第一步 `launchfeed` 以
       `C:\folio-vm\folio\folio.exe --update-feed file:///C:/feed/` 启动它。
@@ -737,9 +769,12 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
    也不需要:下载在 Prepare 就完成了。**一次 `--update-feed` 运行之后,`update-check.json` 记住了
    源的答复**:此后 24 小时内的普通启动仍会提示 v<B>,按下去去问 github.com(U-31 D-10)。
 
-   macOS 同理:资产是 `Folio-<B>-macos-arm64.dmg` 和 `SHA256SUMS-macos.txt`,由
-   `mac/setup.sh` 放进演练文件夹的 `feed/` 并写好 `releases.json`,URL 形如
-   `file://<演练文件夹>/feed/Folio-<B>-macos-arm64.dmg`。
+   macOS 同理:资产是 `Folio-<B>-macos-arm64.dmg`、声明和它的签名,声明就是
+   `make-feed.ps1 -Image` 陈述两半的那一份。三个文件先 `scp` 到 Mac 上演练文件夹的 `in/`;
+   `mac/setup.sh` 只认 `in/RELEASE-STATEMENT.txt` 与 `in/RELEASE-STATEMENT.txt.sig`(`teardown.sh`
+   删的就是这两个),先核对 dmg 与声明的 `macos-arm64` 行(名字、大小、SHA-256)、声明的版本
+   和补丁号不小于 1000,再只把这三个文件放进演练文件夹的 `feed/`,在声明的标签下写好
+   `releases.json`,URL 形如 `file://<演练文件夹>/feed/Folio-<B>-macos-arm64.dmg`。
 
 #### Windows 步骤(W1–W15)
 
@@ -844,8 +879,10 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
 
 **前提。**
 
-1. A 与 B 的 dmg、B 的 `SHA256SUMS-macos.txt` 已在 Mac 上(文件名必须是
-   `Folio-<版本>-macos-arm64.dmg`,版本从文件名读);A 已签名、公证、`spctl` 接受。
+1. A 与 B 的 dmg、B 的声明 `RELEASE-STATEMENT.txt` 与签名 `RELEASE-STATEMENT.txt.sig`
+   (宿主上 `make-feed.ps1 -Image` 做出并核对过的)已拷到 Mac 上演练文件夹的 `in/`(dmg 的
+   文件名必须是 `Folio-<版本>-macos-arm64.dmg`,版本从文件名读;声明与签名用这两个原名);
+   A 已签名、公证、`spctl` 接受。
 2. 控制台会话**已登录且未锁屏**,演练期间没人用这台 Mac:按键和截图都作用在真屏幕上;
    锁屏会让每一行停在第一次按键(「not frontmost; nothing sent」)。
 3. 没有演练文件夹以外的 Folio 在跑。每个脚本自己查,查到就以退出码 3 停下;请人退出它,
@@ -861,7 +898,8 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
 | `app/Folio.app` | 安装;它的 home H 是 `app/.Folio.app.folio-update` |
 | `H/journal.json` | 日志(不是 `H/<txn>/journal.json`) |
 | `H/<txn>/{stage,rescue,owner,health-<nonce>,mnt}` | 一个事务的文件 |
-| `feed/` | B 的 dmg、sums 文件与 `releases.json` |
+| `in/` | 从宿主 `scp` 来的 A、B 的 dmg、声明与签名(声明与签名由 `teardown.sh` 删掉) |
+| `feed/` | B 的 dmg、声明、签名与 `releases.json`(声明与签名由 `teardown.sh` 删掉) |
 | `versions` | A、B 的版本(setup 写,row 读) |
 | `data-before/` | 数据文件夹的备份(`Folio/`,或没有时的 `ABSENT`) |
 | `evidence/` | `setup.txt`、`<行>.log`、`<行>/…`、`teardown.txt` |
@@ -871,7 +909,9 @@ ssh 字符串里不写变量,行名照字面替换):
 
 ```text
 scp scripts/release/cleanvm/updater/mac/setup.sh scripts/release/cleanvm/updater/mac/row.sh scripts/release/cleanvm/updater/mac/teardown.sh <mac>:<dir>/
-ssh <mac> 'bash <dir>/setup.sh <A.dmg> <B.dmg> <B 的 SHA256SUMS-macos.txt>'          # 以 SETUP DONE 结束
+ssh <mac> 'mkdir -p ~/folio-rehearsal/in'
+scp <A.dmg> <B.dmg> <feed 文件夹>/RELEASE-STATEMENT.txt <feed 文件夹>/RELEASE-STATEMENT.txt.sig <mac>:folio-rehearsal/in/
+ssh <mac> 'bash <dir>/setup.sh ~/folio-rehearsal/in/<A.dmg> ~/folio-rehearsal/in/<B.dmg> ~/folio-rehearsal/in/RELEASE-STATEMENT.txt ~/folio-rehearsal/in/RELEASE-STATEMENT.txt.sig'   # 以 SETUP DONE 结束
 ssh <mac> 'nohup bash <dir>/row.sh <行> > ~/folio-rehearsal/evidence/<行>.log 2>&1 < /dev/null &'
 ssh <mac> 'tail -n 4 ~/folio-rehearsal/evidence/<行>.log'                              # 末行 ROW <行> END (<结果>)
 ssh <mac> 'bash <dir>/teardown.sh'                                                      # 以 TEARDOWN DONE 结束
@@ -1497,7 +1537,7 @@ Error: Cannot read the virtual machine configuration file
 | 已验证:`new-vm.ps1` 的幂等拒绝与 `-Stage install` 的前置检查 | 本机跑过(用临时目录) |
 | **已验证**:两台机的 `clean` 快照已回到出厂 `Restricted`(五个作用域全 `Undefined`) | 2026-08-30 逐台实测,§3.4d |
 | **已验证**:加密机上 `deleteSnapshot` 报「Cannot read the virtual machine configuration file」并退 `-1`,而快照确实删掉了 | 同上;判据用 `listSnapshots` |
-| §4.4 更新器:后继版本注入口 | **已有(U-30b)** —— `--update-feed <file-URL>`,只在带它启动的进程里生效,校验和与签名者检查不变;见 §4.4 前提 3。Windows 的 `OFFERS_ENABLED_WINDOWS` 已由 U-31 打开;macOS 的 `OFFERS_ENABLED_MACOS` 已由 U-32 打开;U-31、RC-046 在真虚机上用过 |
+| §4.4 更新器:后继版本注入口 | **已有(U-30b)** —— `--update-feed <file-URL>`,只在带它启动的进程里生效,发布声明的验证不变(演练声明由 `make-feed.ps1` 照真发布的路做,live 密钥签);见 §4.4 前提 3。Windows 的 `OFFERS_ENABLED_WINDOWS` 已由 U-31 打开;macOS 的 `OFFERS_ENABLED_MACOS` 已由 U-32 打开;U-31、RC-046 在真虚机上用过 |
 | §4.4 更新器:macOS 断电验收虚机 | **不存在** —— Mac mini 无可处置的 macOS 客户机(见 §Clean-machine coverage 的数字);Mac mini 本身不做断电。U-32 以 option B 在所有者账号里用 `SIGSTOP` + `kill -9` 跑了 M 表(§4.4「macOS 步骤」),这比断电弱:页缓存还在,缺 flush 看不出来 |
 | §4.4 更新器:`updater/` 下的仓库版驱动 | **部分已验证** —— 2026-09-29 由 U-31 / U-32 的演练脚本搬入(旧的 `hard-reset-in-vm.ps1`、`in-guest-updater.ps1` 删除);`-WhatIf` 与 `scripts/release/cleanvm-tests.ps1` 跑通;仓库版尚未在真虚机和 Mac 上整轮跑过,下一次演练验 |
 

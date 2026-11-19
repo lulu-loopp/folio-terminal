@@ -37,8 +37,10 @@
     up outside its folder on this account.
 
 .PARAMETER Archive
-    The release archive, `folio-<version>-windows-x64.zip`, as `package.ps1`
-    wrote it or the release page has it.
+    The release archive, `folio-<version>-windows-x64.zip` — or
+    `folio-<version>-windows-x64-unsigned.zip` for a release packed without a
+    signature (0.4.10 plan row 102, ruling R6) — as `package.ps1` wrote it or
+    the release page has it.
 
 .PARAMETER Shell
     The PowerShell that runs scoop: `powershell` (Windows PowerShell 5.1, the
@@ -63,8 +65,8 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -Scope Global -Er
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Archive = (Resolve-Path -LiteralPath $Archive).Path
 $name = Split-Path -Leaf $Archive
-if ($name -notmatch '^folio-(\d+\.\d+\.\d+)-windows-x64\.zip$') {
-    throw "$name is not named as a release archive (folio-<version>-windows-x64.zip)"
+if ($name -notmatch '^folio-(\d+\.\d+\.\d+)-windows-x64(-unsigned)?\.zip$') {
+    throw "$name is not named as a release archive (folio-<version>-windows-x64[-unsigned].zip)"
 }
 $version = $Matches[1]
 

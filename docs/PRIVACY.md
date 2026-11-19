@@ -43,8 +43,9 @@ cancelled after each check, so nothing of the request is cached between them.
 
 A command-line flag can point the update check at a local folder instead
 (`--update-feed <file-URL>`, for rehearsing an update before a release); that
-start asks GitHub nothing, and what the folder delivers must still be signed by
-the same signer.
+start asks GitHub nothing, and what the folder delivers must still be vouched
+for by a release statement signed with a release key built into the Folio you
+are running.
 
 ### Updating (Windows)
 
@@ -59,9 +60,10 @@ a **Copy** button, and the manager does the updating.
 
 | | |
 | --- | --- |
-| **What a press downloads** | Two files of the offered release, nothing else: the Windows archive (`folio-<version>-windows-x64.zip`) and its checksum list (`SHA256SUMS.txt`). |
+| **What a press downloads** | Three files of the offered release, nothing else: its release statement (`RELEASE-STATEMENT.txt`), the statement's signature (`RELEASE-STATEMENT.txt.sig`), and the Windows archive the statement names (`folio-<version>-windows-x64.zip`, or `folio-<version>-windows-x64-unsigned.zip` for a release packed without a Windows signature). |
 | **From where** | `https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/<file>`, named by the offered version and never by "latest"; GitHub redirects to its own download host. The same WinHTTP stack and the same one header, `User-Agent: Folio`, as the check. |
-| **What is checked** | The archive against its checksum, and every signed file in it against the signer of the Folio you are running. Anything else is refused and nothing is changed. |
+| **What is checked** | The statement's signature against the release keys built into the Folio you are running, and the archive and every file in it against the statement's SHA-256 and size. Anything else is refused and nothing is changed. |
+| **The Windows signature** | Folio also has Windows read the signature of a `folio.exe`, only to say whether Windows may warn: the new one's once it is ready, and again at each launch that finds it ready, and the running one's each time you open Settings > About. The launch and About readings check revocation against what this machine already holds and ask no server; only the reading right after **Update** may have Windows ask the certificate's issuer whether it is revoked, as it does for any signed program. |
 | **Where it goes** | A `.folio-update` folder inside Folio's own folder, beside `folio.exe`: the download, the new files, a copy of the running version to fall back on, the update's journal and its log. It goes with the folder. |
 | **What is written outside Folio's folder** | While the new files are being swapped in, one value, `FolioUpdate-<id>`, under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`: it finishes or reverses, at your next logon, an update cut off by a power loss. The update removes it when it ends, and `folio.exe --uninstall-cleanup` removes one left behind for this copy. If the Explorer menu's package is registered, it is registered again at the new version (the Explorer row's own undo, below, covers it). |
 | **How to switch it off** | Switch the automatic check off (above): Folio then asks nothing on its own, so no new card comes unless you press **Check**. |
@@ -355,7 +357,7 @@ Folio 向 GitHub 询问是否存在更新的版本。检查本身对答案只做
 
 GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 不额外附加任何内容。请求通过操作系统自身的 HTTP 栈发出——Windows 上是 WinHTTP，macOS 上是 `NSURLSession`——因此遵循本机已有的代理设置、证书存储和吊销检查，Folio 不携带自己的 HTTP 客户端和证书。macOS 上使用临时会话，每次检查后即销毁，请求之间不缓存任何内容。
 
-命令行参数 `--update-feed <file-URL>` 可将更新检查指向本地文件夹，用于发版前的演练；该次启动不向 GitHub 发出任何请求，且文件夹提供的内容仍须由同一签名者签名。
+命令行参数 `--update-feed <file-URL>` 可将更新检查指向本地文件夹，用于发版前的演练；该次启动不向 GitHub 发出任何请求，且文件夹提供的内容仍须有一份发布声明为其担保，该声明须由当前 Folio 内置的发布密钥签名。
 
 ### 更新（Windows）
 
@@ -363,9 +365,10 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 
 | | |
 | --- | --- |
-| **按下后下载的内容** | 所选版本的两个文件：Windows 压缩包（`folio-<version>-windows-x64.zip`）和校验列表（`SHA256SUMS.txt`）。 |
+| **按下后下载的内容** | 所选版本的三个文件：发布声明（`RELEASE-STATEMENT.txt`）、声明的签名（`RELEASE-STATEMENT.txt.sig`），以及声明中列出的 Windows 压缩包（`folio-<version>-windows-x64.zip`；未做 Windows 签名的版本为 `folio-<version>-windows-x64-unsigned.zip`）。 |
 | **来源** | `https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/<file>`，按所选版本命名，不使用 "latest"；GitHub 重定向到自己的下载主机。HTTP 栈和请求头与更新检查相同：WinHTTP、`User-Agent: Folio`。 |
-| **验证内容** | 压缩包与校验值比对，包内每个已签名文件与当前 Folio 的签名者比对。不符则拒绝，不改动任何文件。 |
+| **验证内容** | 用当前 Folio 内置的发布密钥验证声明的签名，再将压缩包及其中每个文件与声明中的 SHA-256 和大小比对。不符则拒绝，不改动任何文件。 |
+| **Windows 签名** | Folio 还会让 Windows 读取 `folio.exe` 的签名，仅用于说明 Windows 是否可能发出警告：新版就绪时读一次，此后每次启动发现它已就绪时再读；每次打开设置 > 关于时读取正在运行的那份。启动时和关于页的读取只依据本机已有的记录检查吊销，不询问任何服务器；只有按下 **Update** 之后的那次读取，Windows 可能会向证书颁发者查询证书是否已吊销，与它对待任何已签名程序一样。 |
 | **存放位置** | Folio 自身目录内的 `.folio-update` 文件夹，与 `folio.exe` 同级：下载文件、新版文件、用于回退的旧版副本、更新日志与记录。随目录一起走。 |
 | **目录外写入** | 替换文件期间，在 `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` 下写入一个 `FolioUpdate-<id>` 值：若更新被断电中断，下次登录时由它完成或回滚。更新结束时删除；`folio.exe --uninstall-cleanup` 可清理残留值。若已注册资源管理器菜单的包，则以新版本重新注册（撤销方式见下文资源管理器行）。 |
 | **如何关闭** | 关闭自动检查（上文）：Folio 不再主动询问，因此不会弹出新卡片，除非你按下**检查**。 |

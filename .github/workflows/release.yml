@@ -20,10 +20,18 @@ name: Release
 # still worked was to tag a release and watch — which is how it stayed broken
 # across three tags. A manual run builds, gates, packs and starts the executable
 # exactly as a tag does.
+#
+# **And one thing runs after a release is published, and only then**: the job
+# at the end, `published`, which reads the page back and checks it against the
+# release statement on it (0.4.10 plan row 102, ruling R10). It reads; it holds
+# no secret and writes nothing. A published release, or a manual run with
+# `verify_published` and the tag, starts it and nothing else.
 on:
   push:
     tags:
       - "v*"
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -32,8 +40,16 @@ on:
           checked against the manifest exactly as a real tag is, which is how a
           tag that would be refused is found out about before it is pushed. Left
           empty, nothing is claimed and what is built is the branch as it stands.
+          With verify_published, the published release to check.
         required: false
         default: ""
+      verify_published:
+        description: >
+          Build nothing: check the release published under `tag` against its
+          release statement, as the run after every publication does.
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -44,6 +60,8 @@ env:
 
 jobs:
   archive:
+    # Not after a publication: see `published`, at the end.
+    if: github.event_name != 'release' && !inputs.verify_published
     runs-on: windows-2025
     timeout-minutes: 90
     # No `contents: write` anywhere in this file. This job files nothing, uploads
@@ -163,10 +181,12 @@ jobs:
           path: target/smoke
           if-no-files-found: warn
 
-      # And that is the end of it. The release itself — the tag's page, its notes
-      # and the seven signed assets on it — is made by hand from the machine that
-      # signed them, with `gh release create`. `docs/RELEASING.md` has the
-      # command. Nothing above this line is part of it.
+      # And that is the end of it. The release itself — the tag's page, its notes,
+      # the assets and the release statement that vouches for them — is made by
+      # hand from the machine that packed them, with `gh release create`, after
+      # `release-statement.ps1` has checked the directory against the signed
+      # statement. `docs/RELEASING.md` has the commands. Nothing above this line
+      # is part of it; `published`, at the end of this file, reads it back.
 
   # ── the macOS lane ─────────────────────────────────────────────────────────
   #
@@ -198,6 +218,9 @@ jobs:
   # where the sequence and the flags are written down, and the names of the
   # secrets below are fixed in the first of those.
   macos:
+    # Not after a publication either; `macos-artifact` needs this job, so it
+    # is skipped with it.
+    if: github.event_name != 'release' && !inputs.verify_published
     runs-on: macos-14
     timeout-minutes: 90
     # **What the job after this one is allowed to know.** `VERSION` and
@@ -754,3 +777,88 @@ jobs:
           if [ -d "$mount" ]; then
             hdiutil detach "$mount" -quiet || hdiutil detach "$mount" -force || true
           fi
+
+  # ── after publication: the page, against its own statement ────────────────
+  #
+  # **What a copy of Folio believes about an update is the release statement**
+  # (0.4.10 plan row 102, T-UPDATES-TRUST-OUR-OWN-KEY): `RELEASE-STATEMENT.txt`
+  # and its Ed25519 signature, published beside the assets, name each asset's
+  # SHA-256 and size and every member of the Windows archive. The machine that
+  # made the release checked its package directory against the signed statement
+  # before the upload (`release-statement.ps1 -Signature`, ruling R10); this
+  # checks what the page actually holds, which is what every updater reads.
+  #
+  # **It runs on a published release, or by hand with `verify_published` and
+  # the tag**, and does nothing else: no build of the product, no artifact, no
+  # write anywhere. The check is `check-release-statement`, compiled here from
+  # *the tag's* source, so it is the grammar and the embedded keys of the
+  # release being checked and not of whatever `main` says today. It refuses a
+  # signature that does not verify with a key that source embeds, a statement
+  # for another tag, an asset whose bytes differ, or an archive whose members
+  # are not the statement's — red here is a published release to take down.
+  #
+  # **No secret.** `contents: read`, and the run's own token for `gh release
+  # download`, which reads what a stranger can read.
+  published:
+    if: github.event_name == 'release' || inputs.verify_published
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      FOLIO_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - name: a tag to check
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:FOLIO_TAG)) {
+            throw 'verify_published checks a published release: give its tag'
+          }
+          Write-Host "checking the release published under $env:FOLIO_TAG"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.FOLIO_TAG }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          cache: false
+
+      - name: the check, from the tag's own source
+        run: cargo build --release --locked -p bt-winres --features release-key,inflate --bin check-release-statement
+
+      # The statement first, because it is what names the assets: an asset the
+      # page carries and the statement does not list is not one an updater
+      # reads (the copy under the stable name, the checksum files, the bill of
+      # materials), and one it lists and the page lacks fails the download.
+      - name: the statement, its signature and every asset it lists, from the page
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $into = 'published'
+          gh release download $env:FOLIO_TAG --repo $env:GITHUB_REPOSITORY --dir $into `
+            --pattern RELEASE-STATEMENT.txt --pattern RELEASE-STATEMENT.txt.sig
+          if ($LASTEXITCODE -ne 0) { throw "the page of $env:FOLIO_TAG has no release statement and signature to download" }
+          $lines = [IO.File]::ReadAllText((Join-Path $into 'RELEASE-STATEMENT.txt')) -split "`n"
+          $at = [Array]::FindIndex($lines, [Predicate[string]] { param($line) $line -cmatch '^assets \d+$' })
+          if ($at -lt 0) { throw 'the statement has no assets line' }
+          $count = [int]($lines[$at] -split ' ')[1]
+          # One line after another, `count` of them: a range would count down
+          # over `assets 0` and read that line itself. The name goes to gh as a
+          # glob, so its glob characters are each put in a class of their own
+          # and match only themselves (the 1b+2 review's N15).
+          for ($i = 1; $i -le $count; $i++) {
+            $name = ($lines[$at + $i] -split ' ')[3]
+            $pattern = [regex]::Replace($name, '[\[*?]', { param($found) "[$($found.Value)]" })
+            Write-Host "downloading $name"
+            gh release download $env:FOLIO_TAG --repo $env:GITHUB_REPOSITORY --dir $into --pattern "$pattern"
+            if ($LASTEXITCODE -ne 0) { throw "the statement lists $name and the page does not serve it" }
+          }
+
+      - name: the published release is the one its statement signs
+        shell: pwsh
+        run: >
+          ./scripts/release/release-statement.ps1 -PackageDirectory published -Tag $env:FOLIO_TAG
+          -Signature published/RELEASE-STATEMENT.txt.sig
+          -CheckBinary target/release/check-release-statement.exe

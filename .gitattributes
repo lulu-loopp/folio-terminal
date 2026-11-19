@@ -52,6 +52,12 @@
 # grammar that no longer loads.
 *.packdump binary
 
+# The release statement fixtures (0.4.10 plan row 102): each `.sig` is a raw 64-byte Ed25519
+# signature over the `.txt` beside it, byte for byte, and the `.txt` is the signed message, so
+# both must reach every checkout unchanged - the statement LF only, the signature untouched.
+crates/bt-winres/fixtures/release-key/*.sig binary
+crates/bt-winres/fixtures/release-key/*.txt text eol=lf
+
 # Batch files are read by `cmd.exe`, which takes CRLF as their line ending: it
 # reads a batch file a line at a time and finds its place again by offset, and
 # in a file of LF-only lines it loses that place — on the 0.4.7 clean VM the

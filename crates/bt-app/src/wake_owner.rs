@@ -235,6 +235,88 @@ impl WakeOwner {
         }
     }
 
+    /// **Whether this clock exists to draw a picture** (0.4.10 plan row 87, part 87a, gate 2): a
+    /// caret's blink, a motion's next frame, a card's settle or fade, a hover's intent — a clock a
+    /// window off the glass has no reason to wake for, because what it would advance is drawn and
+    /// nobody can see it. `Runtime::turn`'s fold books none of them for a hidden window
+    /// ([`unbook_the_pictures`]); the turn that brings the window back books them again from the
+    /// state they stand in, which is where each of them is computed every turn anyway.
+    ///
+    /// The others are state: a shell's resize and its burst, a synchronized update's timeout, a
+    /// standing credential, a paste owed, a page's teardown, a document's save, a watch, the update
+    /// check, the title (read off the window by the taskbar's own list as well as drawn), and every
+    /// application clock — kept, so that a put-away run keeps doing its work.
+    pub(crate) const fn draws_a_picture(self) -> bool {
+        match self {
+            Self::ImeCursor
+            | Self::ShellCaret
+            | Self::TabPress
+            | Self::RenameCaret
+            | Self::StripAnimation
+            | Self::Tooltip
+            | Self::KeyHint
+            | Self::CardsHint
+            | Self::Toast
+            | Self::CommandFlash
+            | Self::CommandRails
+            | Self::TerminalThumbs
+            | Self::LayoutPeek
+            | Self::FilePeek
+            | Self::FilePeekCloseGrace
+            | Self::FilePeekDwell
+            | Self::Float
+            | Self::RevealedFoot
+            | Self::WebZoomAcknowledgement
+            | Self::WebDialogAcknowledgement
+            | Self::PreviewSaveNotice
+            | Self::PreviewRefusal
+            | Self::Chevrons
+            | Self::PaneMenu
+            | Self::TerminalMenu
+            | Self::TabMenu
+            | Self::DragSpring
+            | Self::DragAutoScroll
+            | Self::HyperlinkHover
+            | Self::PeekHover
+            | Self::FormulaTools
+            | Self::FormulaToggle
+            | Self::FormulaCopyAcknowledgement
+            | Self::PreviewResample
+            | Self::AboutLastChecked
+            | Self::RefusedFrame => true,
+            Self::StartupPoll
+            | Self::WebTeardown
+            | Self::PtyResize
+            | Self::ResizeFinish
+            | Self::SynchronizedUpdate
+            | Self::LiveStability
+            | Self::ForegroundProgram
+            | Self::PtyCoalesce
+            | Self::AttentionCredential
+            | Self::ClipboardPasteDeadline
+            | Self::SessionSave
+            | Self::SchemesWatch
+            | Self::StorageWatch
+            | Self::GitWatch
+            | Self::UpdateCheck
+            | Self::PreviewWatch
+            | Self::FilesWatch
+            | Self::WindowTitle
+            | Self::SearchWalk
+            | Self::WebEngineWarmUp
+            | Self::SpareWebController
+            | Self::DragBroker
+            | Self::WindowReap
+            | Self::ProgramsEar
+            | Self::IndexEar
+            | Self::ImeReport
+            | Self::QuitBound
+            | Self::CloseWait
+            | Self::Retirement
+            | Self::RunEnd => false,
+        }
+    }
+
     /// The owner whose discriminant is `byte`, if there is one.
     pub(crate) fn from_byte(byte: u8) -> Option<Self> {
         <[WakeOwner]>::get(Self::ALL, usize::from(byte)).copied()
@@ -247,6 +329,25 @@ pub(crate) fn earliest_wake(
     entries: impl IntoIterator<Item = Option<(WakeOwner, Instant)>>,
 ) -> Option<(WakeOwner, Instant)> {
     Iterator::min_by_key(Iterator::flatten(entries.into_iter()), |(_, at)| *at)
+}
+
+/// **A window off the glass books no picture's clock** (0.4.10 plan row 87, part 87a, gate 2): every
+/// deadline whose owner [`WakeOwner::draws_a_picture`] is dropped from the fold while `hidden`
+/// (`WindowRuntime::window_hidden`, gate 1's reading), and every deadline is kept while the window
+/// is on the glass.
+pub(crate) fn unbook_the_pictures<const N: usize>(
+    owners: [WakeOwner; N],
+    mut deadlines: [Option<Instant>; N],
+    hidden: bool,
+) -> [Option<Instant>; N] {
+    if hidden {
+        for (owner, deadline) in owners.into_iter().zip(deadlines.iter_mut()) {
+            if owner.draws_a_picture() {
+                *deadline = None;
+            }
+        }
+    }
+    deadlines
 }
 
 /// `deadline`, owned by `owner`.

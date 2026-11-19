@@ -6,7 +6,9 @@ asks, and what to do if the system puts a panel in front of you.
 
 ## Windows
 
-Take `folio-<version>-windows-x64.zip` from the
+Take `folio-<version>-windows-x64.zip` (called
+`folio-<version>-windows-x64-unsigned.zip` for a release without a Windows
+signature, which Windows warns about when it first starts) from the
 [releases page](https://github.com/lulu-loopp/folio-terminal/releases), unpack it
 wherever you keep programs, and run `folio.exe`. There is no installer; keep the
 extracted files together in one folder. `SHA256SUMS.txt` is the hash of what you

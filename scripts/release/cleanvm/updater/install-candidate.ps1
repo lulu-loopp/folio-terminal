@@ -20,8 +20,17 @@
     The guest's `.vmx`.
 
 .PARAMETER Zip
-    The candidate, `folio-<version>-windows-x64.zip` (signed, `FOLIO_UPDATER=on`,
-    the update card enabled).
+    The candidate, `folio-<version>-windows-x64.zip`, or
+    `folio-<version>-windows-x64-unsigned.zip` for one packed without `-Sign`
+    (`FOLIO_UPDATER=on`, the update card enabled).
+
+.PARAMETER Statement
+    The release statement that lists the candidate, `RELEASE-STATEMENT.txt`
+    (0.4.10 plan row 104). Given, the archive must be its `windows-x64` asset,
+    the same name, size and SHA-256, before the guest is touched, and the line
+    is printed. Its signature is not read here: `release-statement.ps1
+    -Signature` checked it where the key holder signed it. Without it, the
+    archive's SHA-256 is printed for the reader to hold to the statement.
 
 .PARAMETER Snapshot
     The name of the snapshot to take, e.g. `a-installed`.
@@ -45,6 +54,7 @@ param(
     [Parameter(Mandatory)] [string] $Vmx,
     [Parameter(Mandatory)] [string] $Zip,
     [Parameter(Mandatory)] [string] $Snapshot,
+    [string] $Statement,
     [string] $From = 'clean',
     [string] $VmPassword,
     [string] $GuestUser = 'folio',
@@ -67,6 +77,21 @@ $inGuest = Join-Path $PSScriptRoot '..\in-guest.ps1'
 Assert-GuestReadable -Paths @($inGuest)
 if (-not (Test-Path -LiteralPath $Zip -PathType Leaf)) { throw "no archive at $Zip" }
 $Zip = (Resolve-Path -LiteralPath $Zip).Path
+$zipSha = (Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$zipLine = '{0} {1} windows-x64 {2}' -f $zipSha, (Get-Item -LiteralPath $Zip).Length, [IO.Path]::GetFileName($Zip)
+$statementLine = $null
+if ($Statement) {
+    # An asset line is the statement's only line of four words: <sha256> <size> <platform> <name>.
+    if (-not (Test-Path -LiteralPath $Statement -PathType Leaf)) { throw "no statement at $Statement" }
+    $statementText = [IO.File]::ReadAllLines($Statement)
+    if ($statementText.Count -eq 0 -or $statementText[0] -cne 'folio-release-statement 1') { throw "$Statement is not a release statement (v1)" }
+    $listed = @($statementText | Where-Object { $words = $_ -split ' '; $words.Count -eq 4 -and $words[2] -ceq 'windows-x64' })
+    if ($listed.Count -ne 1) { throw "$Statement has $($listed.Count) windows-x64 lines; a statement lists one" }
+    if ($listed[0] -cne $zipLine) {
+        throw "the archive is not the one $Statement lists: the statement says '$($listed[0])', the archive is '$zipLine'"
+    }
+    $statementLine = $listed[0]
+}
 if (Test-Path -LiteralPath $Vmx -PathType Leaf) { $Vmx = (Resolve-Path -LiteralPath $Vmx).Path }
 elseif (-not $planning) { throw "no virtual machine at $Vmx" }
 $vmName = [IO.Path]::GetFileNameWithoutExtension($Vmx)
@@ -83,6 +108,7 @@ $door = New-VmDoor -Vmx $Vmx -VmrunPath $VmrunPath -VmPassword $VmPassword `
 Write-Host "vmrun    : $($door.Vmrun)"
 Write-Host "machine  : $Vmx"
 Write-Host "archive  : $Zip"
+if ($statementLine) { Write-Host "statement: $statementLine (the archive is the statement's windows-x64 asset)" }
 Write-Host "snapshot : $From -> $Snapshot"
 Write-Host "results  : $Results"
 if ($planning) { Write-Host 'MODE     : planning only - nothing is started, copied or run.' }
@@ -111,4 +137,9 @@ $machine = Join-Path $Results 'machine.txt'
 if (Test-Path -LiteralPath $machine) {
     Select-String -LiteralPath $machine -Pattern 'archive sha256|FileVersion' | ForEach-Object { Write-Host "  $($_.Line.Trim())" }
 }
-Write-Host "snapshot '$Snapshot' holds the installed candidate; check its sha256 against SHA256SUMS.txt"
+if ($statementLine) {
+    Write-Host "snapshot '$Snapshot' holds the installed candidate, the statement's windows-x64 asset"
+}
+else {
+    Write-Host "snapshot '$Snapshot' holds the installed candidate, sha256 $zipSha; hold it to its release statement's windows-x64 line"
+}

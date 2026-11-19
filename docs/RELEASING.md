@@ -4,8 +4,10 @@
 
 `v<version>` or `v<version>-preview`, and the version is the one in
 `[workspace.package]`. The workflow refuses anything else, because the tag and
-the manifest are one claim: the archive is `folio-<version>-windows-x64.zip`, the
-disk image is `Folio-<version>-macos-arm64.dmg`, and `folio --version` answers
+the manifest are one claim: the archive is `folio-<version>-windows-x64.zip`
+(`folio-<version>-windows-x64-unsigned.zip` for a release packed without a
+signature), the disk image is `Folio-<version>-macos-arm64.dmg`, the release
+statement names the tag and the version, and `folio --version` answers
 `<version>` out of either — so a tag naming a version the tree does not carry
 would put three different numbers in front of the same reader.
 
@@ -75,7 +77,12 @@ answer from the `diagnostics.log` header (`updater on` / `updater off`):
 `-ExpectSigned` requires `on`, a signed candidate is smoked with
 `-ExpectSigned -Updater off`, and CI's two smoke runs pass `-Updater off`. It is
 a capability the bytes carry, not proof of where they came from, and it is only
-half of the rule: a copy also has to be signed before it updates itself.
+half of the rule. **The other half is the release statement** (0.4.10 plan row
+102): a copy takes an update only when the release's `RELEASE-STATEMENT.txt`
+verifies with a release key the running copy embeds and every byte it downloads
+is the statement's. A copy no longer has to be Authenticode-signed to update
+itself, and a release no longer has to be signed to be taken as one: the
+statement is what vouches for it (**The release statement**, below).
 
 `.github/workflows/release.yml` has a Windows job, `archive`, and two ways in.
 **Neither of them publishes anything**, and the job holds no permission that
@@ -122,7 +129,7 @@ run by hand exactly as it runs there:
 | script | what it produces |
 | --- | --- |
 | `scripts/release/sbom.ps1` | the bill of materials, written into the output directory |
-| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, with `folio.msix` and the executable both in it, a copy of it called `folio-windows-x64.zip`, and `SHA256SUMS.txt` over everything beside it — **after emptying the output directory**, apart from that bill of materials, and refusing to empty one that holds anything this lane did not write |
+| `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip` — `folio-<version>-windows-x64-unsigned.zip` without `-Sign` — with `folio.msix` and the executable both in it, a copy of it called `folio-windows-x64.zip` (that name either way), and `SHA256SUMS.txt` over everything beside it — **after emptying the output directory**, apart from that bill of materials, and refusing to empty one that holds anything this lane did not write. It checks the two ConPTY files for Microsoft's signature with or without `-Sign` |
 | `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about, and refuses an output directory holding a file from another release |
 
 **The archive's members are one list, and `folio.exe` carries their hashes**
@@ -147,11 +154,13 @@ archive from a development build and checks both refusals (it needs `cargo build
 
 ## What gets published
 
-**Every final asset on a release page comes off the machine that signed it.**
+**Every final asset on a release page comes off the machine that packed it.**
 The Windows executable and SBOM originate in the verified CI build; local
 signing and packaging produce the final archive. `target/release-package` on that machine is the whole of
-it: what the three scripts leave there, after `package.ps1 -Sign` has signed the
-executable and the package, is exactly what a reader downloads. `gh release
+it: what the three scripts leave there — after `package.ps1 -Sign` has signed the
+executable and the package, when the signing service is there to sign — with the
+macOS assets and the release statement added to it, is exactly what a reader
+downloads. `gh release
 create` is handed that directory and no list is written down anywhere, so there
 is no second naming of assets to disagree with it, and nothing is hand-picked out
 of `dist/`.
@@ -168,9 +177,10 @@ after `package.ps1` has run**, and `smoke.ps1` is the second net: it refuses to
 run at all if the directory holds a file whose name carries a version other than
 the one in `Cargo.toml`.
 
-**And it empties what this lane writes, by name.** The archive, the copy of it
-under the stable name, `SHA256SUMS.txt`, a `folio-<version>.cdx.json`, the three
-macOS assets and the two directories the packing step works in: anything else in
+**And it empties what this lane writes, by name.** The archive (either
+spelling), the copy of it under the stable name, `SHA256SUMS.txt`, a
+`folio-<version>.cdx.json`, the three macOS assets, the release statement and
+its signature, and the two directories the packing step works in: anything else in
 that directory is refused with its own name rather than deleted, because
 `-Output` is a parameter and the day somebody points it at a folder of their own
 is the day "empty the previous release" would have meant "empty that folder".
@@ -184,12 +194,12 @@ then left where it is.
 
 | asset | what it is |
 | --- | --- |
-| `folio-<version>-windows-x64.zip` | the ten files, in one folder |
+| `folio-<version>-windows-x64.zip` | the ten files, in one folder; `folio-<version>-windows-x64-unsigned.zip` when packed without `-Sign` |
 | `folio-windows-x64.zip` | the same bytes, under the name `/releases/latest/download/` resolves |
 | `SHA256SUMS.txt` | one line for each of the other three, in the format `sha256sum -c` reads |
 | `folio-<version>.cdx.json` | the CycloneDX bill of materials `sbom.ps1` writes |
 
-**Four, and `folio.msix` is not one of them.** It was an asset of its own up to
+**Four from the Windows lane, and `folio.msix` is not one of them.** It was an asset of its own up to
 0.2.2, beside the copy of itself in the zip, and what that bought was people
 downloading it on its own: a file called `folio.msix` on a release page reads as
 an installer, and a package registered against the folder it was downloaded into
@@ -210,6 +220,12 @@ fetched either can check what they have against the line that names it. A
 `sha256sum -c` run in a folder holding one of them reports the rest as missing —
 the bill of materials always was one of those — and says `OK` for the file that
 is there.
+
+**Two come last, and they are what an updater reads first**:
+`RELEASE-STATEMENT.txt` and `RELEASE-STATEMENT.txt.sig`, written and checked by
+`scripts/release/release-statement.ps1` once both halves are in the directory
+(**The release statement**, below). Neither is in a checksum file: the
+statement is the list of hashes, and its signature is what vouches for it.
 
 Three more assets come from the Mac and are fetched into the same directory —
 `Folio-<version>-macos-arm64.dmg`, the copy of it called
@@ -248,20 +264,81 @@ Windows one immediately below, the macOS one in the macOS section further down.
 | **Windows** | `folio.exe` and `folio.msix`, signed through Microsoft's Artifact Signing service. The service holds the key, there is no `.pfx` in this project, and every signature carries a countersigned time stamp because the certificate is valid for three days. The subject is `CN=Weiyi Shi, O=Weiyi Shi, L=Ann Arbor, S=mi, C=US`, the same holder the executable's own `LegalCopyright` names. |
 | **macOS** | `Folio.app` and the disk image around it, signed with a **Developer ID Application** certificate issued to the same holder, with the hardened runtime, a secure timestamp and the entitlements in `packaging/macos/entitlements.plist` — every key in that file `false`, no exceptions taken. Both are then **notarized** by Apple and the ticket **stapled** to each, so a reader's machine can check the signature with the network off. `Folio.app.dSYM` is built beside the bundle and archived with the tag; it is not published and never goes inside the application. |
 
-**The Windows identity is what in-app updates check, so changing it breaks
-them.** From 0.4.6 a running Folio accepts a downloaded `folio.exe` or
-`folio.msix` only when its signer carries the **same subject** (compared as a
-parsed name, value case and order kept) and the **same Artifact Signing
-certificate-profile EKU** — the one `1.3.6.1.4.1.311.97.…` usage that is not the
-Public Trust marker `1.3.6.1.4.1.311.97.1.0` — as the running build's own
-signature, with a valid RFC 3161 time stamp and a revocation check that
-answered (`bt_platform::trust`). Nothing is pinned to a certificate, a
-thumbprint or a key: the daily three-day certificates renew freely. But
-renaming the subject, or deleting and recreating the certificate profile (which
-gives it a new EKU), makes every installed copy refuse the next release. The
-only migration is by hand: that release's notes tell readers to download it
-from the releases page, and the copies it installs accept the new identity from
-then on.
+**From 0.4.10 the release key, and not either identity, is what in-app updates
+check** (0.4.10 plan row 102). A running Folio takes an update only when the
+release's statement verifies with a release key it embeds (**The release
+statement**, below); Authenticode is never a condition of it. What the Windows
+identity still decides is what Windows does with the program — SmartScreen,
+Smart App Control, and whether `folio.msix` can be registered — and two
+sentences. The Ready card of an update whose staged `folio.exe` is not signed by
+this subject through this certificate profile says *Windows may warn about this
+update.* before **Restart** installs it; and Settings > About → Version of a
+running copy that Windows reads as not so signed says *This copy is not signed
+by Microsoft's signing service.* (nothing, when this machine cannot establish
+the certificate's revocation). So renaming the subject, recreating the certificate
+profile, or a suspended or revoked signing account no longer stops an update
+anywhere. **Copies from 0.4.6 to 0.4.9 still check the identity**: they accept a
+downloaded `folio.exe` or `folio.msix` only from the same subject and the same
+certificate-profile EKU as their own signature (`bt_platform::trust` in those
+releases), so for them an identity change, or a release packed without a
+signature, is an update they refuse; their readers move by downloading the
+release by hand, and the release notes say so.
+
+### The release statement
+
+`RELEASE-STATEMENT.txt` is ASCII, LF lines, one fact a line, in the grammar
+`bt_winres::release_statement` owns: the version and the tag, the oldest
+version that may update to it (`min_from`, the `min_updater` the archive's
+`folio.exe` carries), whether the Windows files carry our service's signature
+(`authenticode`), the key ids it retires, each asset's SHA-256, size, platform
+and name, and every member of the Windows archive with its SHA-256 and size.
+`RELEASE-STATEMENT.txt.sig` is the 64 raw bytes of an Ed25519 signature (RFC
+8032, no pre-hash) over it, by one of the two release keys every build embeds:
+
+| slot | public key (raw, hex) |
+| --- | --- |
+| `live` | `479ac1675798e54583a1163e610c86543b4d836bf09f407a52fa362f783d589a` — signs every release |
+| `spare` | `5781dbbf901cb05345e98000e0b59bead96d1a2455b92973aefa2502b762df59` — kept off every signing machine; signs only the release that retires the live key |
+
+The private halves are never in this repository, the trace folder or CI. A
+statement is signed with OpenSSL by the key holder, at OpenSSL's own passphrase
+prompt, and checked before anything is uploaded:
+
+```powershell
+# 1. Write the statement from the package directory (both halves in it). It prints
+#    the signing command, with the key file left for the key holder to name.
+./scripts/release/release-statement.ps1
+# 2. The key holder signs (OpenSSL 3; -rawin because Ed25519 signs the message itself).
+openssl pkeyutl -sign -inkey <the live key file> -rawin `
+    -in target/release-package/RELEASE-STATEMENT.txt -out target/release-package/RELEASE-STATEMENT.txt.sig
+# 3. Check the directory against the signed statement. Mandatory: nothing is uploaded until this passes.
+./scripts/release/release-statement.ps1 -Signature target/release-package/RELEASE-STATEMENT.txt.sig
+```
+
+Step 3 runs `check-release-statement verify`, the product's own grammar and
+embedded keys, built with the release from the same commit (`cargo build
+--release --locked -p bt-winres --features release-key,inflate --bin
+check-release-statement`; `-CheckBinary` names another path). After the page is
+published, the `published` job of `release.yml` makes the same check over what
+the page serves, compiled from the tag's source with no secret; red there is a
+release to take down. Anyone can check by hand with stock OpenSSL: the public
+key as DER is `302a300506032b6570032100` followed by the 32 bytes above, and
+
+```
+openssl pkeyutl -verify -pubin -inkey live.der -keyform DER -rawin -in RELEASE-STATEMENT.txt -sigfile RELEASE-STATEMENT.txt.sig
+```
+
+answers `Signature Verified Successfully`; the hashes in the statement are then
+the `sha256sum` of each file.
+
+**A release packed without a signature is still a release.** Its archive is
+named `-unsigned` and its statement says `authenticode false`; 0.4.10 and later
+take it as an update and say on the card that Windows may warn. It is smoked
+with `-Updater on` and without `-ExpectSigned`. Its notes say what Windows will
+show: a SmartScreen warning on first start; on a machine with Smart App Control
+enforced, a blocked `folio.exe`, which an update turns into *Previous version
+restored.*; and an Explorer menu row that cannot register, because an unsigned
+`folio.msix` cannot be.
 
 Neither chain puts a key, a password or a team identifier in this repository.
 The Windows one holds the key in a service the owner signs in to; the macOS one
@@ -287,8 +364,10 @@ signs a package with the command line it signs an executable with. `conpty.dll`
 and `OpenConsole.exe` are Microsoft's, and they arrive from Microsoft's own
 package already signed by Microsoft; putting our signature over theirs would
 replace a statement Windows already trusts with a newer and weaker one.
-`package.ps1 -Sign` checks that the signature they came with is still valid and
-still time stamped, and signs neither. The five text files in the archive — the
+`package.ps1` checks that the signature they came with is still valid and
+still time stamped, with or without `-Sign` (from 0.4.10 the updater no longer
+asks a downloaded release's sidecars for it, so packaging is where it is read),
+and signs neither. The five text files in the archive — the
 two licences, the notices, the trademark note and `folio-here.cmd` — carry no
 signature because no text file can.
 
@@ -538,6 +617,9 @@ caught out by written into the steps they belong to:
 2. **The Windows lane** — fetch and verify the CI build as described above,
    then `package.ps1 -Binary target/ci-signing -Sign`, which copies the CI SBOM and
    **empties `target/release-package`** before it writes, then `smoke.ps1`.
+   Without the signing service, `package.ps1 -Binary target/ci-signing` alone:
+   the archive is then `-unsigned`, and `smoke.ps1` runs without
+   `-ExpectSigned` and with `-Updater on`.
 3. **Fetch the three macOS assets** — `Folio-<version>-macos-arm64.dmg`,
    `Folio-macos-arm64.dmg` and `SHA256SUMS-macos.txt` — from the Mac into
    `target/release-package`. After 2, never before it: step 2 empties that
@@ -546,6 +628,11 @@ caught out by written into the steps they belong to:
    the three from the Mac — and every version in a name is this release's.
    Re-run `smoke.ps1` if anything was moved in or out since it last ran: it
    refuses a directory carrying another release's version.
+5. **The release statement** — `release-statement.ps1`, the key holder's
+   signature, and `release-statement.ps1 -Signature`, as **The release
+   statement** above has them. Nine files then, and the last check passed;
+   anything moved in or out after it means writing and signing the statement
+   again.
 
 Then **the release order** (0.4.7, U-41e0). **The tap and the bucket are
 written and read back before the page is published, and every write that
@@ -572,8 +659,10 @@ it was — and steps 5 and 7 close it if the release does not go out.
    checksums are read.
 2. **Render.** `./scripts/release/update-manifests.ps1 -Version <version>
    -FromRelease` renders the cask and the bucket file from the **draft's**
-   checksum files (`gh release download` reads a draft for an account that may
-   push to this repository). Read the difference it prints.
+   checksum files and release statement — the statement names each asset, so
+   an `-unsigned` archive is the URL the bucket gets, and each name's hash must
+   agree between the two (`gh release download` reads a draft for an account
+   that may push to this repository). Read the difference it prints.
 3. **Save.** `./scripts/release/update-manifests.ps1 -Version <version>
    -FromRelease -Apply -Account <login>`. Before either write it saves, for
    both repositories, the exact bytes each file holds now and its blob id, to
@@ -595,7 +684,8 @@ it was — and steps 5 and 7 close it if the release does not go out.
    managers: `brew fetch --cask lulu-loopp/folio/folio` downloads the image
    and compares the hash, and `scoop install folio` from the bucket does the
    same for the archive, so each either agrees with the page or says which of
-   the two is wrong.
+   the two is wrong. Publication starts `release.yml`'s `published` job, which
+   reads the page back against its statement; it has to go green.
 7. **If publication fails, or the release is abandoned** after step 4, put the
    manifests back — **the release is not left with a tap or a bucket naming a
    draft**:
@@ -648,8 +738,8 @@ the button, and because the manifests are written between the two (steps 2–5).
 latest, so `/releases/latest` answers (see **The tag** above); the update check
 reads the list endpoint and is unaffected either way.
 
-**The assets are whatever is in that directory, and the directory is the signed
-build.** Nothing is typed out, so nothing can be left out; nothing is fetched
+**The assets are whatever is in that directory, and the directory is the
+release machine's build.** Nothing is typed out, so nothing can be left out; nothing is fetched
 from a workflow run, so an unsigned file cannot arrive under a signed file's
 name. Compare the two if you like — the workflow artifact from the tag's run has
 the same file list, the same notices and the same version — but upload the local
@@ -1071,8 +1161,8 @@ Four values, and three of them are the version:
 | --- | --- | --- |
 | `PackageVersion` | all three | the workspace version, without the tag's `-preview` |
 | `RelativeFilePath` | installer | `folio-<version>\folio.exe` |
-| `InstallerUrl` | installer | the release page's zip asset, at its versioned name under this release's tag — **never** `/releases/latest/download/`, which would make the manifest for one version hand out another |
-| `InstallerSha256` | installer | the `folio-<version>-windows-x64.zip` line of `SHA256SUMS.txt`, in upper case |
+| `InstallerUrl` | installer | the release page's zip asset, at its versioned name under this release's tag — the name the release statement gives it, `-unsigned` included — **never** `/releases/latest/download/`, which would make the manifest for one version hand out another |
+| `InstallerSha256` | installer | the line of `SHA256SUMS.txt` for the archive the release statement names (`folio-<version>-windows-x64.zip`, or `-unsigned`), in upper case |
 | `ReleaseDate` | installer | the day the release page was published |
 | `PrivacyUrl`, `LicenseUrl`, `ReleaseNotesUrl` | locale | the same URLs at the new tag |
 
