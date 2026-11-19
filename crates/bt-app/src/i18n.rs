@@ -3254,6 +3254,13 @@ text_entries! {
     /// signing service (`update_job::SignatureNote::NotOurService`; 0.4.10 plan row 102 part 3,
     /// R5).
     UpdateCardMayWarn,
+    /// The notification-area icon's menu: its first row, the window back on the glass (0.4.10
+    /// plan row 87, part 87b).
+    TrayMenuShow,
+    /// The icon's menu: a new window.
+    TrayMenuNewWindow,
+    /// The icon's menu: Folio's quit.
+    TrayMenuQuit,
     /// Beside the determinate bar: received and total, in megabytes.
     UpdateCardProgress,
     /// After the reason, when the job stopped before anything installed moved.
@@ -6536,6 +6543,10 @@ impl Text {
                 "Windows may warn about this update.",
                 "Windows 可能会对此更新发出警告。",
             ),
+            // English in both columns until the Chinese pass writes them (`CHINESE_PENDING`).
+            Self::TrayMenuShow => pick(lang, "Show Folio", "Show Folio"),
+            Self::TrayMenuNewWindow => pick(lang, "New window", "New window"),
+            Self::TrayMenuQuit => pick(lang, "Quit Folio", "Quit Folio"),
             Self::UpdateCardProgress => pick(
                 lang,
                 "{received} / {total} MB",
@@ -7070,7 +7081,16 @@ impl Text {
     /// The entries whose Chinese is owed, by column: the English stands in both until the
     /// Chinese pass writes it.
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        // — the notification-area icon's menu (0.4.10 plan row 87, part 87b): Windows draws it;
+        //   macOS has no notification area, and its column waits with Windows'
+        (Self::TrayMenuShow, HostPlatform::Windows),
+        (Self::TrayMenuShow, HostPlatform::MacOs),
+        (Self::TrayMenuNewWindow, HostPlatform::Windows),
+        (Self::TrayMenuNewWindow, HostPlatform::MacOs),
+        (Self::TrayMenuQuit, HostPlatform::Windows),
+        (Self::TrayMenuQuit, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -7088,6 +7108,31 @@ pub fn could_not_resume_text(title: &str, id: &str) -> String {
         Lang::English => format!("{title} session {id} could not be resumed."),
         Lang::Chinese => format!("{title} 会话 {id} 无法恢复。"),
     }
+}
+
+/// **The tip of the run's icon in the notification area** (0.4.10 plan row 87, part 87b; item 9):
+/// how many tabs have work running and how many are waiting for the person, a zero count left
+/// out, and the program's name alone when both are zero. The Chinese is a draft (`zh pending`).
+#[must_use]
+pub fn tray_tooltip(working: usize, waiting: usize) -> String {
+    let lang = current();
+    let working = (working > 0).then(|| match lang {
+        Lang::English => format!("{working} working"),
+        Lang::Chinese => format!("{working} 个在运行"),
+    });
+    let waiting = (waiting > 0).then(|| match lang {
+        Lang::English => format!("{waiting} waiting for you"),
+        Lang::Chinese => format!("{waiting} 个在等你"),
+    });
+    let counts: Vec<String> = [working, waiting].into_iter().flatten().collect();
+    if counts.is_empty() {
+        return "Folio".to_owned();
+    }
+    let separator = match lang {
+        Lang::English => ", ",
+        Lang::Chinese => "，",
+    };
+    format!("Folio - {}", counts.join(separator))
 }
 
 /// **The line a resumed pane opens with when its launch did not all come back** (0.4.10 plan row

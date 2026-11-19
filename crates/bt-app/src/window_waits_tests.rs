@@ -12124,7 +12124,7 @@ const C7_DOORS: [&str; 23] = [
 /// the platform's nudge, and what it reports was never requested. Every other variant is the
 /// `signal` of a row. A variant listed here that is also a row's signal, or that the enum no
 /// longer has, is refused.
-const NOT_ANSWERS: [(&str, &str); 20] = [
+const NOT_ANSWERS: [(&str, &str); 21] = [
     (
         "SystemPreferencesChanged",
         "a system preference moved: the platform's news",
@@ -12169,6 +12169,10 @@ const NOT_ANSWERS: [(&str, &str); 20] = [
     ("SchemesChanged", "the schemes folder moved: an ear's nudge"),
     ("StorageChanged", "the data folder moved: an ear's nudge"),
     ("QuakeSummoned", "the summon chord was pressed: ingress"),
+    (
+        "TrayPoked",
+        "the icon in the notification area was clicked or its menu chosen: ingress",
+    ),
     (
         "NotificationClicked",
         "a desktop notification was clicked: ingress",

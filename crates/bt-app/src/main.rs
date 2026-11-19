@@ -212,6 +212,7 @@ mod toast;
 mod tooltip;
 mod trace;
 mod trace_sink;
+mod tray_fold;
 mod uninstall;
 mod update;
 // Which adapter a copy's update takes, and whether its road is built (0.4.7 ticket U-41a1).
@@ -923,6 +924,13 @@ enum AppEvent {
     /// reads it rather than by the hook, which is running inside Windows'
     /// message pump with no borrow of anything.
     QuakeSummoned,
+    /// **The run's icon in the notification area was clicked, or a row of its menu chosen**
+    /// (0.4.10 plan row 87, part 87b).
+    ///
+    /// Carries nothing, on [`Self::QuakeSummoned`]'s footing: the gesture is parked on the icon's
+    /// host by its window procedure, which runs inside the loop's own dispatch with no borrow of
+    /// anything, and `FolioApp::settle_tray` spends it on the turn this wakes.
+    TrayPoked,
     /// **A desktop notification was clicked** (§7.6).
     ///
     /// Carries nothing, for [`Self::GitChanged`]'s reason: the launch string is
@@ -1123,6 +1131,7 @@ impl AppEvent {
             | Self::FileIndexHeard
             | Self::WatchStewardAnswered
             | Self::QuakeSummoned
+            | Self::TrayPoked
             | Self::LaunchAsked
             | Self::InstallChannelRead
             | Self::AppDelegateSpoke
@@ -9792,6 +9801,12 @@ struct App<B: Backend = Native> {
     /// builds; an instance's own so that a test of the door counts the ask rather than starting a
     /// pass over the account's agent files.
     carry_ask: fn(CarryAsk),
+    /// **The run's icon in the notification area** (0.4.10 plan row 87, part 87b), with what it
+    /// was last told: up while the switch keeps the run (`close_keeps_running`) on a platform
+    /// that has the area, put up and taken down by `FolioApp::settle_tray`, told by
+    /// `FolioApp::tell_the_tray` once a turn, and taken out of the area by [`App::finish`],
+    /// after the run's last write, on every road to the end. See [`tray_fold`].
+    tray: tray_fold::TrayStand<B::Tray>,
 }
 
 /// **What an [`App`] is built from**: every field its builder computes — the device, the workers it
@@ -10027,6 +10042,7 @@ impl<B: Backend> App<B> {
             handoff_heard: None,
             pane_retirement_deadline: PANE_RETIREMENT_DEADLINE,
             carry_ask: carry_pass::begin_carry_pass,
+            tray: tray_fold::TrayStand::default(),
         }
     }
 }
@@ -10039,9 +10055,11 @@ impl<B: Backend> App<B> {
 /// handed anything by winit, because it is not winit's to call.
 ///
 /// **It had a second reader until 2026-09-05** — the window procedure behind an
-/// icon in the notification area — and the plural in this note is worth keeping
-/// as a singular that was once true: the shape is "a thing outside every window
-/// asks for a turn", and the summon chord is now the only such thing there is.
+/// icon in the notification area. The icon came back in 0.4.10 (plan row 87, part
+/// 87b) with a wake of its own: its host is made after the loop exists, so it is
+/// handed a clone of the application's `LoopProxy` (`FolioApp::settle_tray`), and
+/// the summon chord, whose hook is installed before the loop is built, stays this
+/// static's one reader.
 static SUMMON_PROXY: std::sync::OnceLock<EventLoopProxy<AppEvent>> = std::sync::OnceLock::new();
 
 /// **A run ends with the last window a person can see — unless the close keeps it** (§7.54e ①,
@@ -38143,9 +38161,15 @@ impl<B: Backend> App<B> {
         // close's one bound; the buffers the stop held hear the answers, and what did not land
         // is copied into `recovered` (§5.3 row 20b). Nothing is held on any other road.
         self.keep_what_the_stop_did_not_save(SystemTime::now());
+        // **And the run's icon leaves the notification area** (0.4.10 plan row 87, part 87b):
+        // after the run's last write, on every road to the end this is the seam of — the last
+        // close, the reap, the quit's way out, the system's close and Folio's quit from outside,
+        // a failure, the loop's own exit. `main` leaves by `leave_process`, so nothing would drop
+        // the icon later.
+        self.tray.take_down();
     }
 
-    /// **Ask for the quit transaction**, from whichever of the three doors the
+    /// **Ask for the quit transaction**, from whichever of the four doors the
     /// ask arrived at.
     ///
     /// The debt and not the transaction, for [`Self::quit_requested`]'s own
@@ -38153,11 +38177,12 @@ impl<B: Backend> App<B> {
     /// run on the stack any one of these asks arrives on. The loop spends it at
     /// [`FolioApp::settle_quit`].
     ///
-    /// The three doors are the chord (`Runtime::run_shortcut`), AppKit
-    /// ([`FolioApp::begin_the_systems_quit`]) and the menu bar's own Quit row
-    /// ([`FolioApp::run_a_verb_of_the_applications`], RB-4). They are one line
-    /// each and that is exactly why they are this line: three copies of a flag
-    /// are three places for a fourth door to be written differently.
+    /// The four doors are the chord (`Runtime::run_shortcut`), AppKit
+    /// ([`FolioApp::begin_the_systems_quit`]), the menu bar's own Quit row
+    /// ([`FolioApp::run_a_verb_of_the_applications`], RB-4) and the notification-area
+    /// icon's Quit row ([`FolioApp::settle_tray`], 0.4.10 plan row 87, part 87b). They
+    /// are one line each and that is exactly why they are this line: four copies of a
+    /// flag are four places for a fifth door to be written differently.
     fn ask_to_quit(&mut self) {
         self.quit_requested = true;
     }
@@ -47585,6 +47610,17 @@ impl<B: Backend> FolioApp<B> {
                 );
             }
         }
+        // **A tab moved into a put-away window brings it back** (0.4.10 plan row 87, part 87b, R9;
+        // 87a review N5): the window directory names a put-away window (its news seats are kept
+        // by it), so Move to window can name one, and a tab moved where nobody can see it would
+        // be a tab gone. Through the one door, after the source's own half is done.
+        if self
+            .windows
+            .get_mut(into)
+            .is_some_and(|window| window.put_away)
+        {
+            self.bring_the_window_back()?;
+        }
         Ok(TransferOutcome::Moved(TabTransfer {
             tab,
             from,
@@ -48193,6 +48229,11 @@ impl<B: Backend> FolioApp<B> {
     /// from a shown one ([`CloseFate::ShutWhileAway`]). Any other window is put away when its close would have ended
     /// the run and the close keeps it ([`the_last_visible_windows_close_puts_the_run_away`]), and
     /// shut otherwise.
+    ///
+    /// **"Would have ended the run" counts the windows on the glass** (0.4.10 plan row 87, part
+    /// 87b, R8; [`Self::windows_on_the_glass_after`]): a window opened beside a put-away one (the
+    /// icon's New window) is the last one a person can see, and its close puts it away too rather
+    /// than filing it into Recent and ending its shells; the icon's Show brings both back.
     fn close_fate(&mut self, id: WindowId) -> CloseFate {
         let Some(window) = self.windows.get_mut(id) else {
             return CloseFate::Shut;
@@ -48205,7 +48246,10 @@ impl<B: Backend> FolioApp<B> {
             };
         }
         let keeping = self.the_close_keeps_the_run(id);
-        if the_last_visible_windows_close_puts_the_run_away(self.windows_left_after(id), keeping) {
+        if the_last_visible_windows_close_puts_the_run_away(
+            self.windows_on_the_glass_after(id),
+            keeping,
+        ) {
             CloseFate::PutAway
         } else {
             CloseFate::Shut
@@ -48324,6 +48368,154 @@ impl<B: Backend> FolioApp<B> {
         }
         Ok(brought)
     }
+
+    /// Whether a window of this run is put away.
+    fn a_window_is_put_away(&mut self) -> bool {
+        self.windows
+            .in_order_mut()
+            .into_iter()
+            .any(|window| window.put_away && window.leaving.is_none())
+    }
+
+    /// **What every tab tells the run's icon** (0.4.10 plan row 87, part 87b; [`tray_fold`]): each
+    /// tab of every window still standing, its claim read as the strip reads it — with the active
+    /// tab of a put-away window read as a tab nobody looks at (R3) — and its working reading
+    /// ([`tray_fold::tray_reads_working`], the fold's one call of it).
+    fn tray_sights(&mut self) -> Vec<tray_fold::TabSight> {
+        self.windows
+            .in_order_mut()
+            .into_iter()
+            .filter(|window| window.leaving.is_none())
+            .flat_map(|window| {
+                let looked_at = !window.put_away;
+                let active = window.active_tab;
+                window
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, tab)| tray_fold::TabSight {
+                        claim: tab.fleet_claim_for(index == active && looked_at),
+                        working: tray_fold::tray_reads_working(tab),
+                    })
+            })
+            .collect()
+    }
+
+    /// **The run's icon matched to its switch, and what a person asked of it spent** (0.4.10 plan
+    /// row 87, part 87b; 87d's R9) — a link of `about_to_wait`'s chain, after the summoned
+    /// terminal's and before the quit's, so the icon's Quit is settled on the turn it was chosen.
+    ///
+    /// **The stand** — the icon is up while the switch keeps the run (`close_keeps_running`) on a
+    /// platform with a notification area (R5): switched off, any put-away window is brought back
+    /// first (R7: off is today's behaviour, which has no hidden run) and the icon is taken down;
+    /// switched on, it is put up. A host that could not be made is said once and not asked
+    /// again. **While a quit is under way the stand is left as it is**: the icon goes with the
+    /// run, after its last write ([`App::finish`]).
+    ///
+    /// **The gestures** — a click, Enter or Show Folio brings the window back through the one
+    /// door ([`Self::bring_the_window_back`]), or raises the window the reader was last in when
+    /// nothing is put away (R12), never hiding one; New window opens a window and only that
+    /// (item 8); Quit Folio is the quit's fourth door ([`App::ask_to_quit`]). **During a quit**
+    /// (R5): while it asks, Show brings the window back so its question can be answered, and the
+    /// other two are dropped; once it has been answered, every gesture is dropped.
+    fn settle_tray(&mut self, event_loop: &B::Loop) -> Result<()> {
+        let Some(app) = self.app.as_ref() else {
+            return Ok(());
+        };
+        if let Some(step) = app.quit.as_ref().map(quit::Quit::step) {
+            let gestures = app.tray.take_gestures();
+            if step == quit::QuitStep::Ask
+                && gestures.contains(&bt_platform::tray::TrayGesture::Show)
+            {
+                self.bring_the_window_back()?;
+            }
+            return Ok(());
+        }
+        let switch_on = app.settings_store.loaded().close_keeps_running;
+        if !switch_on || !B::has_a_notification_area(event_loop) {
+            if !switch_on && self.a_window_is_put_away() {
+                self.bring_the_window_back()?;
+            }
+            if let Some(app) = self.app.as_mut() {
+                app.tray.take_down();
+            }
+            return Ok(());
+        }
+        if !app.tray.is_up() && !app.tray.was_refused() {
+            let picture = tray_fold::tray_picture_of(&self.tray_sights());
+            let labels = tray_fold::tray_labels();
+            let proxy = self.proxy.clone();
+            let made = B::put_up_tray(
+                event_loop,
+                labels.clone(),
+                picture.clone(),
+                Box::new(move || {
+                    let _ = proxy.send_event(AppEvent::TrayPoked);
+                }),
+                Box::new(|line: &str| crate::diagnostics::note(line)),
+            );
+            if let Some(app) = self.app.as_mut() {
+                app.tray
+                    .stand(made, picture, labels, crate::diagnostics::note);
+            }
+        }
+        let gestures = self
+            .app
+            .as_ref()
+            .map_or_else(Vec::new, |app| app.tray.take_gestures());
+        for gesture in gestures {
+            match gesture {
+                bt_platform::tray::TrayGesture::Show => {
+                    if self.bring_the_window_back()?.is_none()
+                        && let Some(id) = self.the_window_the_reader_was_last_in()
+                    {
+                        self.raise_the_window_the_icon_named(id);
+                    }
+                }
+                bt_platform::tray::TrayGesture::NewWindow => {
+                    let like = self.the_window_the_reader_was_last_in();
+                    if let Some(id) = self.open_a_window_for_a_launch(
+                        event_loop,
+                        like,
+                        &launch_wire::LaunchRequest::default(),
+                    )? {
+                        self.raise_the_window_the_icon_named(id);
+                    }
+                }
+                bt_platform::tray::TrayGesture::Quit => {
+                    if let Some(app) = self.app.as_mut() {
+                        app.ask_to_quit();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **The window the icon's gesture landed in is the one the reader is in now**, raised: the
+    /// launch's own two lines ([`Self::land_one_launch_request`]).
+    fn raise_the_window_the_icon_named(&mut self, id: WindowId) {
+        if let Some(app) = self.app.as_mut() {
+            app.activated.retain(|visited| *visited != id);
+            app.activated.push(id);
+        }
+        self.raise_for_a_launch(id);
+    }
+
+    /// **The run's icon told what every tab claims now** (0.4.10 plan row 87, part 87b; R2): once
+    /// a turn, after every window has taken its turn and its attention pass has settled the
+    /// claims, so the fold reads them settled and is never a second settle. Told only what
+    /// differs from what it shows ([`tray_fold::TrayStand::tell`]); nothing while it is down.
+    fn tell_the_tray(&mut self) {
+        if !self.app.as_ref().is_some_and(|app| app.tray.is_up()) {
+            return;
+        }
+        let picture = tray_fold::tray_picture_of(&self.tray_sights());
+        let labels = tray_fold::tray_labels();
+        if let Some(app) = self.app.as_mut() {
+            app.tray.tell(picture, labels);
+        }
+    }
     /// **How many windows a reader would still have after this one goes** — the
     /// number both residency doors are decided on (§7.54, §7.54e ①).
     ///
@@ -48356,6 +48548,23 @@ impl<B: Backend> FolioApp<B> {
     /// window's, so the next launch brings it back holding what it held. See
     /// [`Self::close`], which is where it is told, and
     /// [`Self::retire_the_summon_with_the_run`], which is the door it leaves by.
+    /// **How many windows a person could still see after this one goes** (0.4.10 plan row 87,
+    /// part 87b, R8): [`Self::windows_left_after`] without the put-away ones. The put-away rule
+    /// ([`Self::close_fate`]) reads it; the run's end does not — a put-away window is a window
+    /// whose shells still run, so a close beside one never ends the run.
+    fn windows_on_the_glass_after(&mut self, going: WindowId) -> usize {
+        let summon = self.app.as_ref().and_then(|app| app.quake.window());
+        (0..self.windows.len())
+            .filter(|index| {
+                self.windows
+                    .key_at(*index)
+                    .filter(|id| Some(*id) != summon && *id != going)
+                    .and_then(|id| self.windows.get_mut(id))
+                    .is_some_and(|window| window.leaving.is_none() && !window.put_away)
+            })
+            .count()
+    }
+
     fn windows_left_after(&mut self, going: WindowId) -> usize {
         let summon = self.app.as_ref().and_then(|app| app.quake.window());
         (0..self.windows.len())
@@ -51511,6 +51720,12 @@ impl<B: Backend> FolioApp<B> {
             .as_ref()
             .is_some_and(|app| app.quit.as_ref().is_some_and(quit::Quit::is_asking))
         {
+            // **A question asked of a put-away run is asked on the glass** (0.4.10 plan row 87,
+            // part 87b, R4): the icon's Quit is a quit asked of a run with no window shown, and a
+            // card on a hidden window is a question nobody can answer — the quit would stand at
+            // its first step, the icon still up. The window comes back through the one door, as
+            // a put-away window's own question does (87a, `CloseFate::ShutWhileAway`).
+            self.bring_the_window_back()?;
             self.for_each_window(|runtime| {
                 if runtime.refresh_overlay() {
                     runtime.present_chrome_change()
@@ -51533,6 +51748,9 @@ impl<B: Backend> FolioApp<B> {
             diagnostics::note(&line);
         }
         self.take_document_answers()?;
+        // **On the glass** (0.4.10 plan row 87, part 87b, R4): a quit asked of a put-away run
+        // whose documents phase was cancelled raises its card where it can be read.
+        self.bring_the_window_back()?;
         let oldest_standing = |app: &mut Self| {
             (0..app.windows.len()).find_map(|index| {
                 let id = app.windows.key_at(index)?;
@@ -52089,6 +52307,10 @@ impl<B: Backend> FolioApp<B> {
             // line, exactly as the drag handover above does, so that the press,
             // the window and the frame it appears in are all one turn.
             .and_then(|()| self.settle_quake(event_loop))
+            // **The run's icon, after the summoned terminal and before the quit** (0.4.10 plan row
+            // 87, part 87b): its Quit is owed the quit's settle on this same turn, and its New
+            // window spends the plan it queues on its own next statement, as the doors above do.
+            .and_then(|()| self.settle_tray(event_loop))
             .and_then(|()| self.settle_quit(event_loop, Instant::now()))
         {
             self.fail(event_loop, error);
@@ -52199,6 +52421,9 @@ impl<B: Backend> FolioApp<B> {
                 }
             }
         }
+        // **The run's icon, told what the turns above settled** (0.4.10 plan row 87, part 87b;
+        // R2): after every window's turn, so every attention pass has run; a read, booking no wake.
+        self.tell_the_tray();
         // **And the quit's bound, while it waits for an answer across turns** (0.4.6 U-21): an
         // update's quit looks for its session's receipt with the windows still up. The answer
         // itself wakes the loop (`AppEvent::DocumentsAnswered`); the clock is only the bound.
@@ -53099,7 +53324,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
         let _callback = session_end::in_a_callback("user_event");
         if matches!(
             event,
-            AppEvent::QuakeSummoned | AppEvent::NotificationClicked
+            AppEvent::QuakeSummoned | AppEvent::NotificationClicked | AppEvent::TrayPoked
         ) {
             bt_platform::file_reads::input();
         }
@@ -53171,6 +53396,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // the launch requests it shares its whole shape with, and it needs
             // the `ActiveEventLoop` and every window at once.
             AppEvent::AppDelegateSpoke => Ok(()),
+            // **Nothing is done here either** (0.4.10 plan row 87, part 87b): the gesture is
+            // parked on the icon's host, and `settle_tray` is on `about_to_wait`'s chain.
+            AppEvent::TrayPoked => Ok(()),
             // **Settled here, at once** (B-ENDSESSION): the system is waiting on the far side of
             // this turn and may end the process as soon as it has asked every application, so the
             // write is not left for `about_to_wait`'s chain. The document is already held.
@@ -63201,7 +63429,7 @@ mod quit_with_no_window_tests {
     /// `session.lock` all run exactly as they do for six windows, because the
     /// transaction reads the window list and the list is simply empty.
     ///
-    /// MUTATION: set the flag by hand at any of the three doors and the last
+    /// MUTATION: set the flag by hand at any of the four doors and the last
     /// assertion names it.
     #[test]
     fn every_door_onto_the_quit_records_the_same_debt() {
@@ -63217,6 +63445,10 @@ mod quit_with_no_window_tests {
         assert!(
             method_body("FolioApp", "begin_the_systems_quit").contains("app.ask_to_quit();"),
             "AppKit's own quit request no longer records it through the one door"
+        );
+        assert!(
+            method_body("FolioApp", "settle_tray").contains("app.ask_to_quit();"),
+            "the notification-area icon's Quit no longer records it through the one door"
         );
         // And nothing writes the flag behind that door's back. Counted over the
         // package and not over one file, because "somewhere other than
