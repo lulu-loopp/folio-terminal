@@ -16127,6 +16127,95 @@ mod windows_impl {
     /// about dpi and started being a wait.
     const STANDING_ATTEMPTS: usize = 3;
 
+    /// **A hidden window's normal rectangle written, and the window left hidden and in the posture
+    /// it is in** (0.4.10 plan row 87, part 87a, re-review P1-4): `rect` is the outer rectangle, in
+    /// screen pixels, that the window takes when it is next shown normal — restored from minimised,
+    /// or un-maximised.
+    ///
+    /// The one door for a window that is maximised or minimised, whose own rectangle is not the
+    /// person's ([`stand_window_at`] moves the rectangle a window stands at, which for those two
+    /// postures is the system's: the maximised frame, or the icon's parking place). It is
+    /// `SetWindowPlacement` with `showCmd = SW_HIDE`, over the placement the window already has —
+    /// its flags, its minimised and maximised positions — with `rcNormalPosition` replaced.
+    ///
+    /// **Workspace coordinates, converted here and nowhere else**: `rcNormalPosition` of a window
+    /// that is not a tool window is stated relative to the work area of the monitor the rectangle
+    /// is on, not to the screen (the trap [`is_window_minimized`] names). The offset is taken from
+    /// the monitor `rect` lands on — `MonitorFromRect`, the primary monitor for a rectangle on
+    /// none — which is the monitor the system reads the rectangle against.
+    ///
+    /// Refused for a window that is shown: `SW_HIDE` would hide it.
+    pub fn set_hidden_window_normal_rect(
+        window: NativeWindow,
+        rect: WindowRect,
+    ) -> Result<(), String> {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromRect};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongW, GetWindowPlacement, IsWindowVisible, SW_HIDE,
+            SetWindowPlacement, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+        };
+        let hwnd = window.as_hwnd();
+        // SAFETY: `window` originates from winit's live Win32WindowHandle; IsWindowVisible only
+        // reads its style.
+        if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return Err(
+                "the window is shown; its normal rectangle is written only while it is hidden"
+                    .to_owned(),
+            );
+        }
+        let mut placement = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: as above; `placement` is a live, exclusively borrowed WINDOWPLACEMENT with its
+        // `length` set as the API requires.
+        unsafe { GetWindowPlacement(hwnd, &mut placement) }
+            .map_err(|error| format!("GetWindowPlacement failed: {error}"))?;
+        let screen = RECT {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        };
+        // SAFETY: as above; GetWindowLongW only reads the window's extended style.
+        let tool_window =
+            unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        let (dx, dy) = if tool_window {
+            (0, 0)
+        } else {
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: `screen` is a live RECT; MonitorFromRect with MONITOR_DEFAULTTOPRIMARY
+            // always returns a valid monitor handle, and `info` stays valid and exclusively
+            // borrowed across this read-only query with its `cbSize` set.
+            let ok = unsafe {
+                let monitor = MonitorFromRect(&screen, MONITOR_DEFAULTTOPRIMARY);
+                GetMonitorInfoW(monitor, &mut info)
+            };
+            if !ok.as_bool() {
+                return Err("GetMonitorInfoW failed".to_owned());
+            }
+            (
+                info.rcWork.left - info.rcMonitor.left,
+                info.rcWork.top - info.rcMonitor.top,
+            )
+        };
+        placement.rcNormalPosition = RECT {
+            left: screen.left - dx,
+            top: screen.top - dy,
+            right: screen.right - dx,
+            bottom: screen.bottom - dy,
+        };
+        placement.showCmd = SW_HIDE.0 as u32;
+        // SAFETY: as above; `placement` is the window's own placement, read just now, with its
+        // normal rectangle and show command replaced.
+        unsafe { SetWindowPlacement(hwnd, &placement) }
+            .map_err(|error| format!("SetWindowPlacement(hidden normal rect) failed: {error}"))
+    }
+
     /// The work area — the monitor minus the taskbar and other appbars — of the
     /// display this window sits on, in physical pixels.
     ///
@@ -20487,13 +20576,14 @@ pub use windows_impl::{
     monospace_font_families, mouse_button_down, os_ui_language, pointer_position,
     pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
     register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
-    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, silence_std_streams, stand_window_at, standalone_alert,
-    std_error_is_console, stop_flashing_window, system_backdrop_available, system_high_contrast,
-    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
-    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
-    virtual_key_is_dead, virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at, write_std_error, write_to_console,
+    set_current_thread_priority, set_hidden_window_normal_rect, set_system_backdrop,
+    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
+    stand_window_at, standalone_alert, std_error_is_console, stop_flashing_window,
+    system_backdrop_available, system_high_contrast, system_uses_light_apps, take_keyboard_focus,
+    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
+    top_level_window_at, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
+    write_to_console,
 };
 
 /// **Say one thing in the system's box, over no window** — the ownerless door every platform
@@ -20524,9 +20614,10 @@ pub use portable_impl::{
     install_context_menu, is_window_cloaked, keyboard_layout_shift_table, keyboard_layouts,
     leave_process, let_the_system_translate_touch, mouse_button_down, read_context_menu,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    set_system_backdrop, silence_std_streams, system_backdrop_available, system_high_contrast,
-    thread_mouse_capture, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
-    write_std_error, write_to_console,
+    set_hidden_window_normal_rect, set_system_backdrop, silence_std_streams,
+    system_backdrop_available, system_high_contrast, thread_mouse_capture,
+    virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code, write_std_error,
+    write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).

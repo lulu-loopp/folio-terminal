@@ -528,20 +528,27 @@ fn a_closing_window_is_never_brought_back() {
 /// the last before the settle, and it is neither filed into Recent nor sent on its way out nor put
 /// away; the settle then writes the layout the quit held, both windows in it.
 ///
+/// Each of the two guards is held by a case of its own (re-review P2-12): the window's event door
+/// keeps a lone window from being put away during the hold, and `FolioApp::close` keeps a gate's
+/// answer, re-run during the hold, from closing the window it was asked about.
+///
 /// PLANT P21: drop the hold's guard from `FolioApp::on_window_event` and from `FolioApp::close` —
 /// the window is filed into Recent that the held layout also restores.
+///
+/// PLANT P30: drop only the window event door's guard (`FolioApp::a_close_the_held_document_spends`
+/// answers `false`) — the lone window is put away during the hold.
+///
+/// PLANT P31: drop only `FolioApp::close`'s guard — the gate's `Discard`, re-run during the hold,
+/// sends the window it was asked about on its way out and files it into Recent.
 #[test]
 fn a_close_while_the_outside_quit_holds_the_document_closes_nothing() {
-    let _news = crate::test_support::EndSessionHome::new("put-away-quit-close");
-    let mut run = PutAwayRun::open("quit-close", true).with_a_second_window();
-    // Both windows in the document, as each records itself when it is born.
-    for id in [1, 2] {
-        run.application
-            .folio
-            .runtime(WindowId::from(id))
-            .expect("the window")
-            .mark_session_dirty(std::time::Instant::now());
-    }
+    held_by_the_outside_quit_two_windows_close_nothing();
+    held_by_the_outside_quit_a_lone_window_is_not_put_away();
+    held_by_the_outside_quit_a_gates_answer_closes_nothing();
+}
+
+/// Folio's quit from outside, heard: the document is held from here until the settle.
+fn the_outside_quit_holds_the_document() {
     let quit = 0xC123;
     assert_eq!(
         bt_platform::session_end::answer_outside_quit(
@@ -553,6 +560,66 @@ fn a_close_while_the_outside_quit_holds_the_document_closes_nothing() {
         Some(0),
         "the quit from outside is heard"
     );
+    assert!(
+        crate::session_end::holds_the_document(),
+        "and the document is held"
+    );
+}
+
+/// [`a_close_while_the_outside_quit_holds_the_document_closes_nothing`]'s lone window: the hold,
+/// then its close. Not put away, not going.
+fn held_by_the_outside_quit_a_lone_window_is_not_put_away() {
+    let _news = crate::test_support::EndSessionHome::new("put-away-quit-close-one");
+    let mut run = PutAwayRun::open("quit-close-one", true);
+    the_outside_quit_holds_the_document();
+    let _ = run.close();
+    let window = run.window();
+    assert!(
+        !window.put_away && window.leaving.is_none(),
+        "a lone window's close during the hold puts nothing away"
+    );
+}
+
+/// [`a_close_while_the_outside_quit_holds_the_document_closes_nothing`]'s gate answer: a window's
+/// question up, the hold, then its `Discard`, re-run as the window event's tail re-runs it. The
+/// window is not filed and not going.
+fn held_by_the_outside_quit_a_gates_answer_closes_nothing() {
+    let _news = crate::test_support::EndSessionHome::new("put-away-quit-gate");
+    let mut run = PutAwayRun::open("quit-gate", true).with_a_second_window();
+    run.window()
+        .dirty_gate
+        .open(crate::restore::GateRequest::Shut);
+    the_outside_quit_holds_the_document();
+    run.application
+        .runtime()
+        .answer_dirty_gate(crate::restore::GateAnswer::Discard)
+        .expect("the answer is spent");
+    run.application.window_event(WindowEvent::Focused(true));
+    assert!(
+        run.app().recent.is_empty(),
+        "the answer's re-run files nothing into Recent"
+    );
+    assert!(
+        run.window().leaving.is_none(),
+        "and the window it was asked about is not on its way out"
+    );
+}
+
+/// [`a_close_while_the_outside_quit_holds_the_document_closes_nothing`]'s two windows: the hold,
+/// then the close of one that is not the last. Nothing filed, nothing going or put away, and the
+/// settle writes both.
+fn held_by_the_outside_quit_two_windows_close_nothing() {
+    let _news = crate::test_support::EndSessionHome::new("put-away-quit-close");
+    let mut run = PutAwayRun::open("quit-close", true).with_a_second_window();
+    // Both windows in the document, as each records itself when it is born.
+    for id in [1, 2] {
+        run.application
+            .folio
+            .runtime(WindowId::from(id))
+            .expect("the window")
+            .mark_session_dirty(std::time::Instant::now());
+    }
+    the_outside_quit_holds_the_document();
     let _ = run.close();
     assert!(run.app().recent.is_empty(), "nothing is filed into Recent");
     let window = run.window();
@@ -572,13 +639,22 @@ fn a_close_while_the_outside_quit_holds_the_document_closes_nothing() {
     );
 }
 
-/// RED (review P2-3) — **a put-away window comes back on a monitor that is there**: a window put
-/// away on a display that has gone since (its rectangle on no monitor the platform names) is stood
-/// on the primary monitor, at its own size, before it is shown; a window whose rectangle a monitor
-/// still sees is left where it is. The judgement is the layout restore's.
+/// RED (review P2-3, re-review P1-4) — **a put-away window comes back on a monitor that is
+/// there**: the rectangle judged is the window's normal one, as the layout restore judges it.
+/// - A normal window put away on a display that has gone since (its rectangle on no monitor the
+///   platform names) is stood on the primary monitor, at its own size, before it is shown; one
+///   whose rectangle a monitor still sees is left where it is.
+/// - A maximised window is never stood anywhere. Its own rectangle, the maximised frame that
+///   overhangs the work area, is not judged: on a display that is there nothing is written; with
+///   its normal rectangle on a display that has gone, that rectangle is written as the one it
+///   takes when it is next shown normal, on the primary monitor, and it is shown maximised.
 ///
 /// PLANT P26: drop the monitor check (`hold_the_window_to_a_present_monitor`) from
 /// `Runtime::bring_the_window_back_on_the_glass` — the window comes back off every screen.
+///
+/// PLANT P29: judge the rectangle the window stands at (`outer_rect`) in every posture again —
+/// both maximised arms go red, the frame fitted on a display that is there and moved at its
+/// maximised size from one that has gone.
 #[test]
 fn a_put_away_window_comes_back_on_a_monitor_that_is_there() {
     let monitor = crate::RestoreMonitor {
@@ -599,26 +675,84 @@ fn a_put_away_window_comes_back_on_a_monitor_that_is_there() {
         right: 5000,
         bottom: 900,
     };
-    for (case, standing, stood) in [
+    let on_the_primary = bt_platform::WindowRect {
+        left: 0,
+        top: 0,
+        right: 1000,
+        bottom: 700,
+    };
+    // A maximised thick frame: its monitor's work area grown by 8 px on each side.
+    let maximised_on_the_monitor = bt_platform::WindowRect {
+        left: -8,
+        top: -8,
+        right: 1928,
+        bottom: 1048,
+    };
+    let maximised_on_the_gone_display = bt_platform::WindowRect {
+        left: 3992,
+        top: -8,
+        right: 5928,
+        bottom: 1048,
+    };
+    type Arm<'a> = (
+        &'a str,
+        bt_platform::WindowRect,
+        Option<bt_platform::WindowRect>,
+        Option<bt_platform::WindowRect>,
+        Option<bt_platform::WindowRect>,
+    );
+    // (case, its normal rectangle, the frame it stands at maximised, stood at, normal rect written)
+    let arms: [Arm; 4] = [
         (
-            "on a display that has gone",
+            "normal, on a display that has gone",
             gone,
-            Some(bt_platform::WindowRect {
-                left: 0,
-                top: 0,
-                right: 1000,
-                bottom: 700,
-            }),
+            None,
+            Some(on_the_primary),
+            None,
         ),
-        ("on a display that is there", on_the_monitor, None),
-    ] {
-        let mut run = PutAwayRun::open(&format!("monitor-{}", stood.is_some()), true);
-        let _ = run.close();
+        (
+            "normal, on a display that is there",
+            on_the_monitor,
+            None,
+            None,
+            None,
+        ),
+        (
+            "maximised, on a display that is there",
+            on_the_monitor,
+            Some(maximised_on_the_monitor),
+            None,
+            None,
+        ),
+        (
+            "maximised, its normal rectangle on a display that has gone",
+            gone,
+            Some(maximised_on_the_gone_display),
+            None,
+            Some(on_the_primary),
+        ),
+    ];
+    for (index, (case, normal, maximised, stood, kept)) in arms.into_iter().enumerate() {
+        let mut run = PutAwayRun::open(&format!("monitor-{index}"), true);
+        // The window stood normal at `normal`, and recorded itself there.
         run.window().window.answers.set(PlatformAnswers {
-            outer_rect: Some(standing),
+            outer_rect: Some(normal),
             monitor: Some(monitor),
             ..PlatformAnswers::default()
         });
+        run.application
+            .runtime()
+            .mark_session_dirty(std::time::Instant::now());
+        if let Some(frame) = maximised {
+            run.window().window.answers.set(PlatformAnswers {
+                outer_rect: Some(frame),
+                maximized: true,
+                monitor: Some(monitor),
+                ..PlatformAnswers::default()
+            });
+        }
+        let _ = run.close();
+        assert!(run.window().put_away, "{case}: the window is put away");
         assert!(
             run.application
                 .folio
@@ -632,10 +766,23 @@ fn a_put_away_window_comes_back_on_a_monitor_that_is_there() {
             WindowEffect::StoodAt(rect) => Some(*rect),
             _ => None,
         });
+        let normal_rect_kept = effects.iter().find_map(|effect| match effect {
+            WindowEffect::NormalRectKept(rect) => Some(*rect),
+            _ => None,
+        });
         assert_eq!(stood_at, stood, "{case}: where it is stood: {effects:?}");
+        assert_eq!(
+            normal_rect_kept, kept,
+            "{case}: the normal rectangle written: {effects:?}"
+        );
         assert!(
             effects.contains(&WindowEffect::Visible(true)),
             "{case}: and shown: {effects:?}"
+        );
+        assert_eq!(
+            effects.contains(&WindowEffect::Maximized(true)),
+            maximised.is_some(),
+            "{case}: maximised as it was put away: {effects:?}"
         );
     }
 }

@@ -830,30 +830,29 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// The judgement is the layout restore's own, unchanged ([`crate::choose_restored_placement`]
     /// over the monitors the platform names, primary first), asked of the paragraph this window
-    /// would write with the rectangle it stands at now. A rectangle the judgement keeps is left
-    /// where it is; one it fits or moves is stood where it says ([`crate::startup_window_rect`],
-    /// the restore's own conversion), and one no monitor can see forfeits its corner to the
-    /// primary monitor's, as a restored one does. Maximised or not, it is the rectangle the window
-    /// stands at that is judged, so a window put away maximised is shown maximised where the
-    /// judgement puts it.
+    /// would write ([`Self::window_snapshot`]) as it comes: its bounds are the window's **normal**
+    /// rectangle in every posture — the one it stands at while it is normal, the one it last stood
+    /// at normal while it is maximised or minimised, which is the rectangle the restore judges
+    /// too. A maximised window's own rectangle is the system's maximised frame, which overhangs
+    /// its work area and which the restore never measures (re-review P1-4).
     ///
-    /// Nothing is judged for a minimised window, whose rectangle is the system's parking place
-    /// and not a monitor's, or where the platform names no monitor. A refused stand is said, and
-    /// the window comes back where it is.
+    /// A rectangle the judgement keeps is left where it is. One it fits or moves (one no monitor
+    /// can see forfeits its corner to the primary monitor's, as a restored one does) is put where
+    /// it says ([`crate::startup_window_rect`], the restore's own conversion):
+    /// - a **normal** window is stood there;
+    /// - a **maximised or minimised** one is never stood anywhere: the rectangle is written as the
+    ///   one it takes when it is next shown normal, the window left hidden and in its posture
+    ///   (`keep_normal_rect_while_hidden`), so that un-maximised, or restored from the taskbar, it
+    ///   lands on a monitor that is there.
+    ///
+    /// Nothing is judged where the platform names no monitor. A refused write is said, and the
+    /// window comes back where it is.
     fn hold_the_window_to_a_present_monitor(&mut self) {
         let monitors = self.window.window.monitors_to_restore_on();
         let Some(primary) = monitors.first().copied() else {
             return;
         };
-        if self.window.window.is_iconic() {
-            return;
-        }
-        let Some(standing) = self.window.window.outer_rect() else {
-            return;
-        };
-        let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
-        let mut paragraph = self.window_snapshot();
-        paragraph.placement.bounds = persisted_window_bounds(standing, scale);
+        let paragraph = self.window_snapshot();
         let Some(placement) = crate::choose_restored_placement(&paragraph, &monitors) else {
             return;
         };
@@ -867,6 +866,7 @@ impl<B: Backend> Runtime<'_, B> {
         if kept {
             return;
         }
+        let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
         let primary_corner = {
             let left = crate::physical_px(primary.left, scale);
             let top = crate::physical_px(primary.top, scale);
@@ -878,7 +878,13 @@ impl<B: Backend> Runtime<'_, B> {
             }
         };
         let rect = crate::startup_window_rect(Some(placement), primary_corner, scale);
-        if let Err(error) = self.window.window.stand_at(rect) {
+        let normal = !self.window.window.is_iconic() && !self.window.window.is_maximized();
+        let written = if normal {
+            self.window.window.stand_at(rect)
+        } else {
+            self.window.window.keep_normal_rect_while_hidden(rect)
+        };
+        if let Err(error) = written {
             self.window
                 .window
                 .note(&format!("BT_PUT_AWAY the way back: {error}"));

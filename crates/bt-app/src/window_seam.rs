@@ -270,6 +270,11 @@ pub(crate) trait WindowHost {
     /// **The window stood at an outer rectangle on whichever display it names** —
     /// `bt_platform::stand_window_at`, which says it again until the display's scale has settled.
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String>;
+    /// **The rectangle a hidden window takes when it is next shown normal** — restored from
+    /// minimised or un-maximised — written without showing it and without changing its posture:
+    /// `bt_platform::set_hidden_window_normal_rect`, for a window that is not normal, whose own
+    /// rectangle is the system's (0.4.10 plan row 87, part 87a, re-review P1-4).
+    fn keep_normal_rect_while_hidden(&self, rect: bt_platform::WindowRect) -> Result<(), String>;
     /// **Who owns the glass at a point on the screen**, physical pixels: this window, another
     /// one, or nobody the platform will name — `bt_platform::top_level_window_at` asked about
     /// this window's own handle.
@@ -488,6 +493,9 @@ impl WindowHost for Arc<Window> {
     }
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
         bt_platform::stand_window_at(native_or_say(self)?, rect)
+    }
+    fn keep_normal_rect_while_hidden(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
+        bt_platform::set_hidden_window_normal_rect(native_or_say(self)?, rect)
     }
     fn glass_at(&self, x: i32, y: i32) -> crate::GlassHere {
         let Ok(mine) = crate::native_window_of(self) else {
