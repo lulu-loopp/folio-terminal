@@ -4035,6 +4035,7 @@ crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::notice_layers	Ambiguous	map	4	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::notice_layers	Ambiguous	text	1	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::notice_layers	Ambiguous	then	1	
+crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::raise_attention	Ambiguous	or_else	1	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d, review fold P1-1); the round's refusal or, when a delivery reached the desk, the first put-away's kept refusal (Option::or_else over App::toast_refusal_unsaid's take); in-memory, no wait
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::raise_attention	Ambiguous	text	1	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::raise_attention	Ambiguous	to_owned	1	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::raise_notification_refusal	Ambiguous	text	2	
