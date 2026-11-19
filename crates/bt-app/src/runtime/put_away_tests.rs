@@ -115,7 +115,7 @@ impl PutAwayRun {
     }
 
     /// The loop's look at the run's icon (`FolioApp::settle_tray`), on the test's turn.
-    fn settle_tray(&mut self) -> anyhow::Result<()> {
+    fn turn_the_tray(&mut self) -> anyhow::Result<()> {
         self.application
             .folio
             .settle_tray(&self.application.event_loop)
@@ -123,7 +123,7 @@ impl PutAwayRun {
 
     /// A person's `gesture` on the run's icon, parked for the loop's next turn.
     fn poke(&mut self, gesture: TrayGesture) {
-        self.application.event_loop.tray.make(gesture);
+        self.application.event_loop.tray.make_the_gesture(gesture);
     }
 
     /// The switch (`close_keeps_running`) set to `on`.
@@ -921,7 +921,7 @@ fn every_road_brings_the_put_away_window_back_as_it_was() {
     // The run's icon (0.4.10 plan row 87, part 87b): a click, put up on the turn it is clicked.
     let icon: Road = |run| {
         run.poke(TrayGesture::Show);
-        run.settle_tray().expect("the icon's turn");
+        run.turn_the_tray().expect("the icon's turn");
         Some(run.application.id)
     };
     for (road, bring, landed_tabs) in [
@@ -1219,7 +1219,7 @@ fn place_of(effects: &[WindowEffect], wanted: &WindowEffect) -> Option<usize> {
 fn the_icons_show_with_nothing_put_away_raises_the_window() {
     let mut run = PutAwayRun::open("icon-raise", true);
     run.poke(TrayGesture::Show);
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     let effects = run.application.event_loop.ledger.take();
     assert!(
         effects.contains(&WindowEffect::ForegroundTaken),
@@ -1243,11 +1243,11 @@ fn the_icons_show_with_nothing_put_away_raises_the_window() {
 fn the_icons_new_window_leaves_the_put_away_window_away() {
     let mut run = PutAwayRun::open("icon-new", true);
     let _ = run.close();
-    run.settle_tray().expect("the icon is put up");
+    run.turn_the_tray().expect("the icon is put up");
     let _ = run.application.event_loop.ledger.take();
     run.poke(TrayGesture::NewWindow);
     assert!(
-        run.settle_tray().is_err(),
+        run.turn_the_tray().is_err(),
         "the headless door opens no second window"
     );
     let effects = run.application.event_loop.ledger.take();
@@ -1266,11 +1266,11 @@ fn the_icons_new_window_leaves_the_put_away_window_away() {
 /// changed**: a quiet turn tells it nothing; a bell that rang is told once, its badge the strip's
 /// bell and its tip one tab waiting; the next quiet turn tells it nothing again.
 ///
-/// PLANT 87b-P10: drop the comparison from `TrayStand::tell` — the quiet turn tells the icon again.
+/// PLANT 87b-P10: drop the comparison from `TrayStand::tell_the_icon` — the quiet turn tells the icon again.
 #[test]
 fn the_icon_is_told_only_what_changed() {
     let mut run = PutAwayRun::open("icon-told", true);
-    run.settle_tray().expect("the icon is put up");
+    run.turn_the_tray().expect("the icon is put up");
     let effects = run.application.event_loop.ledger.take();
     let plain = bt_platform::tray::TrayPicture {
         badge: None,
@@ -1322,7 +1322,7 @@ fn a_put_away_windows_active_tab_is_read_as_one_nobody_looks_at() {
         .get_mut(&seat)
         .expect("the pane");
     pane.session.output_revision = pane.session.output_revision.wrapping_add(1);
-    run.settle_tray().expect("the icon is put up");
+    run.turn_the_tray().expect("the icon is put up");
     assert_eq!(
         pictures_of(&run.application.event_loop.ledger.take())
             .first()
@@ -1352,11 +1352,11 @@ fn a_put_away_windows_active_tab_is_read_as_one_nobody_looks_at() {
 fn the_icon_follows_the_switch() {
     let mut run = PutAwayRun::open("icon-switch", true);
     let _ = run.close();
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     let effects = run.application.event_loop.ledger.take();
     assert_eq!(pictures_of(&effects).len(), 1, "on: put up: {effects:?}");
     run.switch(false);
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     let effects = run.application.event_loop.ledger.take();
     let back = place_of(&effects, &WindowEffect::Visible(true));
     let gone = place_of(&effects, &WindowEffect::TrayRemoved);
@@ -1365,14 +1365,14 @@ fn the_icon_follows_the_switch() {
         "off: the window back on the glass, then the icon gone: {effects:?}"
     );
     assert!(!run.window().put_away, "and no longer put away");
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     assert_eq!(
         run.application.event_loop.ledger.take(),
         vec![],
         "off, a quiet turn"
     );
     run.switch(true);
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     let effects = run.application.event_loop.ledger.take();
     assert!(
         matches!(effects.as_slice(), [WindowEffect::TrayShown(_)]),
@@ -1381,7 +1381,7 @@ fn the_icon_follows_the_switch() {
 
     let mut bare = PutAwayRun::open("icon-no-area", true);
     bare.application.event_loop.tray.area.set(false);
-    bare.settle_tray().expect("the icon's turn");
+    bare.turn_the_tray().expect("the icon's turn");
     assert_eq!(
         bare.application.event_loop.ledger.take(),
         vec![],
@@ -1395,15 +1395,15 @@ fn the_icon_follows_the_switch() {
 fn a_host_that_could_not_be_made_is_not_asked_again() {
     let mut run = PutAwayRun::open("icon-refused", true);
     run.application.event_loop.tray.refused.set(true);
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     run.application.event_loop.tray.refused.set(false);
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     assert_eq!(
         run.application.event_loop.ledger.take(),
         vec![],
         "nothing is put up"
     );
-    assert!(run.app().tray.was_refused() && !run.app().tray.is_up());
+    assert!(run.app().tray.icon_was_refused() && !run.app().tray.icon_is_up());
 }
 
 /// RED (T9b; R4, R5) — **the icon's Quit on a put-away run asks its question on the glass**: the
@@ -1431,10 +1431,10 @@ fn the_icons_quit_asks_its_question_on_the_glass() {
     let mut run = PutAwayRun::open_holding("icon-quit-asks", true, tab);
     let _ = run.close();
     assert!(run.window().put_away, "the fixture's window is put away");
-    run.settle_tray().expect("the icon is put up");
+    run.turn_the_tray().expect("the icon is put up");
     let _ = run.application.event_loop.ledger.take();
     run.poke(TrayGesture::Quit);
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     run.application
         .folio
         .settle_quit(&run.application.event_loop, std::time::Instant::now())
@@ -1452,7 +1452,7 @@ fn the_icons_quit_asks_its_question_on_the_glass() {
     );
     run.poke(TrayGesture::NewWindow);
     run.poke(TrayGesture::Quit);
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     assert!(
         !run.application
             .event_loop
@@ -1478,10 +1478,10 @@ fn the_icons_quit_leaves_and_takes_the_icon_down() {
         .event_loop
         .tray
         .watch_at_the_removal(run.dir.join("session.lock"));
-    run.settle_tray().expect("the icon is put up");
+    run.turn_the_tray().expect("the icon is put up");
     let _ = run.application.event_loop.ledger.take();
     run.poke(TrayGesture::Quit);
-    run.settle_tray().expect("the icon's turn");
+    run.turn_the_tray().expect("the icon's turn");
     let mut effects = Vec::new();
     // The turns' own clock, a turn apart (nothing here waits on the real one): the quit is
     // judged on the instant each turn hands it.

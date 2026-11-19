@@ -163,18 +163,18 @@ impl<T> Default for TrayStand<T> {
 
 impl<T: TrayDoor> TrayStand<T> {
     /// Whether the icon is in the notification area.
-    pub(crate) fn is_up(&self) -> bool {
+    pub(crate) fn icon_is_up(&self) -> bool {
         self.icon.is_some()
     }
 
     /// Whether a host was refused this run: it is said once and not asked again.
-    pub(crate) fn was_refused(&self) -> bool {
+    pub(crate) fn icon_was_refused(&self) -> bool {
         self.refused
     }
 
     /// **The icon `made` put up**, having shown `picture` with `labels` — or its refusal, said
     /// through `note` once.
-    pub(crate) fn stand(
+    pub(crate) fn stand_the_icon(
         &mut self,
         made: Result<T, String>,
         picture: TrayPicture,
@@ -198,7 +198,7 @@ impl<T: TrayDoor> TrayStand<T> {
 
     /// **`picture` told to the icon, if it differs from what it shows**, and `labels` to its menu
     /// likewise. Nothing is told on a turn nothing moved.
-    pub(crate) fn tell(&mut self, picture: TrayPicture, labels: TrayLabels) {
+    pub(crate) fn tell_the_icon(&mut self, picture: TrayPicture, labels: TrayLabels) {
         let Some(icon) = self.icon.as_ref() else {
             return;
         };
@@ -222,7 +222,7 @@ impl<T: TrayDoor> TrayStand<T> {
     /// **The icon taken out of the notification area**, if it is up.
     pub(crate) fn take_down(&mut self) {
         if let Some(icon) = self.icon.take() {
-            icon.remove();
+            icon.remove_the_icon();
         }
         self.told = None;
         self.labelled = None;
@@ -234,7 +234,7 @@ mod tests {
     use super::{TabSight, TrayState, tray_badge_of, tray_counts_of, tray_state_of};
     use crate::StatusClaim;
 
-    fn tab(claim: StatusClaim, working: bool) -> TabSight {
+    fn tab_sight_of(claim: StatusClaim, working: bool) -> TabSight {
         TabSight { claim, working }
     }
 
@@ -249,20 +249,26 @@ mod tests {
         use StatusClaim::{Awaiting, Bell, Failed, Silent, Unread};
         let cases: [(&[TabSight], TrayState); 8] = [
             (&[], TrayState::Plain),
-            (&[tab(Silent, false)], TrayState::Plain),
-            (&[tab(Silent, true)], TrayState::Working),
+            (&[tab_sight_of(Silent, false)], TrayState::Plain),
+            (&[tab_sight_of(Silent, true)], TrayState::Working),
             (
-                &[tab(Unread, false), tab(Silent, true)],
+                &[tab_sight_of(Unread, false), tab_sight_of(Silent, true)],
                 TrayState::Finished,
             ),
-            (&[tab(Failed, false), tab(Unread, false)], TrayState::Failed),
-            (&[tab(Bell, false), tab(Failed, false)], TrayState::Bell),
             (
-                &[tab(Failed, false), tab(Awaiting, false)],
+                &[tab_sight_of(Failed, false), tab_sight_of(Unread, false)],
+                TrayState::Failed,
+            ),
+            (
+                &[tab_sight_of(Bell, false), tab_sight_of(Failed, false)],
+                TrayState::Bell,
+            ),
+            (
+                &[tab_sight_of(Failed, false), tab_sight_of(Awaiting, false)],
                 TrayState::Awaiting,
             ),
             (
-                &[tab(Bell, false), tab(Awaiting, true)],
+                &[tab_sight_of(Bell, false), tab_sight_of(Awaiting, true)],
                 TrayState::Awaiting,
             ),
         ];
@@ -297,11 +303,11 @@ mod tests {
     fn the_tip_counts_the_tabs_working_and_the_tabs_waiting() {
         use StatusClaim::{Awaiting, Bell, Failed, Silent};
         let tabs = [
-            tab(Silent, true),
-            tab(Awaiting, true),
-            tab(Bell, false),
-            tab(Failed, false),
-            tab(Silent, false),
+            tab_sight_of(Silent, true),
+            tab_sight_of(Awaiting, true),
+            tab_sight_of(Bell, false),
+            tab_sight_of(Failed, false),
+            tab_sight_of(Silent, false),
         ];
         assert_eq!(tray_counts_of(&tabs), (2, 2));
         assert_eq!(tray_counts_of(&[]), (0, 0));

@@ -185,7 +185,7 @@ pub(crate) enum WindowEffect {
     TrayChanged(bt_platform::tray::TrayPicture),
     /// The icon's menu given these words (`TrayDoor::relabel`).
     TrayRelabelled(bt_platform::tray::TrayLabels),
-    /// The icon taken out of the notification area (`TrayDoor::remove`).
+    /// The icon taken out of the notification area (`TrayDoor::remove_the_icon`).
     TrayRemoved,
     /// The loop told how to wait.
     ControlFlow(ControlFlow),
@@ -1723,7 +1723,7 @@ impl Default for HeadlessTrayHand {
 
 impl HeadlessTrayHand {
     /// A person's gesture on the icon, parked for the loop's next turn.
-    pub(crate) fn make(&self, gesture: bt_platform::tray::TrayGesture) {
+    pub(crate) fn make_the_gesture(&self, gesture: bt_platform::tray::TrayGesture) {
         self.gestures.borrow_mut().push(gesture);
     }
 
@@ -1754,7 +1754,7 @@ impl TrayDoor for HeadlessTray {
     fn take_gestures(&self) -> Vec<bt_platform::tray::TrayGesture> {
         std::mem::take(&mut *self.gestures.borrow_mut())
     }
-    fn remove(self) {
+    fn remove_the_icon(self) {
         if let Some(path) = self.watched.borrow().as_ref() {
             self.watched_at_the_removal.set(Some(path.exists()));
         }

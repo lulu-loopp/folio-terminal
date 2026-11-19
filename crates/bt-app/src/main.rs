@@ -48441,7 +48441,7 @@ impl<B: Backend> FolioApp<B> {
             }
             return Ok(());
         }
-        if !app.tray.is_up() && !app.tray.was_refused() {
+        if !app.tray.icon_is_up() && !app.tray.icon_was_refused() {
             let picture = tray_fold::tray_picture_of(&self.tray_sights());
             let labels = tray_fold::tray_labels();
             let proxy = self.proxy.clone();
@@ -48456,7 +48456,7 @@ impl<B: Backend> FolioApp<B> {
             );
             if let Some(app) = self.app.as_mut() {
                 app.tray
-                    .stand(made, picture, labels, crate::diagnostics::note);
+                    .stand_the_icon(made, picture, labels, crate::diagnostics::note);
             }
         }
         let gestures = self
@@ -48505,15 +48505,15 @@ impl<B: Backend> FolioApp<B> {
     /// **The run's icon told what every tab claims now** (0.4.10 plan row 87, part 87b; R2): once
     /// a turn, after every window has taken its turn and its attention pass has settled the
     /// claims, so the fold reads them settled and is never a second settle. Told only what
-    /// differs from what it shows ([`tray_fold::TrayStand::tell`]); nothing while it is down.
+    /// differs from what it shows ([`tray_fold::TrayStand::tell_the_icon`]); nothing while it is down.
     fn tell_the_tray(&mut self) {
-        if !self.app.as_ref().is_some_and(|app| app.tray.is_up()) {
+        if !self.app.as_ref().is_some_and(|app| app.tray.icon_is_up()) {
             return;
         }
         let picture = tray_fold::tray_picture_of(&self.tray_sights());
         let labels = tray_fold::tray_labels();
         if let Some(app) = self.app.as_mut() {
-            app.tray.tell(picture, labels);
+            app.tray.tell_the_icon(picture, labels);
         }
     }
     /// **How many windows a reader would still have after this one goes** — the

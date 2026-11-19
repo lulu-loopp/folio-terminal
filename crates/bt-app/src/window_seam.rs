@@ -719,7 +719,7 @@ pub(crate) trait TrayDoor {
     /// What a person asked of the icon since this was last asked, in their order.
     fn take_gestures(&self) -> Vec<bt_platform::tray::TrayGesture>;
     /// **The icon taken out of the notification area**, and its host with it.
-    fn remove(self);
+    fn remove_the_icon(self);
 }
 
 impl TrayDoor for bt_platform::tray::TrayIcon {
@@ -732,7 +732,7 @@ impl TrayDoor for bt_platform::tray::TrayIcon {
     fn take_gestures(&self) -> Vec<bt_platform::tray::TrayGesture> {
         bt_platform::tray::TrayIcon::take_gestures(self)
     }
-    fn remove(self) {
+    fn remove_the_icon(self) {
         // The icon, its host and its drawn image go with the value (`TrayIcon`'s `Drop`).
         drop(self);
     }

@@ -99,7 +99,7 @@ pub struct TrayLabels {
 impl TrayLabels {
     /// The label of one row.
     #[must_use]
-    pub fn of(&self, row: TrayGesture) -> &str {
+    pub fn row_label(&self, row: TrayGesture) -> &str {
         match row {
             TrayGesture::Show => &self.show,
             TrayGesture::NewWindow => &self.new_window,
@@ -120,7 +120,7 @@ pub struct TrayBadge {
 impl TrayBadge {
     /// The ink drawn on a taskbar that is light, or dark.
     #[must_use]
-    pub const fn ink(self, light_taskbar: bool) -> [u8; 3] {
+    pub const fn badge_ink(self, light_taskbar: bool) -> [u8; 3] {
         if light_taskbar {
             self.ink_on_light
         } else {
@@ -409,14 +409,14 @@ mod windows_tray {
     }
 
     impl HostState {
-        fn park(&self, gesture: TrayGesture) {
+        fn park_the_gesture(&self, gesture: TrayGesture) {
             self.gestures.borrow_mut().push(gesture);
             (self.wake)();
         }
 
         /// **The icon drawn again if the display's side, the taskbar's theme or the badge moved**
         /// since it was last drawn; answers whether it was.
-        fn redraw(&self) -> bool {
+        fn redraw_the_icon(&self) -> bool {
             let side = notification_area_side();
             let light = taskbar_is_light();
             let badge = self.picture.borrow().badge;
@@ -444,7 +444,7 @@ mod windows_tray {
         }
 
         /// One `Shell_NotifyIconW` of the whole description: the add or a change.
-        fn tell(&self, hwnd: HWND, message: NOTIFY_ICON_MESSAGE) -> bool {
+        fn tell_the_shell(&self, hwnd: HWND, message: NOTIFY_ICON_MESSAGE) -> bool {
             let tip = tray_tip(&self.picture.borrow().tip);
             let icon = self
                 .drawn
@@ -470,8 +470,8 @@ mod windows_tray {
 
         /// **The icon added to the shell, in the version-4 shape**; answers whether the shell
         /// took it. A refusal is said once and the host waits for `TaskbarCreated`.
-        fn add(&self, hwnd: HWND) -> bool {
-            let added = self.tell(hwnd, NIM_ADD) && set_version_4(hwnd);
+        fn add_to_the_shell(&self, hwnd: HWND) -> bool {
+            let added = self.tell_the_shell(hwnd, NIM_ADD) && set_version_4(hwnd);
             self.in_the_shell.set(added);
             if added {
                 self.refusal_said.set(false);
@@ -486,16 +486,16 @@ mod windows_tray {
         /// **The description told again**: a change while the shell holds the icon, the add
         /// when it does not or when a change is refused (the shell lost the icon unannounced).
         fn tell_again(&self, hwnd: HWND) {
-            if self.in_the_shell.get() && self.tell(hwnd, NIM_MODIFY) {
+            if self.in_the_shell.get() && self.tell_the_shell(hwnd, NIM_MODIFY) {
                 return;
             }
-            let _ = self.add(hwnd);
+            let _ = self.add_to_the_shell(hwnd);
         }
     }
 
     thread_local! {
         /// **The icon drawn before the one the shell is being handed**, kept until it has been
-        /// (see `HostState::redraw`).
+        /// (see `HostState::redraw_the_icon`).
         static DRAWN_BEFORE: RefCell<Option<Drawn>> = const { RefCell::new(None) };
     }
 
@@ -562,7 +562,7 @@ mod windows_tray {
         let Some(badge) = badge else {
             return Ok(plain);
         };
-        let drawn = badge_this_icon(plain, side, badge.ink(light), badge.hollow);
+        let drawn = badge_this_icon(plain, side, badge.badge_ink(light), badge.hollow);
         // SAFETY: `plain` was loaded above for this call alone; the badged copy is a new icon.
         let _ = unsafe { DestroyIcon(plain) };
         drawn
@@ -745,15 +745,15 @@ mod windows_tray {
                 }
             }
             let icon = Self { hwnd, state };
-            let _ = icon.state.redraw();
-            let _ = icon.state.add(icon.hwnd);
+            let _ = icon.state.redraw_the_icon();
+            let _ = icon.state.add_to_the_shell(icon.hwnd);
             Ok(icon)
         }
 
         /// **Show `picture`**: the icon drawn again if its badge moved, and the shell told.
         pub fn change(&self, picture: &TrayPicture) {
             *self.state.picture.borrow_mut() = picture.clone();
-            let _ = self.state.redraw();
+            let _ = self.state.redraw_the_icon();
             self.state.tell_again(self.hwnd);
         }
 
@@ -815,7 +815,7 @@ mod windows_tray {
         let state = unsafe { Rc::from_raw(pointer) };
         match answer {
             TrayHostAnswer::Callback => match tray_callback_for(wparam.0, lparam.0, TRAY_ICON_ID) {
-                Some(TrayCallback::Show) => state.park(TrayGesture::Show),
+                Some(TrayCallback::Show) => state.park_the_gesture(TrayGesture::Show),
                 Some(TrayCallback::Menu { x, y }) => {
                     MENU_AT.set(Some((x, y)));
                     post_later(hwnd, TRAY_LATER_MENU);
@@ -825,17 +825,17 @@ mod windows_tray {
             TrayHostAnswer::Menu => {
                 let at = MENU_AT.take();
                 if let Some(row) = track_tray_menu(hwnd, &state.labels.borrow().clone(), at) {
-                    state.park(row);
+                    state.park_the_gesture(row);
                 }
             }
             TrayHostAnswer::Redraw => {
-                if state.redraw() {
+                if state.redraw_the_icon() {
                     state.tell_again(hwnd);
                 }
             }
             TrayHostAnswer::AddAgain => {
-                let _ = state.redraw();
-                if state.add(hwnd) {
+                let _ = state.redraw_the_icon();
+                if state.add_to_the_shell(hwnd) {
                     (state.note)("BT_TRAY the icon is added again: the taskbar came back");
                 }
             }
@@ -875,7 +875,7 @@ mod windows_tray {
             let menu = Result::ok(CreatePopupMenu())?;
             let chosen = (|| {
                 for row in TrayGesture::MENU {
-                    let mut label: Vec<u16> = labels.of(row).encode_utf16().collect();
+                    let mut label: Vec<u16> = labels.row_label(row).encode_utf16().collect();
                     label.push(0);
                     Result::ok(AppendMenuW(
                         menu,
@@ -1071,14 +1071,14 @@ mod tests {
     }
 
     /// An icon of one opaque colour, `side` × `side`, in Windows' byte order (blue first).
-    fn opaque(side: u32, rgb: [u8; 3]) -> Vec<u8> {
+    fn opaque_icon(side: u32, rgb: [u8; 3]) -> Vec<u8> {
         (0..side * side)
             .flat_map(|_| [rgb[2], rgb[1], rgb[0], 255])
             .collect()
     }
 
     /// The pixel at `(x, y)`, as red, green, blue, alpha.
-    fn at(pixels: &[u8], side: u32, x: u32, y: u32) -> [u8; 4] {
+    fn pixel_at(pixels: &[u8], side: u32, x: u32, y: u32) -> [u8; 4] {
         let index = ((y * side + x) * 4) as usize;
         [
             pixels[index + 2],
@@ -1096,30 +1096,30 @@ mod tests {
         let ink = [0xe0, 0x40, 0x30];
         for side in [16, 20, 24, 32] {
             let base = [0x10, 0x80, 0xf0];
-            let mut filled = opaque(side, base);
+            let mut filled = opaque_icon(side, base);
             badge_the_icon(&mut filled, side, ink, false);
             let centre = side - side / 4;
             assert_eq!(
-                at(&filled, side, centre, centre),
+                pixel_at(&filled, side, centre, centre),
                 [ink[0], ink[1], ink[2], 255],
                 "{side}: the disc's middle is its ink"
             );
             assert_eq!(
-                at(&filled, side, 0, 0),
+                pixel_at(&filled, side, 0, 0),
                 [base[0], base[1], base[2], 255],
                 "{side}: the far corner is the icon's"
             );
             // The pixel inside the middle, up and to the left: past the badge and its gap at
             // every side (the gap reaches the middle itself at 16 px).
             assert_eq!(
-                at(&filled, side, side / 2 - 1, side / 2 - 1),
+                pixel_at(&filled, side, side / 2 - 1, side / 2 - 1),
                 [base[0], base[1], base[2], 255],
                 "{side}: the icon by its middle is the icon's"
             );
             // Along the row from the disc's middle leftwards to the icon: some pixel the gap
             // clears entirely (the gap is at least a pixel wide, and a row crosses it square).
             let gap_cleared = (0..side / 2).any(|step| {
-                let at_step = at(&filled, side, centre - step, centre);
+                let at_step = pixel_at(&filled, side, centre - step, centre);
                 at_step[3] == 0
             });
             assert!(
@@ -1127,15 +1127,15 @@ mod tests {
                 "{side}: a transparent gap parts the disc from the icon"
             );
 
-            let mut ring = opaque(side, base);
+            let mut ring = opaque_icon(side, base);
             badge_the_icon(&mut ring, side, ink, true);
             assert_eq!(
-                at(&ring, side, centre, centre)[3],
+                pixel_at(&ring, side, centre, centre)[3],
                 0,
                 "{side}: a ring is open in its middle"
             );
             assert_eq!(
-                at(&ring, side, centre, side - 1),
+                pixel_at(&ring, side, centre, side - 1),
                 [ink[0], ink[1], ink[2], 255],
                 "{side}: and inked at its edge"
             );
@@ -1181,7 +1181,7 @@ mod win32_constant_tests {
 
     /// RED (T13) — this module's copies of Win32's numbers are Win32's.
     #[test]
-    fn the_numbers_written_down_are_the_numbers_windows_publishes() {
+    fn the_tray_numbers_written_down_are_the_ones_windows_publishes() {
         assert_eq!(super::WM_APP, WM_APP);
         assert_eq!(super::WM_CLOSE, WM_CLOSE);
         assert_eq!(super::WM_CONTEXTMENU, WM_CONTEXTMENU);
