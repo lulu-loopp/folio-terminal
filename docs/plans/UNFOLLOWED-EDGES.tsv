@@ -2301,7 +2301,7 @@ crates/bt-app/src/main.rs	bt-app crate::DropLanding::caption	Ambiguous	text	5
 crates/bt-app/src/main.rs	bt-app crate::FilesRowClicks::register	Ambiguous	then	1	
 crates/bt-app/src/main.rs	bt-app crate::FlipTween::remaining	Ambiguous	as_secs_f32	1	
 crates/bt-app/src/main.rs	bt-app crate::FlipTween::sample	Ambiguous	as_secs_f32	1	
-crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	and_then	11	
+crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	and_then	12	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d); the turn's chain of settles gains FolioApp::settle_bring_back_request (Result::and_then over the turn's own settles); in-memory, no wait
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	any	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	is_empty	1	
 crates/bt-app/src/main.rs	bt-app crate::FolioApp::about_to_wait_inner	Ambiguous	is_none_or	1	
@@ -2414,8 +2414,6 @@ crates/bt-app/src/main.rs	bt-app crate::MarkdownPictures::evict_to_budget	Ambigu
 crates/bt-app/src/main.rs	bt-app crate::MarkdownPictures::evict_to_budget	Ambiguous	sort_unstable_by_key	1	
 crates/bt-app/src/main.rs	bt-app crate::MathWorkerRequest::relate	Dynamic	same_file_for_the_same_window	1	
 crates/bt-app/src/main.rs	bt-app crate::MultiClicks::register	Ambiguous	then_some	1	
-crates/bt-app/src/main.rs	bt-app crate::NotificationDesk::show	Ambiguous	send_event	1	
-crates/bt-app/src/main.rs	bt-app crate::NotificationDesk::take_activations	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/main.rs	bt-app crate::OverlayStack::bands_bottom_first	Ambiguous	append	1	
 crates/bt-app/src/main.rs	bt-app crate::OverlayStack::bands_bottom_first	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/main.rs	bt-app crate::OverlayStack::flattened	Ambiguous	append	1	
@@ -4042,6 +4040,7 @@ crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::raise_notification_refusal	Ambiguous	text	2	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::raise_notification_refusal	Ambiguous	to_owned	1	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::replace_contradicted_flash	Ambiguous	then_some	1	
+crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::tell_the_first_put_away	Ambiguous	text	2	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d); the first put-away notification's title and body, read from the i18n table (Text::text over a constant entry); in-memory, no wait
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::Runtime::toast_anchor_rect	Ambiguous	flatten	1	
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::raise_cancelled_quit_card_on	Ambiguous	text	1	2026-10-25: T-SPLIT-2B batch 4; the same site, moved with `raise_cancelled_quit_card_on` from main.rs into runtime/attention.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/attention.rs	bt-app crate::runtime::attention::raise_cancelled_quit_card_on	Ambiguous	to_owned	1	2026-10-25: T-SPLIT-2B batch 4; the same site, moved with `raise_cancelled_quit_card_on` from main.rs into runtime/attention.rs: K2 moves the item, not the call
@@ -5642,7 +5641,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::step_in	Amb
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::step_nav	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsPanel::toggle	Ambiguous	flatten	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::control	Ambiguous	unwrap_or	1	
-crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	text	75	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row; 2026-10-29: T-HIGH-CONTRAST (plan row 90): grown 73 -> 75: the Theme and scheme rows' two contrast-theme sentences (`Text::DescThemeHighContrast` / `DescSchemeHighContrast`), a string-table lookup; grown 75 -> 76 by T-AGENT-RESUME-AFTER-RESTART (plan row 195) (2026-11-03): the Agents page's resume switch's sentence, one more row of the table (i18n Text::text); a table read, no wait
+crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	text	76	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d); Keep running when closed's sentence is one more row's line read from the i18n table (Text::text); in-memory, no wait
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::literal_description	Ambiguous	unwrap_or_else	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::menu_action	Ambiguous	text	3	
@@ -5659,7 +5658,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::selected_inde
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::selected_index	Ambiguous	then	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::slider_value	Ambiguous	unwrap_or	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::stated_value	Ambiguous	text	7	2026-10-20: T-INTEGRATION-INJECT-2-BUILD (Folio's PSReadLine per pane, the 5.1 language question, the earlier copy's removal row), written before the call graph landed: standard, collection and string methods and same-named methods of this branch's own types the grammar does not resolve by receiver; none is a door, and every worker door body they sit beside is reached from its completions row
-crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::title	Ambiguous	text	74	2026-11-11: T-START-AT-LOGON-SWITCH (0.4.10 plan row 22a); the General page's Start at sign-in row's title, one more row of the table (i18n Text::text); a table read, no wait. Before: 2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the Agents page's resume switch's title, one more row of the table (i18n Text::text); a table read, no wait
+crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::title	Ambiguous	text	75	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d); Keep running when closed's title, one more row of the General page read from the i18n table (Text::text); in-memory, no wait
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::value_text	Ambiguous	text	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::SettingsRow::value_text	Ambiguous	then	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::StackMetrics::control_stack_height	Dynamic	px	1	
@@ -5711,7 +5710,7 @@ crates/bt-app/src/settings.rs	bt-app crate::settings::ellipsized_middle	Ambiguou
 crates/bt-app/src/settings.rs	bt-app crate::settings::ellipsized_middle	Ambiguous	map	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::ellipsized_middle	Dynamic	kept	2	
 crates/bt-app/src/settings.rs	bt-app crate::settings::ellipsized_middle	Dynamic	measure	2	
-crates/bt-app/src/settings.rs	bt-app crate::settings::every_row_of_the_dialog	Ambiguous	push	55	2026-11-11: T-START-AT-LOGON-SWITCH (0.4.10 plan row 22a); the sign-in switch is one more row the dialog lists (Vec::push); in-memory, no wait. Before: 2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the resume switch is one more row the dialog lists (Vec::push); an in-memory read of values the call already holds, no wait
+crates/bt-app/src/settings.rs	bt-app crate::settings::every_row_of_the_dialog	Ambiguous	push	56	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d); the close switch is one more row the dialog lists (Vec::push); in-memory, no wait
 crates/bt-app/src/settings.rs	bt-app crate::settings::everyday_cap	Ambiguous	fold	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::everyday_cap	Ambiguous	into_iter	1	
 crates/bt-app/src/settings.rs	bt-app crate::settings::everyday_cap	Ambiguous	map	1	
@@ -7550,6 +7549,8 @@ crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>:
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::present_facts	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::watch_session_end	Ambiguous	ok	1	
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::watch_system_settings	Ambiguous	ok	1	
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<NotificationDesk as ToastDoor>::show	Ambiguous	send_event	1	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d); the desk's show moved into the seam as the product's toast door (R7), unchanged: the click callback's LoopProxy::send_event, run on the platform's thread, which wakes the loop; no wait
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<NotificationDesk as ToastDoor>::take_activations	Ambiguous	unwrap_or_default	1	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d); the desk's take_activations moved into the seam as the product's toast door (R7), unchanged: Option::unwrap_or_default over the clicks the notifier already queued; no wait
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::LoopProxy::send_event	Dynamic	(value)	1	
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::display_frame_rate_millihertz	Ambiguous	and_then	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `display_frame_rate_millihertz` from main.rs into window_seam.rs: K2 moves the item, not the call
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::display_frame_rate_millihertz	Ambiguous	or_else	1	2026-10-26: T-SPLIT-2B batch 22; the same site, moved by K2 batch 22 with `display_frame_rate_millihertz` from main.rs into window_seam.rs: K2 moves the item, not the call
@@ -8158,6 +8159,8 @@ crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v38
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v39_to_v40	Ambiguous	insert	2	2026-11-03: T-AGENT-RESUME-AFTER-RESTART (plan row 195); the settings migration writes resume_agents' default and its new schema number into the JSON object (Map::insert); a value rewrite in memory, no wait
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v3_to_v4	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v40_to_v41	Ambiguous	insert	2	2026-11-18: T-TRAY-87A-WINDOWS-PUT-AWAY (0.4.10 plan row 87, part 87a); serde_json's Map::insert of the version and close_keeps_running, as every settings step writes its key; no wait
+crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v41_to_v42	Ambiguous	expect	1	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d); the v41-to-v42 step serialises a unit variant (Result::expect on serde_json::to_value); in-memory, no wait
+crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v41_to_v42	Ambiguous	insert	2	2026-11-19: T-TRAY-87D-SETTINGS-AND-TEXTS (0.4.10 plan row 87, part 87d); the v41-to-v42 step writes two keys into the document's object (serde_json Map::insert); in-memory, no wait
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v4_to_v5	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v5_to_v6	Ambiguous	insert	2	
 crates/bt-persist/src/migrate.rs	bt-persist crate::migrate::migrate_settings_v6_to_v7	Ambiguous	insert	2	
