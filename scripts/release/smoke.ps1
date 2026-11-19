@@ -860,8 +860,9 @@ if (-not $folio.HasExited -and $window -ne [IntPtr]::Zero) {
 # icon it does not hold has no place. Windows 11 parks a new icon in the overflow, and the shell
 # answers for an icon there too (row 87b's clean-machine check 1).
 $iconStood = $false
+$trayHost = [IntPtr]::Zero
+$icon = $null
 if ($putAway) {
-    $trayHost = [IntPtr]::Zero
     [Smoke.Win32]::EnumWindows({
             param([IntPtr] $handle, [IntPtr] $unused)
             $pid_ = 0
@@ -892,6 +893,15 @@ if (-not $folio.HasExited -and $window -ne [IntPtr]::Zero -and $outsideQuit -ne 
     [void][Smoke.Win32]::PostMessageW($window, $outsideQuit, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 $closed = $folio.WaitForExit(20000)
+
+# **And the icon left with the run** (row 87b, review N9): after the exit the shell answers for
+# no icon 1 of that host. A host destroyed under a live icon would leave the shell holding a dead
+# one, which it still answers for.
+$iconGone = $true
+if ($closed -and $null -ne $icon) {
+    $place = New-Object Smoke.Win32+RECT
+    $iconGone = [Smoke.Win32]::Shell_NotifyIconGetRect([ref] $icon, [ref] $place) -ne 0
+}
 
 $seen = (Get-Content -LiteralPath $trace -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)
 if (-not $seen) { throw "the launch wrote no startup trace; see $trace" }
@@ -932,6 +942,8 @@ Write-Host 'its icon stood in the notification area while it was put away.'
 if (-not $closed) { throw 'Folio did not quit when asked by its quit from outside' }
 if ($folio.ExitCode -ne 0) { throw "folio exited $($folio.ExitCode)" }
 Write-Host 'it quit when asked from outside, and exited 0.'
+if (-not $iconGone) { throw 'the run exited and its icon stayed in the notification area' }
+Write-Host 'its icon left the notification area with the run.'
 
 # ── 7: the log an ordinary run leaves says which build left it ───────────────
 #

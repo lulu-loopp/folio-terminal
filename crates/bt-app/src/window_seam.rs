@@ -710,7 +710,7 @@ impl TaskbarDoor for bt_platform::Taskbar {
 
 /// **The run's icon in the notification area, as the application tells it** (0.4.10 plan row 87,
 /// part 87b) — `bt_platform::tray::TrayIcon`'s methods; the icon goes when the value does
-/// ([`Self::remove`]).
+/// ([`Self::remove_the_icon`]).
 pub(crate) trait TrayDoor {
     /// Show `picture`.
     fn change(&self, picture: &bt_platform::tray::TrayPicture);

@@ -148,6 +148,12 @@ pub(crate) struct TrayStand<T> {
     labelled: Option<TrayLabels>,
     /// Whether a host that could not be made was said: the stand does not ask again.
     refused: bool,
+    /// **Whether the run has ended** ([`Self::take_down_for_good`]): the icon went with the run's
+    /// last write, and nothing puts it up again. winit's loop runs one more `about_to_wait` after
+    /// the exit was asked (review P1-1), and a close by the last shell's exit leaves its window
+    /// in the registry for up to the pages' teardown bound; on those turns the switch still reads
+    /// on.
+    ended: bool,
 }
 
 impl<T> Default for TrayStand<T> {
@@ -157,6 +163,7 @@ impl<T> Default for TrayStand<T> {
             told: None,
             labelled: None,
             refused: false,
+            ended: false,
         }
     }
 }
@@ -172,8 +179,14 @@ impl<T: TrayDoor> TrayStand<T> {
         self.refused
     }
 
+    /// Whether the run has ended, and the icon with it ([`Self::take_down_for_good`]).
+    pub(crate) fn icon_has_ended(&self) -> bool {
+        self.ended
+    }
+
     /// **The icon `made` put up**, having shown `picture` with `labels` — or its refusal, said
-    /// through `note` once.
+    /// through `note` once. Once the run has ended an icon made is taken down again: nothing
+    /// stands after the end.
     pub(crate) fn stand_the_icon(
         &mut self,
         made: Result<T, String>,
@@ -181,6 +194,12 @@ impl<T: TrayDoor> TrayStand<T> {
         labels: TrayLabels,
         note: impl Fn(&str),
     ) {
+        if self.ended {
+            if let Ok(icon) = made {
+                icon.remove_the_icon();
+            }
+            return;
+        }
         match made {
             Ok(icon) => {
                 self.icon = Some(icon);
@@ -219,13 +238,21 @@ impl<T: TrayDoor> TrayStand<T> {
             .map_or_else(Vec::new, TrayDoor::take_gestures)
     }
 
-    /// **The icon taken out of the notification area**, if it is up.
+    /// **The icon taken out of the notification area**, if it is up — the switch gone off, or a
+    /// platform with no notification area; it is put up again when the switch is on again.
     pub(crate) fn take_down(&mut self) {
         if let Some(icon) = self.icon.take() {
             icon.remove_the_icon();
         }
         self.told = None;
         self.labelled = None;
+    }
+
+    /// **The icon taken down with the run** (`App::finish`): taken out of the notification area,
+    /// and the stand ended, so no later turn of the loop puts it up again.
+    pub(crate) fn take_down_for_good(&mut self) {
+        self.take_down();
+        self.ended = true;
     }
 }
 
@@ -294,6 +321,35 @@ mod tests {
         assert_ne!(
             failed.ink_on_dark, finished.ink_on_dark,
             "--err is not --accent"
+        );
+    }
+
+    /// RED (T7; R2; review P2-2) — **the loop tells the icon after every window's turn**, once:
+    /// each window's attention pass has settled its claims by then, so the fold reads them settled
+    /// and a credential that ran out on this turn is told on this turn (the claim's own test is
+    /// `put_away_tests`' `a_credential_that_runs_out_while_away_changes_the_icon_on_that_turn`).
+    ///
+    /// PLANT 87b-P26: move `self.tell_the_tray();` above the windows' turns in
+    /// `FolioApp::about_to_wait_inner` — the icon is told the claims of the turn before.
+    #[test]
+    fn the_loop_tells_the_icon_after_every_windows_turn() {
+        // Comments and whitespace squeezed out, so a comment that quotes the call cannot stand in
+        // for it.
+        let body = crate::test_support::squeezed_body("FolioApp", "about_to_wait_inner");
+        let turns = body
+            .find("letturn=runtime.turn(now,application_clocks);")
+            .unwrap_or_else(|| panic!("the windows' own turn has moved:\n{body}"));
+        let told = body
+            .find("self.tell_the_tray();")
+            .unwrap_or_else(|| panic!("the loop no longer tells the icon:\n{body}"));
+        assert!(
+            turns < told,
+            "the icon is told after the windows' turns:\n{body}"
+        );
+        assert_eq!(
+            body.matches("self.tell_the_tray();").count(),
+            1,
+            "and once a turn:\n{body}"
         );
     }
 

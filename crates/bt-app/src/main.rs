@@ -38165,8 +38165,10 @@ impl<B: Backend> App<B> {
         // after the run's last write, on every road to the end this is the seam of — the last
         // close, the reap, the quit's way out, the system's close and Folio's quit from outside,
         // a failure, the loop's own exit. `main` leaves by `leave_process`, so nothing would drop
-        // the icon later.
-        self.tray.take_down();
+        // the icon later. **For good** (review P1-1): the loop's last `about_to_wait` runs after
+        // the exit was asked, and a window its last shell's exit closed stays in the registry
+        // until its pages let go; neither puts the icon up again.
+        self.tray.take_down_for_good();
     }
 
     /// **Ask for the quit transaction**, from whichever of the four doors the
@@ -48416,18 +48418,26 @@ impl<B: Backend> FolioApp<B> {
     /// door ([`Self::bring_the_window_back`]), or raises the window the reader was last in when
     /// nothing is put away (R12), never hiding one; New window opens a window and only that
     /// (item 8); Quit Folio is the quit's fourth door ([`App::ask_to_quit`]). **During a quit**
-    /// (R5): while it asks, Show brings the window back so its question can be answered, and the
-    /// other two are dropped; once it has been answered, every gesture is dropped.
+    /// (R5): while it asks, Show brings the window back so its question can be answered — or,
+    /// nothing put away, raises the window holding it (R12) — and the other two are dropped; once
+    /// it has been answered, every gesture is dropped.
+    ///
+    /// **After the run's end nothing stands** (review P1-1): once [`App::finish`] has taken the
+    /// icon down for good, this does nothing — on winit's last `about_to_wait` after the exit,
+    /// and on the turns a window closed by its last shell's exit waits for its pages.
     fn settle_tray(&mut self, event_loop: &B::Loop) -> Result<()> {
         let Some(app) = self.app.as_ref() else {
             return Ok(());
         };
+        if app.tray.icon_has_ended() {
+            return Ok(());
+        }
         if let Some(step) = app.quit.as_ref().map(quit::Quit::step) {
             let gestures = app.tray.take_gestures();
             if step == quit::QuitStep::Ask
                 && gestures.contains(&bt_platform::tray::TrayGesture::Show)
             {
-                self.bring_the_window_back()?;
+                self.answer_the_icons_show()?;
             }
             return Ok(());
         }
@@ -48465,13 +48475,7 @@ impl<B: Backend> FolioApp<B> {
             .map_or_else(Vec::new, |app| app.tray.take_gestures());
         for gesture in gestures {
             match gesture {
-                bt_platform::tray::TrayGesture::Show => {
-                    if self.bring_the_window_back()?.is_none()
-                        && let Some(id) = self.the_window_the_reader_was_last_in()
-                    {
-                        self.raise_the_window_the_icon_named(id);
-                    }
-                }
+                bt_platform::tray::TrayGesture::Show => self.answer_the_icons_show()?,
                 bt_platform::tray::TrayGesture::NewWindow => {
                     let like = self.the_window_the_reader_was_last_in();
                     if let Some(id) = self.open_a_window_for_a_launch(
@@ -48488,6 +48492,17 @@ impl<B: Backend> FolioApp<B> {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// **The icon's Show** (R12): the put-away window back through the one door, or — nothing put
+    /// away — the window the reader was last in raised; never a window hidden.
+    fn answer_the_icons_show(&mut self) -> Result<()> {
+        if self.bring_the_window_back()?.is_none()
+            && let Some(id) = self.the_window_the_reader_was_last_in()
+        {
+            self.raise_the_window_the_icon_named(id);
         }
         Ok(())
     }
@@ -48516,6 +48531,26 @@ impl<B: Backend> FolioApp<B> {
             app.tray.tell_the_icon(picture, labels);
         }
     }
+
+    /// **How many windows a person could still see after this one goes** (0.4.10 plan row 87,
+    /// part 87b, R8): [`Self::windows_left_after`] without the put-away ones. The put-away rule
+    /// ([`Self::close_fate`]) reads it; the run's end does not — a put-away window is a window
+    /// whose shells still run, so a close beside one never ends the run.
+    fn windows_on_the_glass_after(&mut self, going: WindowId) -> usize {
+        let summon = self.app.as_ref().and_then(|app| app.quake.window());
+        (0..self.windows.len())
+            .filter(|index| {
+                self.windows
+                    .key_at(*index)
+                    .filter(|id| Some(*id) != summon && *id != going)
+                    .and_then(|id| self.windows.get_mut(id))
+                    .is_some_and(|window: &mut WindowRuntime<B>| {
+                        window.leaving.is_none() && !window.put_away
+                    })
+            })
+            .count()
+    }
+
     /// **How many windows a reader would still have after this one goes** — the
     /// number both residency doors are decided on (§7.54, §7.54e ①).
     ///
@@ -48548,25 +48583,6 @@ impl<B: Backend> FolioApp<B> {
     /// window's, so the next launch brings it back holding what it held. See
     /// [`Self::close`], which is where it is told, and
     /// [`Self::retire_the_summon_with_the_run`], which is the door it leaves by.
-    /// **How many windows a person could still see after this one goes** (0.4.10 plan row 87,
-    /// part 87b, R8): [`Self::windows_left_after`] without the put-away ones. The put-away rule
-    /// ([`Self::close_fate`]) reads it; the run's end does not — a put-away window is a window
-    /// whose shells still run, so a close beside one never ends the run.
-    fn windows_on_the_glass_after(&mut self, going: WindowId) -> usize {
-        let summon = self.app.as_ref().and_then(|app| app.quake.window());
-        (0..self.windows.len())
-            .filter(|index| {
-                self.windows
-                    .key_at(*index)
-                    .filter(|id| Some(*id) != summon && *id != going)
-                    .and_then(|id| self.windows.get_mut(id))
-                    .is_some_and(|window: &mut WindowRuntime<B>| {
-                        window.leaving.is_none() && !window.put_away
-                    })
-            })
-            .count()
-    }
-
     fn windows_left_after(&mut self, going: WindowId) -> usize {
         let summon = self.app.as_ref().and_then(|app| app.quake.window());
         (0..self.windows.len())
@@ -58972,6 +58988,10 @@ fn leave_by_the_panic_road() -> ! {
     // because the next two statements end the process whether one window
     // was hidden or none.
     let _ = bt_platform::hide_every_window_of_this_process();
+    // **And the run's icon out of the notification area** (0.4.10 plan row 87, part 87b; review
+    // P2-5): the process ends below without a `Drop`, and the icon would stay up — its menu live
+    // inside the panic box's pump, and a dead icon after.
+    bt_platform::tray::take_down_on_the_panic_road();
     // **An update's exit guard runs on this road too** (U-34): a panic after
     // the hand-over leaves the applier or starts Folio again, as the
     // process's ordinary end does.

@@ -48,8 +48,13 @@ impl PutAwayRun {
 
     /// [`Self::open`] with the window holding `tab`.
     fn open_holding(tag: &str, keeps_running: bool, tab: crate::TabState) -> Self {
+        Self::open_holding_tabs(tag, keeps_running, vec![tab])
+    }
+
+    /// [`Self::open`] with the window holding `tabs`, the first one active.
+    fn open_holding_tabs(tag: &str, keeps_running: bool, tabs: Vec<crate::TabState>) -> Self {
         let dir = crate::test_support::disk_scratch(&format!("put-away-{tag}"));
-        let mut folio = HeadlessFolio::with_tabs(tag, vec![tab], 0);
+        let mut folio = HeadlessFolio::with_tabs(tag, tabs, 0);
         let mut store = crate::persist::SessionStore::at_waking(
             dir.join("session.json"),
             dir.join("session.lock"),
@@ -1206,8 +1211,27 @@ fn pictures_of(effects: &[WindowEffect]) -> Vec<&bt_platform::tray::TrayPicture>
 }
 
 /// Where `wanted` stands in `effects`, if it does.
-fn place_of(effects: &[WindowEffect], wanted: &WindowEffect) -> Option<usize> {
+fn place_of_the_effect(effects: &[WindowEffect], wanted: &WindowEffect) -> Option<usize> {
     effects.iter().position(|effect| effect == wanted)
+}
+
+/// A tab holding a preview with typed, unsaved work in `notes.md` of a scratch folder `scratch`:
+/// a quit asks its question over it.
+fn a_tab_holding_unsaved_work(scratch: &str) -> crate::TabState {
+    let dir = crate::test_support::disk_scratch(scratch);
+    let path = dir.join("notes.md");
+    std::fs::write(&path, "one\n").expect("write the file");
+    let mut buffer = crate::test_support::buffer_read_from(&path);
+    let mut caret = crate::preview_edit::EditCaret::default();
+    let body = buffer.content().cloned().expect("the head landed");
+    caret.place(&body, 4, false);
+    assert!(
+        buffer.edit_by_caret(&mut caret, |content, caret| {
+            crate::preview_edit::insert(content, caret, "typed by hand")
+        }),
+        "the fixture's own precondition: there is unsaved work"
+    );
+    crate::test_support::tab_with_a_preview(1, vec![buffer]).0
 }
 
 /// RED (T12; R12) — **the icon's Show with nothing put away raises the window the reader was last
@@ -1358,8 +1382,8 @@ fn the_icon_follows_the_switch() {
     run.switch(false);
     run.turn_the_tray().expect("the icon's turn");
     let effects = run.application.event_loop.ledger.take();
-    let back = place_of(&effects, &WindowEffect::Visible(true));
-    let gone = place_of(&effects, &WindowEffect::TrayRemoved);
+    let back = place_of_the_effect(&effects, &WindowEffect::Visible(true));
+    let gone = place_of_the_effect(&effects, &WindowEffect::TrayRemoved);
     assert!(
         back.is_some() && gone.is_some() && back < gone,
         "off: the window back on the glass, then the icon gone: {effects:?}"
@@ -1414,20 +1438,7 @@ fn a_host_that_could_not_be_made_is_not_asked_again() {
 /// on a hidden window.
 #[test]
 fn the_icons_quit_asks_its_question_on_the_glass() {
-    let dir = crate::test_support::disk_scratch("put-away-icon-quit-file");
-    let path = dir.join("notes.md");
-    std::fs::write(&path, "one\n").expect("write the file");
-    let mut buffer = crate::test_support::buffer_read_from(&path);
-    let mut caret = crate::preview_edit::EditCaret::default();
-    let body = buffer.content().cloned().expect("the head landed");
-    caret.place(&body, 4, false);
-    assert!(
-        buffer.edit_by_caret(&mut caret, |content, caret| {
-            crate::preview_edit::insert(content, caret, "typed by hand")
-        }),
-        "the fixture's own precondition: there is unsaved work"
-    );
-    let (tab, _) = crate::test_support::tab_with_a_preview(1, vec![buffer]);
+    let tab = a_tab_holding_unsaved_work("put-away-icon-quit-file");
     let mut run = PutAwayRun::open_holding("icon-quit-asks", true, tab);
     let _ = run.close();
     assert!(run.window().put_away, "the fixture's window is put away");
@@ -1464,12 +1475,16 @@ fn the_icons_quit_asks_its_question_on_the_glass() {
     assert!(!run.app().quit_requested, "and no second quit is asked");
 }
 
-/// RED (T9; R6) — **the icon's Quit on a put-away run writes the layout, leaves, and takes the
-/// icon out of the notification area** at the run's end seam (`App::finish`), after the run's
-/// last write: the sentinel is already gone when the icon goes.
+/// RED (T9; R6; review P1-1) — **the icon's Quit on a put-away run writes the layout, leaves, and
+/// takes the icon out of the notification area** at the run's end seam (`App::finish`), after the
+/// run's last write: the sentinel is already gone when the icon goes. **And it stays down**: winit
+/// runs one more `about_to_wait` after the exit was asked, and that turn puts up nothing.
 ///
 /// PLANT 87b-P15: take the icon down above `session_store.close()` in `App::finish` — the
 /// sentinel still stands at the removal.
+///
+/// PLANT 87b-P29: drop the ended check from `FolioApp::settle_tray` and the stand's refusal
+/// (`TrayStand::stand_the_icon`) — the loop's last turn puts the icon up again on a new host.
 #[test]
 fn the_icons_quit_leaves_and_takes_the_icon_down() {
     let mut run = PutAwayRun::open("icon-quit", true);
@@ -1515,6 +1530,17 @@ fn the_icons_quit_leaves_and_takes_the_icon_down() {
         effects.contains(&WindowEffect::Exit),
         "the run leaves: {effects:?}"
     );
+    // winit's last `AboutToWait`, after the exit was asked (`runner.rs`'s `loop_destroyed`).
+    run.turn_the_tray().expect("the loop's last turn");
+    effects.extend(run.application.event_loop.ledger.take());
+    let gone = place_of_the_effect(&effects, &WindowEffect::TrayRemoved);
+    assert!(
+        !effects
+            .iter()
+            .skip(gone.map_or(0, |at| at + 1))
+            .any(|effect| matches!(effect, WindowEffect::TrayShown(_))),
+        "nothing puts the icon up after the run's end: {effects:?}"
+    );
     assert_eq!(
         run.written_windows(),
         1,
@@ -1529,6 +1555,186 @@ fn the_icons_quit_leaves_and_takes_the_icon_down() {
         run.application.event_loop.tray.watched_at_the_removal.get(),
         Some(false),
         "after the run's last write: the sentinel was gone when the icon went"
+    );
+}
+
+/// RED (review P1-1, the close road) — **a run its last shell's exit ended keeps its icon down
+/// while the window waits for its pages**: the close spends `App::finish`, the icon goes, and the
+/// window stays in the registry, leaving, until its pages let go; a settle turn in that time puts
+/// up nothing.
+///
+/// PLANT 87b-P29 (as above): the settle turn puts the icon up again, live on a finished run.
+#[test]
+fn the_icon_stays_down_while_a_window_its_last_shell_closed_waits_for_its_pages() {
+    let mut run = PutAwayRun::open("icon-exited", true);
+    run.turn_the_tray().expect("the icon is put up");
+    let _ = run.application.event_loop.ledger.take();
+    let effects = run.close_by(OwnCloseRoad::ShellsExited);
+    assert!(
+        effects.contains(&WindowEffect::TrayRemoved),
+        "the run's end takes the icon down: {effects:?}"
+    );
+    assert!(
+        run.window().leaving.is_some(),
+        "the fixture's own precondition: the window waits for its pages in the registry"
+    );
+    run.turn_the_tray().expect("the icon's turn");
+    let effects = run.application.event_loop.ledger.take();
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, WindowEffect::TrayShown(_))),
+        "nothing is put up on a finished run: {effects:?}"
+    );
+    assert!(run.app().tray.icon_has_ended() && !run.app().tray.icon_is_up());
+}
+
+/// RED (T7; review P2-2) — **an attention credential that runs out while the window is put away
+/// changes the icon on that turn**: the fold reads the claims after the window's turn has settled
+/// them, so the turn that takes the place shows the queue's badge and the turn the credential runs
+/// out shows nothing — each told on its own turn. (Where the loop tells the icon, after every
+/// window's turn, is pinned by `tray_fold`'s
+/// `the_loop_tells_the_icon_after_every_windows_turn`.)
+///
+/// The credential is a background tab's, as the strip's own halo test arms it (a request in the
+/// tab a reader is looking at is refused one).
+#[test]
+fn a_credential_that_runs_out_while_away_changes_the_icon_on_that_turn() {
+    let mut front = ringing_tab(1, 1);
+    front.manual_name = Some("build".to_owned());
+    let mut run =
+        PutAwayRun::open_holding_tabs("icon-credential", true, vec![front, ringing_tab(2, 1)]);
+    let _ = run.close();
+    assert!(run.window().put_away, "the fixture's window is put away");
+    run.turn_the_tray().expect("the icon is put up");
+    let _ = run.application.event_loop.ledger.take();
+    let id = run.application.id;
+    let waiting = *run.window().tabs[1].sessions.keys().next().expect("a pane");
+    let armed = std::time::Instant::now();
+    let slot = bt_workbench::attention::WaitSlot::Level(bt_workbench::attention::WaitKind::Agent);
+    {
+        let runtime = run.application.folio.runtime(id).expect("the window");
+        let reach = crate::notify::desktop_reach(false, runtime.window.observed_place);
+        let places = &mut runtime.window.attention_next_place;
+        let leaf = &mut runtime.window.tabs[1]
+            .sessions
+            .get_mut(&waiting)
+            .expect("the pane")
+            .session;
+        leaf.attention.clock.arm(&slot, armed);
+        let _ = leaf.attention.ledger.apply(
+            bt_workbench::attention::Site {
+                tab: 1,
+                seat: waiting,
+            },
+            reach,
+            bt_workbench::attention::Event::StrongWait(slot),
+            places,
+            armed,
+        );
+    }
+    let due = armed + bt_workbench::attention::expiry::WAIT_TTL;
+    // The window's turn, then the loop's tell after it, as `about_to_wait_inner` takes them: the
+    // badges the icon was told on that turn.
+    fn turn_and_tell(
+        run: &mut PutAwayRun,
+        id: WindowId,
+        now: std::time::Instant,
+    ) -> Vec<Option<bt_platform::tray::TrayBadge>> {
+        let mut runtime = run.application.folio.runtime(id).expect("the window");
+        let _ = runtime.turn(now, true).expect("the turn is answered");
+        runtime.end_the_turns_presents();
+        run.application.folio.tell_the_tray();
+        let effects = run.application.event_loop.ledger.take();
+        pictures_of(&effects)
+            .into_iter()
+            .map(|picture| picture.badge)
+            .collect()
+    }
+    let before = turn_and_tell(&mut run, id, due - std::time::Duration::from_millis(1));
+    assert!(
+        run.window().tabs[1].fleet_awaiting(),
+        "the fixture's own precondition: the background tab holds a place"
+    );
+    assert_eq!(
+        before,
+        vec![crate::tray_fold::tray_badge_of(
+            crate::tray_fold::TrayState::Awaiting
+        )],
+        "the turn the place is taken shows the queue's badge"
+    );
+    assert_eq!(
+        turn_and_tell(&mut run, id, due),
+        vec![None],
+        "the turn the credential runs out shows nothing"
+    );
+}
+
+/// RED (R4's second site; review P2-3) — **a quit whose documents phase was cancelled on a
+/// put-away run raises its card on the glass**: the window comes back through the one door
+/// before the card is drawn, and the card is up in it.
+///
+/// PLANT 87b-P27: drop the bring-back from `FolioApp::say_the_cancelled_quit` — the card is raised
+/// on a hidden window.
+#[test]
+fn a_cancelled_quit_on_a_put_away_run_raises_its_card_on_the_glass() {
+    let mut run = PutAwayRun::open("icon-quit-cancelled", true);
+    let _ = run.close();
+    assert!(run.window().put_away, "the fixture's window is put away");
+    let _ = run.application.event_loop.ledger.take();
+    run.application
+        .folio
+        .say_the_cancelled_quit(crate::quit::Cancelled::of(&["notes.md"]))
+        .expect("the cancellation is said");
+    let effects = run.application.event_loop.ledger.take();
+    let shown = place_of_the_effect(&effects, &WindowEffect::Visible(true))
+        .unwrap_or_else(|| panic!("the window is back on the glass: {effects:?}"));
+    // The way back draws its first frame before it shows the window (87a); the card's own frame
+    // is drawn after, on the glass.
+    assert!(
+        effects[shown..]
+            .iter()
+            .any(|effect| matches!(effect, WindowEffect::Presented { .. })),
+        "the card is drawn on the glass: {effects:?}"
+    );
+    let window = run.window();
+    assert!(!window.put_away, "and no longer put away");
+    assert!(window.quit_card.is_some(), "with the card up in it");
+}
+
+/// RED (R12 during a quit; review P2-4) — **the icon's Show while a quit asks, with nothing put
+/// away, raises the window holding the question**: the window is given the keyboard, as the
+/// ordinary Show does.
+///
+/// PLANT 87b-P28: answer Show in `FolioApp::settle_tray`'s quit arm by the bring-back alone — the
+/// click finds nothing put away and raises nothing.
+#[test]
+fn the_icons_show_while_a_quit_asks_raises_the_window_holding_the_question() {
+    let tab = a_tab_holding_unsaved_work("put-away-icon-show-asks-file");
+    let mut run = PutAwayRun::open_holding("icon-show-asks", true, tab);
+    run.turn_the_tray().expect("the icon is put up");
+    run.poke(TrayGesture::Quit);
+    run.turn_the_tray().expect("the icon's turn");
+    run.application
+        .folio
+        .settle_quit(&run.application.event_loop, std::time::Instant::now())
+        .expect("the quit's turn");
+    assert_eq!(
+        run.app().quit.as_ref().map(crate::quit::Quit::step),
+        Some(crate::quit::QuitStep::Ask),
+        "the fixture's own precondition: the question is up"
+    );
+    let _ = run.application.event_loop.ledger.take();
+    run.poke(TrayGesture::Show);
+    run.turn_the_tray().expect("the icon's turn");
+    let effects = run.application.event_loop.ledger.take();
+    assert!(
+        effects.contains(&WindowEffect::ForegroundTaken),
+        "the window holding the question is given the keyboard: {effects:?}"
+    );
+    assert!(
+        !effects.contains(&WindowEffect::Visible(false)),
+        "and nothing is hidden: {effects:?}"
     );
 }
 
