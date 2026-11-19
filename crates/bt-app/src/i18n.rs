@@ -6531,11 +6531,10 @@ impl Text {
                 "Ready. Running programs will close.",
                 "准备就绪。正在运行的程序将被关闭。",
             ),
-            // The Chinese is owed (`CHINESE_PENDING`), and stands on the English until written.
             Self::UpdateCardMayWarn => pick(
                 lang,
                 "Windows may warn about this update.",
-                "Windows may warn about this update.",
+                "Windows 可能会对此更新发出警告。",
             ),
             Self::UpdateCardProgress => pick(
                 lang,
@@ -6552,11 +6551,10 @@ impl Text {
             ),
             Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
             Self::VersionUpToDate => pick(lang, "Up to date", "已是最新"),
-            // The Chinese is owed (`CHINESE_PENDING`), and stands on the English until written.
             Self::VersionNotSigned => pick(
                 lang,
                 "This copy is not signed by Microsoft's signing service.",
-                "This copy is not signed by Microsoft's signing service.",
+                "这份 Folio 没有 Microsoft 签名服务的签名。",
             ),
             Self::VersionChecking => pick(lang, "Checking…", "检查中…"),
             Self::VersionCheck => pick(lang, "Check", "检查"),
@@ -7070,20 +7068,9 @@ impl Text {
     ];
 
     /// The entries whose Chinese is owed, by column: the English stands in both until the
-    /// Chinese pass writes it (0.4.10 plan row 102 part 3).
+    /// Chinese pass writes it.
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &{
-        use HostPlatform::{MacOs, OtherUnix, Windows};
-        use Text::{UpdateCardMayWarn, VersionNotSigned};
-        [
-            (UpdateCardMayWarn, Windows),
-            (UpdateCardMayWarn, MacOs),
-            (UpdateCardMayWarn, OtherUnix),
-            (VersionNotSigned, Windows),
-            (VersionNotSigned, MacOs),
-            (VersionNotSigned, OtherUnix),
-        ]
-    };
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
