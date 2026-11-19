@@ -733,8 +733,9 @@ impl TrayDoor for bt_platform::tray::TrayIcon {
         bt_platform::tray::TrayIcon::take_gestures(self)
     }
     fn remove_the_icon(self) {
-        // The icon, its host and its drawn image go with the value (`TrayIcon`'s `Drop`).
-        drop(self);
+        // The value is consumed here and goes out of scope at the end of this body: on Windows
+        // the icon, its host and its drawn image go with it (`TrayIcon`'s `Drop`); the portable
+        // twin holds nothing.
     }
 }
 
