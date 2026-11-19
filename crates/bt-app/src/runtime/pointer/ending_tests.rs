@@ -276,6 +276,63 @@ fn two_tabs(tag: &str) -> HeadlessApplication {
     application
 }
 
+/// Two windows, one tab each: window 1's of two shells, window 2's of one.
+fn one_tab_beside_another_window(tag: &str) -> HeadlessApplication {
+    let folio = HeadlessFolio::with_tabs(tag, vec![cross_tab(1, &["A", "B"])], 0);
+    let second = crate::headless::headless_window(
+        &folio.app,
+        crate::headless::HeadlessParts::new(&folio.app.gpu, 2, (1200, 800), 1.0, &folio.ledger),
+        vec![cross_tab(2, &["C"])],
+        0,
+    );
+    let mut application = HeadlessApplication::of(folio);
+    application
+        .folio
+        .windows
+        .insert(winit::window::WindowId::from(2), second);
+    application
+}
+
+/// RED (mutation: drop `let_go_of_a_tab_moving_out` from `FolioApp::transfer_tab` — the
+/// divider's cancel puts its ratio back, and a floating window's resets the cursor, on a window
+/// with no tab in front, and panic) — **a window its last tab is leaving cancels every gesture it
+/// held, once, before the tab goes** (0.4.10 plan row 103, re-review R-N3): the cancel
+/// `close_window` would say, said while there is still a tab in front. Every owner there is is
+/// tried in turn, on a window of its own.
+#[test]
+fn a_window_its_last_tab_left_cancels_every_gesture_it_held() {
+    let window = winit::window::WindowId::from(2);
+    let owners = {
+        let mut probe = one_tab_beside_another_window("emptied-probe");
+        let runtime = probe.folio.runtime(window).expect("window 2 is open");
+        every_owner(on_pane(&runtime, 0))
+    };
+    for owner in owners {
+        let name = owner.name();
+        let mut application = one_tab_beside_another_window("emptied");
+        let tab = {
+            let mut runtime = application.folio.runtime(window).expect("window 2 is open");
+            hold(&mut runtime, owner);
+            runtime.id
+        };
+        application.runtime().app.capture_endings.clear();
+        application
+            .folio
+            .transfer_tab(tab, winit::window::WindowId::from(1))
+            .expect("the move is answered");
+        let runtime = application.runtime();
+        assert!(
+            runtime.app.pointer_capture.is_none(),
+            "{name}: nothing is held after the window shut"
+        );
+        assert_eq!(
+            runtime.app.capture_endings,
+            [(name, "cancel")],
+            "{name}: ended once, with a cancel"
+        );
+    }
+}
+
 /// The pane of the tab in front at `index` among its shells, as the shell a press is handed to.
 fn shell(runtime: &Runtime<'_, Headless>, index: usize) -> PasteTarget {
     let (seat, leaf): (&SeatId, &TerminalPane) = runtime

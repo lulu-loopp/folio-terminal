@@ -931,6 +931,7 @@ impl SpareParent {
 impl Drop for SpareParent {
     fn drop(&mut self) {
         drop(self.compositor.take());
+        crate::close_road::forget_own_window(self.window());
         let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::DestroyWindow(self.hwnd) };
     }
 }
@@ -997,6 +998,10 @@ pub fn spare_parent(
     .map_err(|error| failure("CreateWindowExW(spare parent)", &error))?;
     let window = NativeWindow::from_hwnd(hwnd)
         .ok_or_else(|| String::from("CreateWindowExW(spare parent) answered no window"))?;
+    // **Folio's own, to the close witness** (0.4.10 plan row 103, review N2): an unowned top-level
+    // window of the window thread with no `CloseRequested`, which `DefWindowProc` destroys on a
+    // `WM_CLOSE` (plan row 41); a close to it says so as reaching Folio's spare.
+    crate::close_road::name_own_window(window, "spare web parent");
     let mut parent = SpareParent {
         hwnd,
         compositor: None,
