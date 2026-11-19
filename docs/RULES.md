@@ -1801,7 +1801,17 @@ behind that plumbing. The ruled shape is in `docs/ARCHITECTURE.md` §10.
 **Rule.** A normal quit is a four-phase transaction (`quit::Quit` / `QuitStep`,
 advanced by `FolioApp::settle_quit`): ① one application-wide dirty gate over
 every dirty preview buffer and uncommitted editor, offering save-all, discard-all
-or cancel; ② a read-only photograph of every window; ③ the judged atomic write
+or cancel — **and over running work** (0.4.10 plan row 87, part 87e; the owner's
+ruling R8 of 2026-11-14): while an agent's turn is under way or a command runs
+(`running_work`: a pane bound to its agent's turns by them, every other pane by its
+session's `OSC 133` `C` without its `D`, full screen included; a pane without shell
+integration is not counted), the same step asks once, for a reason a person gave
+(`quit::Reason::asks_about_running_work`) — the running-work line last on the unsaved
+card, or alone on a card of its own, *Quit Folio?* (*Restart Folio?* for the update's
+Restart) with Quit and Cancel, Cancel focused; a put-away window is brought back
+before it asks; the system's end, the Restart Manager's close and the quit from
+outside begin no quit and so never ask, and AppKit's log-out, restart or shut-down
+answers a running-work card Quit; ② a read-only photograph of every window; ③ the judged atomic write
 (`Runtime::quit_save` and the judged flush — **a refused disk means do not
 leave, unless the person chooses to leave without the change the refusal names,
 on the card that names it**); ④ retirement, with windows hidden and the loop still pumping only the
@@ -1823,7 +1833,7 @@ files with one choice, *Leave without this change*, which alone leaves without
 them; a quit asked again runs the transaction again. **The spare web controller shares the run's one
 bounded retirement** (ticket 60): `App::run_retiring_until` is set once, when the last
 window closes or ④ begins, the spare retires in that same branch, and the run ends only
-when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The quit has a reason** (`quit::Reason`, 0.4.6 U-21): `Asked` — the chord, the menu bar's Quit, the system's quit — or `UpdateRestart`, the update's Restart, which runs the same four phases unchanged. For `UpdateRestart`, ③ is a named session generation the loop waits for across turns under `quit::UPDATE_RECEIPT_DEADLINE` (a clock, not a wait); a Cancel at ①, an incomplete save or a refused write abandons the update with the quit, and a receipt that does not come in time abandons the update and **not** the quit; from the photograph on no session change is admitted, no launch is taken and the restore card neither rises nor is answered; and only after the receipt, at the way out, is `Handoff` written durably and the applier started (`update_handoff`). **The two failure roads skip phases ① and ③**;
+when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The quit has a reason** (`quit::Reason`, 0.4.6 U-21): `Asked` — the chord, the menu bar's Quit, the Settings card's Uninstall — `LaunchWireQuit { by_a_person }`, AppKit's quit, a person's only when it gives no reason (`quit::the_systems_quit_is_a_persons`, 87e) — or `UpdateRestart`, the update's Restart, which runs the same four phases unchanged. For `UpdateRestart`, ③ is a named session generation the loop waits for across turns under `quit::UPDATE_RECEIPT_DEADLINE` (a clock, not a wait); a Cancel at ①, an incomplete save or a refused write abandons the update with the quit, and a receipt that does not come in time abandons the update and **not** the quit; from the photograph on no session change is admitted, no launch is taken and the restore card neither rises nor is answered; and only after the receipt, at the way out, is `Handoff` written durably and the applier started (`update_handoff`). **The two failure roads skip phases ① and ③**;
 the controlled one keeps the edits ① would have asked about by a write of its own.
 `FolioApp::fail` — twelve call sites — asks the
 device-loss latch first, then prints its stopped line and leaves by the one road a
