@@ -30,6 +30,8 @@
 > 一次性收割进转录；删除 v3.5/v3.6 的 reversible resize staging、settlement 与内容去重账本。
 > 本地 surface/live grid 逐个窗口事件跟随；winit 0.30.13 没有 enter/exit-size-move 事件，故以
 > 200ms `Resized` 静默提交唯一最终 ConPTY 尺寸，再等 PTY 输出静默 200ms 后收割。
+> （2026-11-19 起，0.4.10 计划第 108 行：告知子进程之后，输出静默 200ms、告知后 1s、告知后
+> 暂存满 131 072 格，三者先到即收割；见文末 2026-11-19 条。）
 >
 > **扣留政策位已退役（2026-08-16）。** 2026-08-04 为 PSReadLine 陈旧渲染锚点加过一台「输入行有字
 > 就扣住 resize」的机器（`TYPED_INPUT_RESIZE_DEFERRAL` + confirm-then-release 空行确认窗），用户
@@ -8004,6 +8006,14 @@ the session never infers it, because a session has no idea what size the child h
   only asked to create and retire from inside `schedule_live_artifacts`.
 - `ViewportProjection::set_resize_reflow_active` stays true, holding the review-hold and
   scroll-anchor gate in its resize mode.
+
+**And once the child has been told, its output does not hold the transaction open** (0.4.10 plan
+row 108, 2026-11-19). The quiet window alone could not close a transaction whose child writes more
+often than every 200 ms — an agent's spinner, a progress bar, a flood — so everything above was
+withheld for as long as it kept writing. A told transaction now also settles
+`RESIZE_SETTLE_BOUND` (1 s) after the final request, or once `RESIZE_STAGING_BUDGET_CELLS`
+(131 072) cells have been staged since it. Before the final request nothing changes: the child
+holds no size the grid could be harvested against. See the 2026-11-19 entry.
 
 **The child keeps its guard, and it is the same guard.** A `ResizePseudoConsole` — `TIOCSWINSZ` on
 Unix, same rule — is still sent only when the grid the child holds actually moves, so the sidecar
@@ -17101,10 +17111,33 @@ That is work proportional to the change. Anything else is `rebuild_projection`, 
 
 **A frame's math decorations (R9).** `decorate_math_frame`'s three walks (source faces, inline runs, failure notes) each walked every frozen line's `decorations` record, and each skipped a record whose line the frame does not draw. They range over the ids the frame's cells carry (`frame_history_ids`). `viewport_frame` at a full 100 000-line history: about 4.2 ms to 0.1 ms a publish; a whole publish there, about 6.5 ms to 2.5 ms. The other O(history) walk of a publish, `sync_projection_state`'s collection of display-math artifacts over all of `decorations` (about 1.6–1.8 ms at 100 000 lines), needs an index kept beside the records and is its own row.
 
-**Left out.** A resize made during output that never pauses for 200 ms keeps its epoch open, and its resize staging grows by every row printed until the output pauses (R7, measured: about 5 rows a line, 12 478 rows after 2 000 lines). That needs a design, a ceiling on staging or settling on a budget instead of on silence, and is its own row.
+**Left out.** A resize made during output that never pauses for 200 ms keeps its epoch open, and its resize staging grows by every row printed until the output pauses (R7, measured: about 5 rows a line, 12 478 rows after 2 000 lines). That needs a design, a ceiling on staging or settling on a budget instead of on silence, and is its own row. (Row 108, 2026-11-19: a told transaction also settles 1 s after the request or at a staging budget; see the entry below.)
 
 **Proof.**
 - bt-term `vendor_history_after_resize::{a_settled_resize_leaves_the_vendor_no_history, a_resize_after_a_long_flood_keeps_history_once}` (the second resize after a long flood: before the fix it froze the whole leaked history again, 2 996 lines became 5 992).
 - `alacritty_terminal` `term::tests::an_empty_stage_closes_the_vendor_transaction`.
 - bt-term `full_scrollback_residency::a_settled_pane_holds_still_past_the_cap`; bt-app `full_scrollback_app_tests::a_full_scrollback_holds_still_in_the_window` asserts the focused pane's vendor history is 0.
 - The unfixed tree run with `debug-assertions=false` reproduces the release defect (T-a: 27 977 → 83 977 vendor rows over 8 000 lines; T-c: 5 604 bytes a line). Plants are in the row's report; the VM proof is the shown-flood harness of row 105.
+
+### 2026-11-19 — A resize settles while its child keeps writing (T-RESIZE-DURING-A-FLOOD-NEVER-SETTLES, 0.4.10 plan row 108; the coordinator's rulings R1–R11 of 2026-11-19; closes the "Left out" of the row 107 entry above)
+
+**What it met.** A resize transaction closed only on `RESIZE_IDLE_AFTER_OUTPUT` (200 ms) of output silence after the child was told its size: `quiescence_deadline` was `max(final_request, last_output) + 200 ms`, and every feed moves `last_output`. A child that writes more often than that kept the transaction open for as long as it wrote. While open, every row it scrolled off stayed in the transaction's tail three times — the transcript's resize staging (`CapturedRow`), the displayed grid's escrow, and the history of the canonical fork the final request re-armed, which is fed every byte and trimmed by nothing — about 131 bytes a cell together, measured at 40 columns. Every feed turn took the whole tail back into the grid and staged it out again, so a turn cost grew with everything printed since the resize. The history quota did not apply, because nothing is frozen until the settle. And `decorations_allowed` withheld every scan: no formula printed after the resize was typeset, and formulas already in history kept their pre-resize pictures. The trigger is any resize — a split, a window resize, a text-scale step — while an agent's spinner or a progress bar runs: measured on an agent-shaped turn, ten minutes held 8 754 rows and 46 MB, a turn cost 14.8 ms and rising, and not one of its formulas was typeset until it stopped.
+
+**No acknowledgement to wait for, considered and not built.** The quiet window guesses that the child's reaction to its size is over. Nothing says so: `ResizePseudoConsole` returns once conhost's signal pipe has the message, and its repaint is not delimited in the output (the v3.7 note above); `TIOCSWINSZ` sends `SIGWINCH` and nothing comes back; DEC mode 2048's in-band reports run from the terminal to the program. A DEC 2026 commit after the request says a program finished a frame, not that it drew it at the new size; an OSC 133 prompt after it says the shell drew a prompt, and an idle prompt is quiet and settles in 200 ms already. So no signal can bound the wait, and a longer quiet window would bound nothing.
+
+**The rule.** Once the child has been told (`ResizeEpoch::child_told`), the transaction settles at the first of three doors, `ResizeSettleReason`:
+- `OutputQuiet` — 200 ms of output silence, as before;
+- `TimeBound` — `RESIZE_SETTLE_BOUND`, 1 s after the final request, whatever the child writes. A child still writing that long after being told has had five quiet windows to react. `quiescence_deadline` is the earlier of the quiet deadline and this one, so the window's turn wakes for it as it wakes for the quiet one;
+- `StagingBudget` — `RESIZE_STAGING_BUDGET_CELLS`, 131 072 cells added to the tail since the final request (about 16 MB; five screens of a 200 × 120 pane). Counted from the request, so the rows the reflow itself pushed off are not counted against it. The session keeps the tail's cell count as its last stage handed it over (`resize_tail_cells`) and the count when the child was told (`resize_tail_cells_at_request`). The window asks at every turn's end, so this door needs no deadline of its own.
+
+Before the final request nothing changes: a gesture still in the hand holds no size the child knows, so its tail grows for as long as the hand moves, as before. `TransactionEnd` in the resize trace names the door, so a `BT_RESIZE_TRACE` log says why a transaction closed when it did.
+
+**What a settle under output looks like.** Nothing moves. The reflow a person sees happened when the child was told (`settle_resize_transaction` installed the canonical branch at the final size then); the settle commits the staged rows to history in order, ends the grid's transaction and the canonical fork, applies the history quota, and scans for formulas again. Measured on 15 000 staged rows: the screen's text the same before and after, history the flood once and in order, memory back from 74.8 to 9.3 MB, and the next 500 lines costing 21 ms instead of 343. A reaction of the child's that comes after the settle (a conhost slow under load) lands as ordinary output — at worst the few duplicate clean rows the v3.7 note accepts, which is also what any pause-then-flood gives. The PSReadLine anchor repair is unchanged: it is paid only at an open prompt, and conhost's reaction is at least a second old by a bound settle.
+
+**Not changed.** Each feed of an open transaction still stages its whole tail again; the budget bounds that to a few milliseconds a turn, so incremental staging is not built. The line that straddles the screen's top when the child is told is frozen in two pieces by that reflow, its head before and its tail after, with or without a pause; the text is kept once and in order.
+
+**Proof.**
+- bt-term `resize_settles_under_output::{a_flood_that_never_pauses_settles_at_the_staging_budget, the_tail_the_reflow_pushed_off_is_not_counted_against_the_budget, a_settle_under_the_flood_moves_nothing, a_spinner_that_never_pauses_settles_at_the_bound, a_formula_printed_under_a_spinner_is_typeset_after_the_bound, nothing_settles_before_the_child_is_told}`, every clock the test's own.
+- bt-term `scheduling::resize_epoch_tests::the_deadline_stops_at_the_bound_after_the_final_request`; `session::tests::active_resize_epoch_never_exports_a_past_live_wake_deadline` now runs to the bound and settles there.
+- bt-app `app_panes_tests::a_spinning_pane_settles_its_resize_at_the_bound_through_the_window`.
+- Plants P1–P4 and the before/after measurement are in the row's report.
