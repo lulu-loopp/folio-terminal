@@ -146,7 +146,7 @@ mod tests {
             "D ends it"
         );
 
-        let no_integration = session_fed(b"PS> cargo build\r\n   Compiling bt-app\r\n");
+        let no_integration = session_fed(b"PS> cargo build\r\nCompiling bt-app\r\n");
         assert_eq!(
             pane_work(no_integration.status().working, None),
             RunningWork::NONE,
