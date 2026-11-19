@@ -75,11 +75,17 @@ impl PrintingPane {
                 .expect("the transaction settles"),
             "a quiet pane settles at the quiet window"
         );
-        Self {
+        let pane = Self {
             session,
             clock: clock + QUIET,
             lines: 0,
-        }
+        };
+        assert_eq!(
+            pane.end_reason(),
+            Some(ResizeSettleReason::OutputQuiet),
+            "a quiet settle names the quiet door"
+        );
+        pane
     }
 
     /// Feed one drain turn at `step` past the clock. Answers whether the end-of-turn ask closed
@@ -151,6 +157,18 @@ impl PrintingPane {
             })
     }
 
+    /// The cells the last settle harvested, from the resize trace.
+    fn harvested_cells(&self) -> Option<usize> {
+        self.session
+            .resize_trace()
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                ResizeTraceKind::Harvest { widths, .. } => Some(widths.iter().sum()),
+                _ => None,
+            })
+    }
+
     /// The numbers of the frozen lines that begin with one, oldest first.
     fn frozen_line_numbers(&self) -> Vec<usize> {
         self.session
@@ -180,21 +198,19 @@ const fn cells_one_slice_adds() -> usize {
     (SLICE / 202 + 2) * 5 * WIDER as usize
 }
 
-/// T1. A flood that never pauses settles once the tail has grown by the staging budget since
-/// the child was told, and the tail never holds more than the budget and one slice beyond what
-/// it held then.
+/// T1. A flood that never pauses settles at the first turn whose tail has grown by the staging
+/// budget since the child was told: the tail it harvests holds at least the budget beyond what
+/// it held then, and at most one slice more.
 #[test]
 fn a_flood_that_never_pauses_settles_at_the_staging_budget() {
     let mut pane = PrintingPane::settled_pane(2_000);
     pane.print_quietly_until(500);
     pane.resize_and_tell(WIDER);
     let at_request = pane.staged_cells();
-    let mut most = at_request;
     let mut settled = false;
     while pane.lines < 3_500 && !settled {
         let slice = pane.next_slice(3_500);
         settled = pane.feed_one_turn(&slice, Duration::from_millis(1));
-        most = most.max(pane.staged_cells());
     }
     assert!(
         settled,
@@ -202,9 +218,13 @@ fn a_flood_that_never_pauses_settles_at_the_staging_budget() {
         pane.staged_cells()
     );
     assert_eq!(pane.end_reason(), Some(ResizeSettleReason::StagingBudget));
+    let harvested = pane
+        .harvested_cells()
+        .expect("the settle harvested the tail");
     assert!(
-        most <= at_request + RESIZE_STAGING_BUDGET_CELLS + cells_one_slice_adds(),
-        "the tail reached {most} cells, past the budget and one slice beyond {at_request}"
+        harvested >= at_request + RESIZE_STAGING_BUDGET_CELLS
+            && harvested <= at_request + RESIZE_STAGING_BUDGET_CELLS + cells_one_slice_adds(),
+        "the settle harvested {harvested} cells; {at_request} were staged when the child was told"
     );
 }
 
@@ -270,9 +290,11 @@ fn a_settle_under_the_flood_moves_nothing() {
     }
     let (before, after) = settled_screen.expect("the transaction settled under the flood");
     assert_eq!(before, after, "the settle changed the screen");
-    // The text, not the line count: the line that straddled the screen's top when the child was
-    // told is frozen in two pieces by that reflow (its head before, its tail after), with a pause
-    // as without one, so what is kept once and in order is the characters.
+    // The text, not the line count: the line that straddled the screen's top when the
+    // transaction opened is frozen in two pieces, with a pause as without one -
+    // `begin_resize_transaction` freezes its unclosed candidate (the rows already scrolled off, at
+    // the old width) while its continuation is still on the grid (plan row 112). What is kept once
+    // and in order is the characters.
     let kept = pane
         .session
         .transcript()
@@ -353,6 +375,38 @@ fn a_formula_printed_under_a_spinner_is_typeset_after_the_bound() {
     );
 }
 
+/// T4b. A formula still on screen under a spinner waits for nothing past the bound: the live
+/// stability clock is shut while the transaction is open and schedules the formula at the first
+/// turn on or after the bound.
+#[test]
+fn a_formula_on_screen_under_a_spinner_is_scheduled_at_the_bound() {
+    let mut pane = PrintingPane::settled_pane(2_000);
+    pane.print_quietly_until(300);
+    pane.resize_and_tell(WIDER);
+    let bound = pane.clock + RESIZE_SETTLE_BOUND;
+    pane.feed_one_turn(
+        b"\r\x1b[2K$$\\frac{a}{b}$$\r\nanswer one\r\nanswer two\r\n",
+        FRAME,
+    );
+    let mut scheduled_at_bound = None;
+    for tick in 0..20 {
+        let settled = pane.feed_one_turn(spinner_frame(tick).as_bytes(), FRAME);
+        let scheduled = pane.session.advance_live_stability(pane.clock);
+        if pane.clock < bound {
+            assert!(!settled, "settled before the bound");
+            assert_eq!(scheduled, 0, "live math scheduled inside the transaction");
+            assert_eq!(pane.session.live_stability_deadline(), None);
+        } else {
+            scheduled_at_bound = Some(scheduled);
+            break;
+        }
+    }
+    assert!(
+        scheduled_at_bound.is_some_and(|scheduled| scheduled > 0),
+        "the first turn on or after the bound scheduled {scheduled_at_bound:?} live formulas"
+    );
+}
+
 /// T5. Before the child is told, neither the bound nor the budget settles anything: the grid
 /// cannot be harvested against a size the child does not hold.
 #[test]
@@ -377,4 +431,84 @@ fn nothing_settles_before_the_child_is_told() {
         "the fixture has to run past both the budget and the bound"
     );
     assert!(pane.session.resize_transaction_open());
+}
+
+/// One frame of an agent that brackets its drawing: the cursor hidden, then a DEC 2026 block
+/// holding a streamed line and the spinner, then the block closed and the cursor shown.
+fn bracketed_frame(tick: usize) -> (String, String) {
+    let glyph = ["|", "/", "-", "\\"][tick % 4];
+    (
+        format!("\x1b[?25l\x1b[?2026h\r\x1b[2Kstreamed {tick:04}\r\n{glyph} Working..."),
+        String::from("\x1b[?2026l\x1b[?25h"),
+    )
+}
+
+/// The streamed lines a session holds, in history and then on screen, by number.
+fn streamed_numbers(session: &DualPlaneSession) -> Vec<usize> {
+    let screen = session.terminal().visible_text();
+    session
+        .transcript()
+        .frozen()
+        .iter()
+        .map(|line| line.text.clone())
+        .chain(screen)
+        .filter_map(|line| {
+            line.trim_end()
+                .strip_prefix("streamed ")
+                .and_then(|number| number.parse().ok())
+        })
+        .collect()
+}
+
+/// T8. A bound settle that lands inside an open DEC 2026 block and a cursor-hidden repaint
+/// window moves nothing: once the block closes, the screen is what a session that was never
+/// resized shows for the same frames, and history holds every streamed line once and in order.
+#[test]
+fn a_bound_settle_inside_a_synchronized_update_moves_nothing() {
+    const FRAMES: usize = 40;
+    let mut pane = PrintingPane::settled_pane(2_000);
+    pane.print_quietly_until(300);
+    pane.resize_and_tell(WIDER);
+    let bound = pane.clock + RESIZE_SETTLE_BOUND;
+    let mut settled_inside_the_block = false;
+    for tick in 0..FRAMES {
+        let (open, close) = bracketed_frame(tick);
+        if pane.session.resize_transaction_open() && pane.clock + FRAME >= bound {
+            let settled = pane.feed_one_turn(open.as_bytes(), FRAME);
+            assert!(settled, "the turn past the bound did not settle");
+            assert!(
+                pane.session.synchronized_update_deadline().is_some(),
+                "the block closed before the settle"
+            );
+            assert_eq!(pane.end_reason(), Some(ResizeSettleReason::TimeBound));
+            settled_inside_the_block = true;
+            pane.feed_one_turn(close.as_bytes(), Duration::from_millis(10));
+            assert_eq!(pane.session.synchronized_update_deadline(), None);
+        } else {
+            let settled = pane.feed_one_turn(format!("{open}{close}").as_bytes(), FRAME);
+            assert!(!settled || pane.clock >= bound, "settled before the bound");
+        }
+    }
+    assert!(settled_inside_the_block, "no settle landed inside a block");
+
+    let clock = Instant::now();
+    let mut reference = DualPlaneSession::new(nonzero_extent(WIDER), nonzero_extent(ROWS));
+    for tick in 0..FRAMES {
+        let (open, close) = bracketed_frame(tick);
+        reference.begin_feed_turn();
+        reference
+            .feed_at(format!("{open}{close}").as_bytes(), clock)
+            .expect("the frame is plain text");
+        reference.end_feed_turn();
+    }
+    assert_eq!(
+        pane.session.terminal().visible_text(),
+        reference.terminal().visible_text(),
+        "the screen after the block is not what an unresized session shows"
+    );
+    assert_eq!(
+        streamed_numbers(&pane.session),
+        (0..FRAMES).collect::<Vec<_>>(),
+        "history and screen do not hold the streamed lines once and in order"
+    );
 }

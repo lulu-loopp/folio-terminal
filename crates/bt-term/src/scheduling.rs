@@ -37,7 +37,8 @@ pub const RESIZE_SETTLE_BOUND: Duration = Duration::from_secs(1);
 /// fork's history, about 131 bytes a cell together (measured at 40 columns), and the whole tail
 /// is staged again at every feed. Counted from the final request, so the rows the reflow itself
 /// pushed off are not counted against it. 131 072 cells is about 16 MB, five screens of a
-/// 200 x 120 pane, and a few milliseconds of re-staging a turn at most.
+/// 200 x 120 pane, and a few milliseconds of re-staging a turn at most. It is checked at each
+/// turn's end, so the tail can pass it by one drain turn's rows.
 pub const RESIZE_STAGING_BUDGET_CELLS: usize = 131_072;
 
 /// The life of one resize transaction: opened by a reflow, closed only by a settlement.
