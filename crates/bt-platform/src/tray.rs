@@ -38,9 +38,16 @@
 //! # What is pure
 //!
 //! The decode ([`tray_callback_for`]), the menu's numbering ([`TrayGesture::menu_id`]), the tip's
-//! cut ([`tray_tip`]), the procedure's answer to each message ([`tray_host_answer`]) and the
-//! badge ([`badge_the_icon`]) are functions a test holds on any host: they are the parts that can
-//! be wrong without a taskbar.
+//! cut ([`tray_tip`]), the procedure's answer to each message ([`tray_host_answer`]), the order of
+//! the calls a tell makes of the shell ([`tray_next_shell_call`]), the icon handed when a badge
+//! cannot be drawn ([`tray_icon_to_hand`]) and the badge ([`badge_the_icon`]) are functions a test
+//! holds on any host: they are the parts that can be wrong without a taskbar.
+//!
+//! # The panic road
+//!
+//! The one process-global here is the live host's window ([`take_down_on_the_panic_road`]): a
+//! panic ends the process without a `Drop`, and the icon would stay in the notification area,
+//! live while the panic's box is up and dead after it.
 //!
 //! # macOS and the rest
 //!
@@ -265,6 +272,125 @@ pub fn tray_tip(tip: &str) -> Vec<u16> {
     units
 }
 
+/// **One call the host makes of `Shell_NotifyIconW` for its icon**, chosen by
+/// [`tray_next_shell_call`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrayShellCall {
+    /// `NIM_ADD`: the icon put in the notification area.
+    Add,
+    /// `NIM_MODIFY` of an icon the shell holds: the picture and the tip told again.
+    Change,
+    /// `NIM_MODIFY` after an add the shell refused: whether it holds the icon all the same. An add
+    /// made while Explorer is busy (at sign-in, typically) can time out, be answered `FALSE`, and
+    /// be kept; a second `NIM_ADD` of an icon the shell holds is always refused.
+    AskWhetherItIsHeld,
+    /// `NIM_SETVERSION` to version 4: the callback shape [`tray_callback_for`] decodes. Until the
+    /// shell has taken it, the icon's callbacks come in version 0's shape, and the decode drops
+    /// every one of them.
+    SetVersion,
+}
+
+/// **What the host knows of the shell's hold on its icon.**
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TrayShellHold {
+    /// The shell holds the icon.
+    pub held: bool,
+    /// The shell took version 4 for it. A version does not outlive the icon: every add starts at
+    /// version 0 again.
+    pub versioned: bool,
+}
+
+/// **The next call of a tell, and the hold the last answer left** — pure, so the order a busy
+/// shell meets is a fact a test can state.
+///
+/// `last` is the call just made and whether the shell accepted it; `None` starts a tell (the
+/// put-up, a change of picture, a redraw, the taskbar's return, whose hold is the default: the
+/// shell restarted without the icon). The answer's call is `None` when the tell is done: the icon
+/// held and versioned; held but its version refused (asked again on the next tell); or not held
+/// after an add and the probe were both refused (added again when the taskbar comes back, or on
+/// the next tell). A tell makes at most four calls: a change refused, an add refused, the probe
+/// accepted, the version.
+#[must_use]
+pub fn tray_next_shell_call(
+    hold: TrayShellHold,
+    last: Option<(TrayShellCall, bool)>,
+) -> (TrayShellHold, Option<TrayShellCall>) {
+    let gone = TrayShellHold::default();
+    let held_from_version_0 = TrayShellHold {
+        held: true,
+        versioned: false,
+    };
+    match last {
+        None if hold.held => (hold, Some(TrayShellCall::Change)),
+        None => (gone, Some(TrayShellCall::Add)),
+        Some((TrayShellCall::Change, true)) => {
+            (hold, (!hold.versioned).then_some(TrayShellCall::SetVersion))
+        }
+        // The shell lost the icon unannounced: add it.
+        Some((TrayShellCall::Change, false)) => (gone, Some(TrayShellCall::Add)),
+        Some((TrayShellCall::Add | TrayShellCall::AskWhetherItIsHeld, true)) => {
+            (held_from_version_0, Some(TrayShellCall::SetVersion))
+        }
+        Some((TrayShellCall::Add, false)) => (gone, Some(TrayShellCall::AskWhetherItIsHeld)),
+        Some((TrayShellCall::AskWhetherItIsHeld, false)) => (gone, None),
+        Some((TrayShellCall::SetVersion, accepted)) => (
+            TrayShellHold {
+                held: hold.held,
+                versioned: accepted,
+            },
+            None,
+        ),
+    }
+}
+
+/// **The icon the shell is handed**, from the plain icon and the badge's copy of it
+/// ([`tray_icon_to_hand`]).
+#[derive(Debug, Eq, PartialEq)]
+pub struct TrayIconHanded<H> {
+    /// What the shell is handed.
+    pub shown: H,
+    /// The icon not handed, which the caller destroys.
+    pub spare: Option<H>,
+    /// Why the badge could not be drawn, when it could not.
+    pub badge_failure: Option<String>,
+}
+
+/// **The icon the shell is handed**: the badged copy when the badge was drawn; the plain icon when
+/// no badge was asked (`badged` is `None`) or the badge could not be drawn — never no icon, which
+/// the shell draws as an empty slot in the notification area. Generic over the handle, so the
+/// choice is a fact a test can state without a taskbar.
+#[must_use]
+pub fn tray_icon_to_hand<H>(plain: H, badged: Option<Result<H, String>>) -> TrayIconHanded<H> {
+    match badged {
+        None => TrayIconHanded {
+            shown: plain,
+            spare: None,
+            badge_failure: None,
+        },
+        Some(Ok(badged)) => TrayIconHanded {
+            shown: badged,
+            spare: Some(plain),
+            badge_failure: None,
+        },
+        Some(Err(why)) => TrayIconHanded {
+            shown: plain,
+            spare: None,
+            badge_failure: Some(why),
+        },
+    }
+}
+
+/// **The run's icon out of the notification area, from the panic road** (0.4.10 plan row 87,
+/// part 87b; review P2-5): a `NIM_DELETE` for the live host's icon, from whichever thread the
+/// panic is on — the call names a window and an id, and touches nothing of the host's own. The
+/// panic road ends the process without dropping anything, so without this the icon would stay up,
+/// its menu live inside the panic box's pump and the icon dead after. Nothing when no host lives,
+/// and nothing on a platform without a notification area.
+pub fn take_down_on_the_panic_road() {
+    #[cfg(windows)]
+    windows_tray::delete_the_live_icon();
+}
+
 /// The badge's diameter, as a share of the icon's side.
 const BADGE_DIAMETER: f32 = 0.5;
 /// The transparent gap around the badge, in pixels at the 16-pixel side (scaled with the side,
@@ -334,6 +460,7 @@ mod windows_tray {
     use std::ffi::c_void;
     use std::rc::Rc;
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicIsize, Ordering};
 
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
@@ -360,9 +487,33 @@ mod windows_tray {
 
     use super::{
         TRAY_CALLBACK_MESSAGE, TRAY_HOST_CLASS, TRAY_ICON_ID, TRAY_LATER_MENU, TRAY_LATER_MESSAGE,
-        TRAY_LATER_REDRAW, TrayBadge, TrayCallback, TrayGesture, TrayHostAnswer, TrayLabels,
-        TrayPicture, badge_the_icon, tray_callback_for, tray_host_answer, tray_tip,
+        TRAY_LATER_REDRAW, TrayBadge, TrayCallback, TrayGesture, TrayHostAnswer, TrayIconHanded,
+        TrayLabels, TrayPicture, TrayShellCall, TrayShellHold, badge_the_icon, tray_callback_for,
+        tray_host_answer, tray_icon_to_hand, tray_next_shell_call, tray_tip,
     };
+
+    /// **The live host's window**, `0` when none lives: written by [`TrayIcon::put_up`] and its
+    /// `Drop` on the window thread, read only by the panic road ([`delete_the_live_icon`]). The
+    /// module's one process-global (review P2-5): a run has one host.
+    static LIVE_TRAY_HOST: AtomicIsize = AtomicIsize::new(0);
+
+    /// [`super::take_down_on_the_panic_road`]'s Windows half: `NIM_DELETE` of icon 1 of the live
+    /// host, if one lives.
+    pub(super) fn delete_the_live_icon() {
+        let host = LIVE_TRAY_HOST.swap(0, Ordering::AcqRel);
+        if host == 0 {
+            return;
+        }
+        let data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: HWND(host as *mut c_void),
+            uID: TRAY_ICON_ID,
+            ..Default::default()
+        };
+        // SAFETY: `data` is fully initialised with its own size; the call copies out of it and
+        // reads the window only as a key.
+        let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
+    }
 
     /// **The number the session gave `TaskbarCreated`**, read once (`RegisterWindowMessageW`
     /// answers the same number for the life of the session); `0` when it would not say.
@@ -373,14 +524,14 @@ mod windows_tray {
     }
 
     /// The icon as it is drawn: the handle the shell was handed, and what it was drawn for.
-    struct Drawn {
+    struct TrayDrawing {
         icon: HICON,
         side: u32,
         light: bool,
         badge: Option<TrayBadge>,
     }
 
-    impl Drop for Drawn {
+    impl Drop for TrayDrawing {
         fn drop(&mut self) {
             if !self.icon.is_invalid() {
                 // SAFETY: the icon was made for this value alone (`LoadImageW` without
@@ -396,12 +547,15 @@ mod windows_tray {
         gestures: RefCell<Vec<TrayGesture>>,
         labels: RefCell<TrayLabels>,
         picture: RefCell<TrayPicture>,
-        drawn: RefCell<Option<Drawn>>,
-        /// Whether the shell holds the icon: `false` until an add is answered, and again after
-        /// the shell refused one (it is added when the taskbar comes back, `TaskbarCreated`).
-        in_the_shell: Cell<bool>,
-        /// Whether the refusal was said: once, until an add is answered again.
+        drawn: RefCell<Option<TrayDrawing>>,
+        /// What the host knows of the shell's hold on the icon ([`tray_next_shell_call`]).
+        hold: Cell<TrayShellHold>,
+        /// Whether the shell's refusal of the icon was said: once, until it holds the icon again.
         refusal_said: Cell<bool>,
+        /// Whether the shell's refusal of version 4 was said: once, until it takes it.
+        version_refusal_said: Cell<bool>,
+        /// Whether a badge that could not be drawn was said: once, until one is drawn.
+        badge_failure_said: Cell<bool>,
         /// What to call after parking a gesture, and all it may do.
         wake: Box<dyn Fn()>,
         /// The note door (`diagnostics.log`).
@@ -426,14 +580,29 @@ mod windows_tray {
             if unchanged {
                 return false;
             }
-            let icon = draw_the_icon(side, light, badge).unwrap_or_else(|why| {
-                (self.note)(&format!("BT_TRAY the icon could not be drawn: {why}"));
-                HICON::default()
-            });
+            let icon = match draw_the_icon(side, light, badge) {
+                Ok(handed) => {
+                    match handed.badge_failure {
+                        Some(why) if !self.badge_failure_said.replace(true) => {
+                            (self.note)(&format!(
+                                "BT_TRAY the badge could not be drawn: {why}; the plain icon is shown"
+                            ))
+                        }
+                        Some(_) => {}
+                        None if badge.is_some() => self.badge_failure_said.set(false),
+                        None => {}
+                    }
+                    handed.shown
+                }
+                Err(why) => {
+                    (self.note)(&format!("BT_TRAY the icon could not be drawn: {why}"));
+                    HICON::default()
+                }
+            };
             // The one before is destroyed once the shell has been handed this one (the caller's
             // next `tell`); dropping it here would leave the shell a handle to nothing for a
             // moment, which it draws as a blank.
-            let before = self.drawn.replace(Some(Drawn {
+            let before = self.drawn.replace(Some(TrayDrawing {
                 icon,
                 side,
                 light,
@@ -468,39 +637,52 @@ mod windows_tray {
             told
         }
 
-        /// **The icon added to the shell, in the version-4 shape**; answers whether the shell
-        /// took it. A refusal is said once and the host waits for `TaskbarCreated`.
-        fn add_to_the_shell(&self, hwnd: HWND) -> bool {
-            let added = self.tell_the_shell(hwnd, NIM_ADD) && set_version_4(hwnd);
-            self.in_the_shell.set(added);
-            if added {
+        /// **The description told to the shell, in the version-4 shape**: the calls
+        /// [`tray_next_shell_call`] chooses from the hold the host has, until the tell is done —
+        /// a change while the shell holds the icon, an add when it does not, the probe of an add
+        /// it refused, the version while it has not taken it. Answers whether the shell holds the
+        /// icon after. A shell that holds nothing is said once, and so is a version it would not
+        /// take; the next tell asks again, and `TaskbarCreated` adds the icon when the taskbar
+        /// comes back.
+        fn settle_with_the_shell(&self, hwnd: HWND) -> bool {
+            let (mut hold, mut next) = tray_next_shell_call(self.hold.get(), None);
+            while let Some(call) = next {
+                let accepted = match call {
+                    TrayShellCall::Add => self.tell_the_shell(hwnd, NIM_ADD),
+                    TrayShellCall::Change | TrayShellCall::AskWhetherItIsHeld => {
+                        self.tell_the_shell(hwnd, NIM_MODIFY)
+                    }
+                    TrayShellCall::SetVersion => set_version_4(hwnd),
+                };
+                (hold, next) = tray_next_shell_call(hold, Some((call, accepted)));
+            }
+            self.hold.set(hold);
+            if hold.held {
                 self.refusal_said.set(false);
             } else if !self.refusal_said.replace(true) {
                 (self.note)(
                     "BT_TRAY the shell did not take the icon; it is added when the taskbar comes back",
                 );
             }
-            added
-        }
-
-        /// **The description told again**: a change while the shell holds the icon, the add
-        /// when it does not or when a change is refused (the shell lost the icon unannounced).
-        fn tell_again(&self, hwnd: HWND) {
-            if self.in_the_shell.get() && self.tell_the_shell(hwnd, NIM_MODIFY) {
-                return;
+            if hold.versioned {
+                self.version_refusal_said.set(false);
+            } else if hold.held && !self.version_refusal_said.replace(true) {
+                (self.note)(
+                    "BT_TRAY the shell did not take version 4 for the icon; it is asked again on the next change",
+                );
             }
-            let _ = self.add_to_the_shell(hwnd);
+            hold.held
         }
     }
 
     thread_local! {
         /// **The icon drawn before the one the shell is being handed**, kept until it has been
         /// (see `HostState::redraw_the_icon`).
-        static DRAWN_BEFORE: RefCell<Option<Drawn>> = const { RefCell::new(None) };
+        static DRAWN_BEFORE: RefCell<Option<TrayDrawing>> = const { RefCell::new(None) };
     }
 
     /// `NIM_SETVERSION` to version 4: the callback shape [`tray_callback_for`] decodes. It does
-    /// not outlive the icon, so it follows every add.
+    /// not outlive the icon, so it follows every add ([`tray_next_shell_call`]).
     fn set_version_4(hwnd: HWND) -> bool {
         let mut data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -555,17 +737,25 @@ mod windows_tray {
     }
 
     /// **The program's icon at `side`, with `badge` drawn in the taskbar's ink**, as a handle
-    /// the caller owns; the plain icon when there is no badge.
-    fn draw_the_icon(side: u32, light: bool, badge: Option<TrayBadge>) -> Result<HICON, String> {
+    /// the caller owns ([`tray_icon_to_hand`]): the plain icon when there is no badge, and when the
+    /// badge could not be drawn (with why). An `Err` is only a program icon the module does not
+    /// have.
+    fn draw_the_icon(
+        side: u32,
+        light: bool,
+        badge: Option<TrayBadge>,
+    ) -> Result<TrayIconHanded<HICON>, String> {
         let plain = crate::box_icon::icon_of_this_module(side)
             .ok_or("the program's icon is not in its module")?;
-        let Some(badge) = badge else {
-            return Ok(plain);
-        };
-        let drawn = badge_this_icon(plain, side, badge.badge_ink(light), badge.hollow);
-        // SAFETY: `plain` was loaded above for this call alone; the badged copy is a new icon.
-        let _ = unsafe { DestroyIcon(plain) };
-        drawn
+        let badged =
+            badge.map(|badge| badge_this_icon(plain, side, badge.badge_ink(light), badge.hollow));
+        let mut handed = tray_icon_to_hand(plain, badged);
+        if let Some(spare) = handed.spare.take() {
+            // SAFETY: the icon not handed was made for this call alone (`plain` loaded above, or
+            // its badged copy); nothing else holds it.
+            let _ = unsafe { DestroyIcon(spare) };
+        }
+        Ok(handed)
     }
 
     /// A badged copy of `icon`: its colour read out, the badge drawn in ([`badge_the_icon`]), a
@@ -703,8 +893,10 @@ mod windows_tray {
                 labels: RefCell::new(labels),
                 picture: RefCell::new(picture),
                 drawn: RefCell::new(None),
-                in_the_shell: Cell::new(false),
+                hold: Cell::new(TrayShellHold::default()),
                 refusal_said: Cell::new(false),
+                version_refusal_said: Cell::new(false),
+                badge_failure_said: Cell::new(false),
                 wake,
                 note,
             });
@@ -745,8 +937,11 @@ mod windows_tray {
                 }
             }
             let icon = Self { hwnd, state };
+            LIVE_TRAY_HOST.store(hwnd.0 as isize, Ordering::Release);
+            // Once per host: the clean VM counts this line, one per run (review P1-1).
+            (icon.state.note)("BT_TRAY the icon is put up");
             let _ = icon.state.redraw_the_icon();
-            let _ = icon.state.add_to_the_shell(icon.hwnd);
+            let _ = icon.state.settle_with_the_shell(icon.hwnd);
             Ok(icon)
         }
 
@@ -754,7 +949,7 @@ mod windows_tray {
         pub fn change(&self, picture: &TrayPicture) {
             *self.state.picture.borrow_mut() = picture.clone();
             let _ = self.state.redraw_the_icon();
-            self.state.tell_again(self.hwnd);
+            let _ = self.state.settle_with_the_shell(self.hwnd);
         }
 
         /// The menu's words, for the next time it opens.
@@ -780,6 +975,13 @@ mod windows_tray {
                 uID: TRAY_ICON_ID,
                 ..Default::default()
             };
+            // The panic road has nothing left to take down once this value is going.
+            let _ = LIVE_TRAY_HOST.compare_exchange(
+                self.hwnd.0 as isize,
+                0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
             // SAFETY: dropped on the thread that made the window; `data` is fully initialised.
             unsafe {
                 let _ = Shell_NotifyIconW(NIM_DELETE, &data);
@@ -824,18 +1026,22 @@ mod windows_tray {
             },
             TrayHostAnswer::Menu => {
                 let at = MENU_AT.take();
-                if let Some(row) = track_tray_menu(hwnd, &state.labels.borrow().clone(), at) {
+                // A copy, so no borrow of the labels is held across the menu's nested pump.
+                let labels = state.labels.borrow().clone();
+                if let Some(row) = track_tray_menu(hwnd, &labels, at) {
                     state.park_the_gesture(row);
                 }
             }
             TrayHostAnswer::Redraw => {
                 if state.redraw_the_icon() {
-                    state.tell_again(hwnd);
+                    let _ = state.settle_with_the_shell(hwnd);
                 }
             }
             TrayHostAnswer::AddAgain => {
                 let _ = state.redraw_the_icon();
-                if state.add_to_the_shell(hwnd) {
+                // The shell restarted without the icon: a tell from nothing held.
+                state.hold.set(TrayShellHold::default());
+                if state.settle_with_the_shell(hwnd) {
                     (state.note)("BT_TRAY the icon is added again: the taskbar came back");
                 }
             }
@@ -950,7 +1156,8 @@ mod tests {
     use super::{
         TRAY_CALLBACK_MESSAGE, TRAY_HOST_CLASS, TRAY_ICON_ID, TRAY_LATER_MENU, TRAY_LATER_MESSAGE,
         TRAY_LATER_REDRAW, TRAY_TIP_CAPACITY, TrayCallback, TrayGesture, TrayHostAnswer,
-        badge_the_icon, tray_callback_for, tray_host_answer, tray_tip,
+        TrayIconHanded, TrayShellCall, TrayShellHold, badge_the_icon, tray_callback_for,
+        tray_host_answer, tray_icon_to_hand, tray_next_shell_call, tray_tip,
     };
 
     /// The `lParam` of a version-4 callback: the event in the low word, the icon's id in the high.
@@ -1140,6 +1347,121 @@ mod tests {
                 "{side}: and inked at its edge"
             );
         }
+    }
+
+    /// Every call a tell makes of a shell that answers `answers`, in order, from `hold`; and the
+    /// hold it leaves.
+    fn tell_against(hold: TrayShellHold, answers: &[bool]) -> (Vec<TrayShellCall>, TrayShellHold) {
+        let (mut hold, mut next) = tray_next_shell_call(hold, None);
+        let (mut calls, mut answers) = (Vec::new(), answers.iter());
+        while let Some(call) = next {
+            calls.push(call);
+            let accepted = *answers
+                .next()
+                .expect("the shell answers every call it is asked");
+            (hold, next) = tray_next_shell_call(hold, Some((call, accepted)));
+        }
+        assert!(answers.next().is_none(), "every answer was asked for");
+        (calls, hold)
+    }
+
+    /// RED (T13; review P1-2) — **an add the shell refused but holds, and an add whose version
+    /// was refused, are told apart from an icon the shell does not hold**: a refused add is
+    /// probed with a change, and the probe's yes is an icon held, its version owed; a version
+    /// refused is asked again on the next tell; a change refused is an icon lost, added again.
+    ///
+    /// PLANT 87b-P24: answer a refused add with the tell's end in `tray_next_shell_call` (no
+    /// probe) — the icon the busy shell kept is never versioned, and every click on it is dropped.
+    #[test]
+    fn a_refused_add_the_shell_holds_is_probed_and_its_version_is_owed() {
+        use TrayShellCall::{Add, AskWhetherItIsHeld, Change, SetVersion};
+        let nothing = TrayShellHold::default();
+        let held = |versioned| TrayShellHold {
+            held: true,
+            versioned,
+        };
+        assert_eq!(
+            tell_against(nothing, &[true, true]),
+            (vec![Add, SetVersion], held(true)),
+            "the ordinary add: added, versioned"
+        );
+        assert_eq!(
+            tell_against(nothing, &[false, true, true]),
+            (vec![Add, AskWhetherItIsHeld, SetVersion], held(true)),
+            "add refused, the probe accepted: in the shell, and the version follows"
+        );
+        assert_eq!(
+            tell_against(nothing, &[false, true, false]),
+            (vec![Add, AskWhetherItIsHeld, SetVersion], held(false)),
+            "add refused, the probe accepted, the version refused: in the shell, version owed"
+        );
+        assert_eq!(
+            tell_against(nothing, &[false, false]),
+            (vec![Add, AskWhetherItIsHeld], nothing),
+            "add and probe refused: not in the shell"
+        );
+        assert_eq!(
+            tell_against(nothing, &[true, false]),
+            (vec![Add, SetVersion], held(false)),
+            "added, the version refused: version owed"
+        );
+        assert_eq!(
+            tell_against(held(false), &[true, true]),
+            (vec![Change, SetVersion], held(true)),
+            "the next tell of an icon whose version is owed asks for it again"
+        );
+        assert_eq!(
+            tell_against(held(true), &[true]),
+            (vec![Change], held(true)),
+            "an icon held and versioned is only changed"
+        );
+        assert_eq!(
+            tell_against(held(true), &[false, true, true]),
+            (vec![Change, Add, SetVersion], held(true)),
+            "a change refused is an icon the shell lost: added again, versioned again"
+        );
+        assert_eq!(
+            tell_against(held(true), &[false, false, false]),
+            (vec![Change, Add, AskWhetherItIsHeld], nothing),
+            "and a shell that will take nothing ends the tell"
+        );
+    }
+
+    /// RED (review P2-1) — **a badge that cannot be drawn shows the plain icon, not an empty
+    /// slot**: the plain icon is handed and why the badge failed is said; a badge drawn is
+    /// handed and the plain icon is the spare; no badge hands the plain icon.
+    ///
+    /// PLANT 87b-P25: hand the shell no icon (`H::default()`) on a badge failure in
+    /// `tray_icon_to_hand` — the shell draws an empty slot.
+    #[test]
+    fn a_badge_that_cannot_be_drawn_shows_the_plain_icon() {
+        assert_eq!(
+            tray_icon_to_hand(7_isize, Some(Err("GetIconInfo refused".to_owned()))),
+            TrayIconHanded {
+                shown: 7,
+                spare: None,
+                badge_failure: Some("GetIconInfo refused".to_owned()),
+            },
+            "the plain icon is handed, and why the badge was not drawn"
+        );
+        assert_eq!(
+            tray_icon_to_hand(7_isize, Some(Ok(8))),
+            TrayIconHanded {
+                shown: 8,
+                spare: Some(7),
+                badge_failure: None,
+            },
+            "the badged copy is handed and the plain icon let go"
+        );
+        assert_eq!(
+            tray_icon_to_hand(7_isize, None),
+            TrayIconHanded {
+                shown: 7,
+                spare: None,
+                badge_failure: None,
+            },
+            "no badge: the plain icon"
+        );
     }
 
     /// RED (T13c) — **the release smoke asks for the host by the class the host is made from**:
