@@ -879,7 +879,9 @@ impl<B: Backend> Runtime<'_, B> {
         };
         let rect = crate::startup_window_rect(Some(placement), primary_corner, scale);
         if let Err(error) = self.window.window.stand_at(rect) {
-            crate::diagnostics::note(&format!("BT_PUT_AWAY the way back: {error}"));
+            self.window
+                .window
+                .note(&format!("BT_PUT_AWAY the way back: {error}"));
         }
     }
 

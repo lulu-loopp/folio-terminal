@@ -48212,6 +48212,21 @@ impl<B: Backend> FolioApp<B> {
         }
     }
 
+    /// **A close request while the system's end holds the document, spent and nothing else**
+    /// (0.4.10 plan row 87, part 87a, review P1-1; [`Self::close`] says why a close then closes
+    /// nothing): `true` for a `WM_CLOSE` to `id` while `session_end::holds_the_document`, whose
+    /// record is spent, so the window is neither put away nor asked about; `false` for every
+    /// other event, and for every close while nothing holds the document.
+    fn a_close_the_held_document_spends(&mut self, id: WindowId, event: &WindowEvent) -> bool {
+        if !matches!(event, WindowEvent::CloseRequested) || !session_end::holds_the_document() {
+            return false;
+        }
+        if let Some(mut runtime) = self.runtime(id) {
+            runtime.spend_close_arrival();
+        }
+        true
+    }
+
     /// **The road `event` takes on `id`**: [`Self::close_fate`] for a `WM_CLOSE`, and
     /// [`CloseFate::Shut`] — no road at all — for every other event, so the window-event door reads
     /// it before it lends the window out and its own arms stay the only `CloseRequested` arms.
@@ -52273,14 +52288,9 @@ impl<B: Backend> FolioApp<B> {
                     return;
                 }
             }
-            // **While the system's end holds the document, a close closes nothing** (0.4.10 plan
-            // row 87, part 87a, review P1-1; `FolioApp::close` says why): the request's record is
-            // spent and the window is neither put away nor asked about — ahead of `close_fate_of`,
-            // which would note the arrival for a close that is never performed.
-            if matches!(event, WindowEvent::CloseRequested) && session_end::holds_the_document() {
-                if let Some(mut runtime) = self.runtime(window_id) {
-                    runtime.spend_close_arrival();
-                }
+            // **While the system's end holds the document, a close closes nothing** — ahead of
+            // `close_fate_of`, which would note the arrival for a close that is never performed.
+            if self.a_close_the_held_document_spends(window_id, &event) {
                 return;
             }
             // **The road a `WM_CLOSE` takes, read before the window is lent out** (0.4.10 plan row
