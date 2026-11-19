@@ -985,6 +985,73 @@ fn an_unfocused_leaf_resize_reaches_the_quiescence_that_pays_its_reanchor_debt()
     );
 }
 
+/// T7 (0.4.10 plan row 108). **A pane whose program never pauses settles its resize at the bound,
+/// through the window's own door.**
+///
+/// The fixture's layout resized the pane, and the window tells the child its size. The program
+/// then writes a spinner ten times a second for two seconds, never once giving the 200 ms quiet
+/// window. The pane's deadline, which the turn wakes for, never lies past
+/// `bt_term::RESIZE_SETTLE_BOUND` after the request, and the window's settle at the end of each
+/// turn closes the transaction at the first turn on or past it and not before.
+#[test]
+fn a_spinning_pane_settles_its_resize_at_the_bound_through_the_window() {
+    let mut folio = crate::headless::HeadlessFolio::with_tabs(
+        "resize-bound",
+        vec![crate::test_support::ringing_tab(1, 1)],
+        0,
+    );
+    let told = Instant::now();
+    {
+        let leaf = &mut folio.window.tabs[0].shell_pane_mut().session;
+        let (columns, rows) = (
+            NonZeroU32::from(leaf.grid.columns),
+            NonZeroU32::from(leaf.grid.rows),
+        );
+        assert!(
+            leaf.session.resize_transaction_open(),
+            "the fixture's layout opened a resize transaction"
+        );
+        leaf.session
+            .mark_pty_resize_requested_at(columns, rows, told);
+    }
+    let bound = told + bt_term::RESIZE_SETTLE_BOUND;
+    let mut at = told;
+    let mut settled_at = None;
+    for tick in 0..20 {
+        at += Duration::from_millis(99);
+        let leaf = &mut folio.window.tabs[0].shell_pane_mut().session;
+        leaf.session.begin_feed_turn();
+        leaf.session
+            .feed_at(format!("\r\x1b[2K{} Working...", tick % 4).as_bytes(), at)
+            .expect("a spinner frame is plain text");
+        leaf.session.end_feed_turn();
+        let deadline = leaf.session.resize_finish_deadline();
+        assert!(
+            deadline.is_some_and(|deadline| deadline <= bound),
+            "the deadline the turn wakes for lies past the bound: {deadline:?}"
+        );
+        folio
+            .runtime()
+            .finish_resize_if_quiescent(at)
+            .expect("the window's settle runs");
+        if !folio.window.tabs[0]
+            .shell_pane()
+            .session
+            .session
+            .resize_transaction_open()
+        {
+            settled_at = Some(at);
+            break;
+        }
+    }
+    let settled_at = settled_at.expect("a pane spinning for two seconds settled its resize");
+    assert!(
+        settled_at >= bound && settled_at < bound + Duration::from_millis(99),
+        "settled {:?} after the child was told",
+        settled_at - told
+    );
+}
+
 /// RED — **the release of such a gesture closes the transaction and writes the child
 /// nothing** (user report 2026-09-17).
 ///

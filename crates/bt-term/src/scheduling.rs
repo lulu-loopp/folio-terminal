@@ -18,6 +18,27 @@ pub const WORKER_QUEUE_CAP: usize = 64;
 pub const RESIZE_REQUEST_QUIET: Duration = Duration::from_millis(200);
 /// Keep vendor ownership open after the final ConPTY resize until its output pipe is quiet.
 pub const RESIZE_IDLE_AFTER_OUTPUT: Duration = Duration::from_millis(200);
+/// **The longest a resize transaction waits for that quiet once the child has been told**
+/// (0.4.10 plan row 108).
+///
+/// The quiet window is a guess that the child's reaction to its new size is over: neither ConPTY
+/// nor `SIGWINCH` says when a child has redrawn, so there is no acknowledgement to wait for
+/// instead. A child that writes more often than every [`RESIZE_IDLE_AFTER_OUTPUT`] (an agent's
+/// spinner, a progress bar) never gives one, and the transaction stayed open for as long as it
+/// kept writing: every formula it printed stayed source, and every row it scrolled was held two
+/// more times beside the transcript's copy. A child still writing this long after being told has
+/// had five quiet windows to react, so the transaction settles here at the latest.
+pub const RESIZE_SETTLE_BOUND: Duration = Duration::from_secs(1);
+/// **The most a resize transaction holds beyond what it held when the child was told**, in cells
+/// (0.4.10 plan row 108).
+///
+/// Every row that scrolls off while a transaction is open stays in its tail: once in the
+/// transcript's resize staging, once in the displayed grid's escrow and once in the canonical
+/// fork's history, about 131 bytes a cell together (measured at 40 columns), and the whole tail
+/// is staged again at every feed. Counted from the final request, so the rows the reflow itself
+/// pushed off are not counted against it. 131 072 cells is about 16 MB, five screens of a
+/// 200 x 120 pane, and a few milliseconds of re-staging a turn at most.
+pub const RESIZE_STAGING_BUDGET_CELLS: usize = 131_072;
 
 /// The life of one resize transaction: opened by a reflow, closed only by a settlement.
 ///
@@ -76,19 +97,40 @@ impl ResizeEpoch {
             .flatten()
     }
 
+    /// When this transaction may settle: once the child has been told, at the first of its output
+    /// going quiet and [`RESIZE_SETTLE_BOUND`] after the final request. `None` until it is told.
     pub(crate) fn quiescence_deadline(self) -> Option<Instant> {
         let request = self.final_request?;
         Some(
-            self.last_output
-                .map_or(request + RESIZE_IDLE_AFTER_OUTPUT, |output| {
-                    request.max(output) + RESIZE_IDLE_AFTER_OUTPUT
-                }),
+            self.quiet_deadline(request)
+                .min(request + RESIZE_SETTLE_BOUND),
         )
     }
 
+    fn quiet_deadline(self, request: Instant) -> Instant {
+        self.last_output
+            .map_or(request + RESIZE_IDLE_AFTER_OUTPUT, |output| {
+                request.max(output) + RESIZE_IDLE_AFTER_OUTPUT
+            })
+    }
+
+    /// The child has been told, and its output has been quiet for [`RESIZE_IDLE_AFTER_OUTPUT`].
     pub(crate) fn is_quiescent_at(self, now: Instant) -> bool {
-        self.quiescence_deadline()
-            .is_some_and(|deadline| now >= deadline)
+        self.final_request
+            .is_some_and(|request| now >= self.quiet_deadline(request))
+    }
+
+    /// The child was told at least [`RESIZE_SETTLE_BOUND`] ago, whatever it has written since.
+    pub(crate) fn settle_bound_reached_at(self, now: Instant) -> bool {
+        self.final_request
+            .is_some_and(|request| now >= request + RESIZE_SETTLE_BOUND)
+    }
+
+    /// Whether the window has told the child the size this transaction ends at. Until it has,
+    /// nothing may settle the transaction: the grid cannot be harvested against a size the
+    /// child does not hold.
+    pub(crate) fn child_told(self) -> bool {
+        self.final_request.is_some()
     }
 
     pub(crate) fn decorations_allowed(self) -> bool {
@@ -112,6 +154,52 @@ mod resize_epoch_tests {
         epoch.observe_output(start + Duration::from_millis(250));
         assert!(!epoch.is_quiescent_at(start + Duration::from_millis(449)));
         assert!(epoch.is_quiescent_at(start + Duration::from_millis(450)));
+    }
+
+    /// T6 (0.4.10 plan row 108). Output that never goes quiet moves the quiet deadline on for
+    /// ever; the deadline the window wakes for stops at [`RESIZE_SETTLE_BOUND`] after the final
+    /// request, and only from the request on.
+    #[test]
+    fn the_deadline_stops_at_the_bound_after_the_final_request() {
+        let start = Instant::now();
+        let mut epoch = ResizeEpoch::default();
+        epoch.changed(start);
+        epoch.observe_output(start + Duration::from_secs(5));
+        assert_eq!(
+            epoch.quiescence_deadline(),
+            None,
+            "nothing settles before the child is told"
+        );
+        assert!(!epoch.settle_bound_reached_at(start + Duration::from_secs(60)));
+
+        let request = start + Duration::from_secs(10);
+        epoch.final_request_sent(request);
+        let mut at = request;
+        while at < request + Duration::from_secs(3) {
+            epoch.observe_output(at);
+            at += Duration::from_millis(100);
+        }
+        assert_eq!(
+            epoch.quiescence_deadline(),
+            Some(request + RESIZE_SETTLE_BOUND),
+            "output every 100 ms leaves the bound as the deadline"
+        );
+        assert!(!epoch.is_quiescent_at(at));
+        assert!(
+            !epoch
+                .settle_bound_reached_at(request + RESIZE_SETTLE_BOUND - Duration::from_millis(1))
+        );
+        assert!(epoch.settle_bound_reached_at(request + RESIZE_SETTLE_BOUND));
+
+        let mut quiet = ResizeEpoch::default();
+        quiet.changed(start);
+        quiet.final_request_sent(start);
+        quiet.observe_output(start + Duration::from_millis(50));
+        assert_eq!(
+            quiet.quiescence_deadline(),
+            Some(start + Duration::from_millis(250)),
+            "a child that goes quiet settles on the quiet window as before"
+        );
     }
 }
 
