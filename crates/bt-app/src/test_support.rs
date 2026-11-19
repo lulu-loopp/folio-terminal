@@ -879,6 +879,23 @@ pub(crate) fn ringing_tab(id: u64, panes: usize) -> TabState {
     cross_tab(id, &names)
 }
 
+/// **A shell landed in a fixture's pane**: its phase Live, as a birth's landing leaves it, so the
+/// one reader of running work reads the pane (0.4.10 plan row 87, part 87e; the review's P2-1).
+/// The pseudoconsole stands for a process no fixture starts (`PtySession::fake_exited`'s); a test
+/// that takes no reaper turn never reads its exit.
+pub(crate) fn land_a_live_shell(shell: &mut ShellSession) {
+    shell.life.land(Some(bt_pty::PtySession::fake_exited(
+        Duration::from_secs(60),
+        0,
+        b"",
+        false,
+    )));
+    assert!(
+        shell.life.shell_is_live(),
+        "the fixture's own precondition: the shell is live"
+    );
+}
+
 /// The `BEL` byte, arriving in one pane's shell.
 ///
 /// It used to be the whole of this queue's signal. Since A2 it is an **announcement** — the end

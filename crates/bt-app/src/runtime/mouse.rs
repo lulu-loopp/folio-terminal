@@ -6714,7 +6714,7 @@ impl<B: Backend> Runtime<'_, B> {
         // card is about a list, and a list drawn as a wrapped sentence is a list
         // nobody can count. **And what is running, last** (0.4.10 plan row 87, part 87e;
         // the coordinator's item 14): one card, the running-work line under the names.
-        let work = quit.running_work();
+        let work = quit.card_running_work();
         let mut lines = restore::unsaved_lines(quit.names());
         lines.extend(crate::i18n::quit_running_work(work.agents, work.commands));
         let words = restore::quit_card_words(

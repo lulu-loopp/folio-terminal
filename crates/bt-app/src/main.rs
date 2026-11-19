@@ -8259,6 +8259,14 @@ impl ShellLife {
         matches!(self.phase, Phase::Shellless | Phase::Released)
     }
 
+    /// **Whether the pane's shell is running** ([`Phase::Live`]): not being born, not exited or
+    /// draining its last bytes, not ended by the system and kept with its face, not gone. The one
+    /// reader of running work reads nothing else (0.4.10 plan row 87, part 87e; the review's
+    /// P2-1): a shell that has ended runs nothing, whatever its last `C` left standing.
+    fn shell_is_live(&self) -> bool {
+        matches!(self.phase, Phase::Live(_))
+    }
+
     /// The pane's pseudoconsole, while it has one: Live, ExitDraining or Exited.
     fn pty(&self) -> Option<&PtySession> {
         match &self.phase {
@@ -16932,10 +16940,12 @@ impl ShellSession {
     }
 
     /// **What this one pane is running, for the one reader of running work** (0.4.10 plan row
-    /// 87, part 87e): the two facts [`Self::session_facts`] hands the claim — the shell's command
-    /// flag and the agent's turns — read by [`running_work::pane_work`]'s rule.
-    fn running_work(&self) -> running_work::RunningWork {
+    /// 87, part 87e): whether its shell is live ([`ShellLife::shell_is_live`]) and the two facts
+    /// [`Self::session_facts`] hands the claim — the shell's command flag and the agent's turns —
+    /// read by [`running_work::pane_work`]'s rule.
+    fn pane_running_work(&self) -> running_work::RunningWork {
         running_work::pane_work(
+            self.life.shell_is_live(),
             self.session.status().working,
             self.turn_account.agent_turn(),
         )
@@ -29110,10 +29120,10 @@ impl TabState {
     /// **What this tab's panes are running**, pane by pane (0.4.10 plan row 87, part 87e; the
     /// one reader of running work, [`running_work`]). Not [`Self::fleet_working`]: that is the
     /// breath, a union that drops the alternate screen and reads no agent's turns.
-    fn running_work(&self) -> running_work::RunningWork {
+    fn tab_running_work(&self) -> running_work::RunningWork {
         self.sessions.values().fold(
             running_work::RunningWork::NONE,
-            |work, TerminalPane { session: leaf, .. }| work + leaf.running_work(),
+            |work, TerminalPane { session: leaf, .. }| work + leaf.pane_running_work(),
         )
     }
 
@@ -49607,6 +49617,12 @@ impl<B: Backend> FolioApp<B> {
     /// and answers the running-work card Quit — whether it was standing already (a `Cmd+Q` nobody
     /// answered) or has just been put up — so the session's end goes on. The unsaved card stands
     /// as it always has: what it asks about is lost, and only a person can say so.
+    ///
+    /// **Nor does the system's end start anything on the way out** (the coordinator's ruling of
+    /// 2026-11-19 on the review's P2-3): before the card is answered,
+    /// [`Self::start_nothing_at_the_systems_end`] gives an update's Restart up and disarms an
+    /// armed Uninstall. **A failure on this road answers AppKit Cancel** (the review's N7): the
+    /// question it asked is answered, not left waiting on a quit that may never move.
     fn begin_the_systems_quit_for(&mut self, reason: bt_platform::QuitReason) {
         let by_a_person = quit::the_systems_quit_is_a_persons(reason);
         let Some(app) = self.app.as_mut() else {
@@ -49619,14 +49635,38 @@ impl<B: Backend> FolioApp<B> {
         if by_a_person {
             return;
         }
-        let answered = self
-            .begin_quit_if_asked()
-            .and_then(|()| self.answer_the_running_work_card_for_the_systems_end());
+        let answered = self.begin_quit_if_asked().and_then(|()| {
+            self.start_nothing_at_the_systems_end();
+            self.answer_the_running_work_card_for_the_systems_end()
+        });
         if let Err(error) = answered {
             diagnostics::note(&format!(
-                "{APP_NAME}: the quit card was not answered for the system's end: {error:#}"
+                "{APP_NAME}: the quit card was not answered for the system's end, and the system \
+                 is told this application stays: {error:#}"
             ));
+            self.answer_the_systems_quit(bt_platform::TerminationDecision::Cancel);
         }
+    }
+
+    /// **The system's end starts no applier and no uninstaller** (0.4.10 plan row 87, part 87e;
+    /// the coordinator's ruling of 2026-11-19 on the review's P2-3). A card can stand for hours,
+    /// and a log-out that answers it must not run what a person's Restart or Uninstall asked for
+    /// while the session ends: the update the quit carries is given up
+    /// ([`quit::Quit::give_up_the_update_for_the_systems_end`]) and the job told at once — it is
+    /// back at `Verified`, and the next start offers it again — the update's exit guard is
+    /// disarmed, and so is an armed Uninstall. Then the quit leaves as a plain quit. A hand-over
+    /// already on its way is the applier's own, and its guard stays.
+    fn start_nothing_at_the_systems_end(&mut self) {
+        let handed_over = self
+            .app
+            .as_mut()
+            .and_then(|app| app.quit.as_mut())
+            .is_some_and(quit::Quit::give_up_the_update_for_the_systems_end);
+        self.deliver_the_quits_update_report();
+        if !handed_over {
+            update_handoff::disarm();
+        }
+        uninstall::disarm();
     }
 
     /// **The running-work card, answered Quit for the system's end** (R9), and taken down on every
@@ -51596,10 +51636,10 @@ impl<B: Backend> FolioApp<B> {
     /// work ([`running_work`]) summed over every window that is not on its way out — the summoned
     /// terminal and a put-away window among them, since a quit ends theirs too. What the quit's Ask
     /// step counts ([`Self::begin_quit_if_asked`]).
-    fn running_work(&mut self) -> Result<running_work::RunningWork> {
+    fn every_windows_running_work(&mut self) -> Result<running_work::RunningWork> {
         let mut work = running_work::RunningWork::NONE;
         self.for_each_window(|runtime| {
-            work = work + runtime.running_work();
+            work = work + runtime.window_running_work();
             Ok(())
         })?;
         Ok(work)
@@ -51623,7 +51663,7 @@ impl<B: Backend> FolioApp<B> {
             names.extend(runtime.quit_dirty_names());
             Ok(())
         })?;
-        let mut work = self.running_work()?;
+        let mut work = self.every_windows_running_work()?;
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };

@@ -1805,13 +1805,14 @@ or cancel — **and over running work** (0.4.10 plan row 87, part 87e; the owner
 ruling R8 of 2026-11-14): while an agent's turn is under way or a command runs
 (`running_work`: a pane bound to its agent's turns by them, every other pane by its
 session's `OSC 133` `C` without its `D`, full screen included; a pane without shell
-integration is not counted), the same step asks once, for a reason a person gave
+integration, or whose shell has ended, is not counted), the same step asks once, for a reason a person gave
 (`quit::Reason::asks_about_running_work`) — the running-work line last on the unsaved
 card, or alone on a card of its own, *Quit Folio?* (*Restart Folio?* for the update's
 Restart) with Quit and Cancel, Cancel focused; a put-away window is brought back
 before it asks; the system's end, the Restart Manager's close and the quit from
 outside begin no quit and so never ask, and AppKit's log-out, restart or shut-down
-answers a running-work card Quit; ② a read-only photograph of every window; ③ the judged atomic write
+answers a running-work card Quit, giving an update's Restart up and disarming an armed
+Uninstall first, so that the system's end starts no applier and no uninstaller; ② a read-only photograph of every window; ③ the judged atomic write
 (`Runtime::quit_save` and the judged flush — **a refused disk means do not
 leave, unless the person chooses to leave without the change the refusal names,
 on the card that names it**); ④ retirement, with windows hidden and the loop still pumping only the

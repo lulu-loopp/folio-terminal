@@ -2566,6 +2566,13 @@ pub(crate) fn disarm() {
     }
 }
 
+/// **Whether the way out is armed**: tests only — nothing in the product reads the flag but
+/// [`leave_armed`], at the process's end.
+#[cfg(test)]
+pub(crate) fn armed_for_a_test() -> bool {
+    ARMED.lock().is_ok_and(|armed| armed.is_some())
+}
+
 /// **The door's words for this process's way out**: `--uninstall`, then
 /// `--remove-data` when asked, then `--after-pid <pid>`.
 fn door_words(remove_data: bool, pid: u32) -> Vec<OsString> {

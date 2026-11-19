@@ -1861,7 +1861,7 @@ fn a_quit_asks_once_while_something_runs_for_a_persons_reason() {
         let mut quit = Quit::begin_asking(Vec::new(), ONE_COMMAND, reason);
         assert_eq!(quit.step(), QuitStep::Ask, "{reason:?} asks");
         assert_eq!(quit.card(), QuitCard::RunningWork);
-        assert_eq!(quit.running_work(), ONE_COMMAND);
+        assert_eq!(quit.card_running_work(), ONE_COMMAND);
         assert_eq!(
             quit.answer(QuitAnswer::Save),
             QuitStep::Ask,
@@ -1877,7 +1877,7 @@ fn a_quit_asks_once_while_something_runs_for_a_persons_reason() {
         let mut both = Quit::begin_asking(vec!["notes.md".to_owned()], ONE_COMMAND, reason);
         assert_eq!(both.step(), QuitStep::Ask);
         assert_eq!(both.card(), QuitCard::Unsaved, "one card, the unsaved one");
-        assert_eq!(both.running_work(), ONE_COMMAND, "carrying the work");
+        assert_eq!(both.card_running_work(), ONE_COMMAND, "carrying the work");
         assert_eq!(
             both.answer(QuitAnswer::Quit),
             QuitStep::Ask,
@@ -1896,7 +1896,7 @@ fn a_quit_asks_once_while_something_runs_for_a_persons_reason() {
         "a log-out, a restart or a shut-down does not ask"
     );
     assert_eq!(
-        quit.running_work(),
+        quit.card_running_work(),
         RunningWork::NONE,
         "and carries no work"
     );
@@ -1907,7 +1907,7 @@ fn a_quit_asks_once_while_something_runs_for_a_persons_reason() {
         "the unsaved card stands for it"
     );
     assert_eq!(
-        named.running_work(),
+        named.card_running_work(),
         RunningWork::NONE,
         "without the work line"
     );

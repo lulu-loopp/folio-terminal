@@ -29,6 +29,13 @@
 //! there, so nothing says a command runs, and unknown is not running. The same holds for an agent
 //! whose hooks have not been heard (a profile's agent before its first prompt, a vendor without
 //! hooks): it is not counted until its account is bound.
+//!
+//! **A pane whose shell has ended runs nothing** (the review's P2-1 of 2026-11-19): a pane is read
+//! only while its shell is live (`ShellLife::shell_is_live`). `working` is cleared only by the
+//! shell's own `D`, and a shell that dies writes none — a build the system ended with the
+//! session, its pane kept with its face, or a split whose shell exited after its `C` — so a pane
+//! read without its shell's life would call a dead shell a running command, and a kept agent's
+//! last begun turn an agent working.
 
 use std::ops::Add;
 
@@ -69,11 +76,15 @@ impl Add for RunningWork {
     }
 }
 
-/// **What one pane is running**: `working` is its session's command flag
+/// **What one pane is running**: `shell_live` is whether its shell is running
+/// (`ShellLife::shell_is_live`), `working` its session's command flag
 /// ([`bt_term::SessionStatus::working`]) and `turn` its agent's turns, `Some` once its account is
 /// bound ([`crate::agent_turns::TurnAccount::agent_turn`]). See the module's doc for the rule.
 #[must_use]
-pub(crate) fn pane_work(working: bool, turn: Option<AgentTurn>) -> RunningWork {
+pub(crate) fn pane_work(shell_live: bool, working: bool, turn: Option<AgentTurn>) -> RunningWork {
+    if !shell_live {
+        return RunningWork::NONE;
+    }
     match turn {
         Some(turn) => RunningWork {
             agents: usize::from(turn.running),
@@ -109,7 +120,11 @@ mod tests {
     /// running, on the alternate screen too; a shell with no integration is nothing; a bound
     /// agent mid-turn is an agent working; the same agent after its turn ended is nothing, though
     /// its typed command's `C` is still up; an agent child whose hooks were never heard is
-    /// nothing.
+    /// nothing; and a pane whose shell has ended is nothing, its `C` standing or its agent's turn
+    /// begun.
+    ///
+    /// PLANT 87e-P41: drop the live-shell guard from `pane_work` — the ended shell's command
+    /// counts.
     ///
     /// PLANT 87e-P32: in `pane_work`, read `working` in the `Some(turn)` arm too (a bound agent's
     /// pane counted as a command while its shell's `C` stands) — the idle agent's case goes red.
@@ -126,7 +141,7 @@ mod tests {
 
         let running = session_fed(A_COMMAND_STARTS);
         assert_eq!(
-            pane_work(running.status().working, None),
+            pane_work(true, running.status().working, None),
             command,
             "a shell between C and D runs a command"
         );
@@ -134,23 +149,30 @@ mod tests {
         let full_screen = session_fed(&[A_COMMAND_STARTS, b"\x1b[?1049h"].concat());
         assert!(full_screen.status().alternate_screen);
         assert_eq!(
-            pane_work(full_screen.status().working, None),
+            pane_work(true, full_screen.status().working, None),
             command,
             "and so it does while the command holds the screen"
         );
 
         let ended = session_fed(&[A_COMMAND_STARTS, b"\x1b]133;D;0\x07"].concat());
         assert_eq!(
-            pane_work(ended.status().working, None),
+            pane_work(true, ended.status().working, None),
             RunningWork::NONE,
             "D ends it"
         );
 
         let no_integration = session_fed(b"PS> cargo build\r\nCompiling bt-app\r\n");
         assert_eq!(
-            pane_work(no_integration.status().working, None),
+            pane_work(true, no_integration.status().working, None),
             RunningWork::NONE,
             "a pane without shell integration is not running work"
+        );
+
+        assert!(running.status().working);
+        assert_eq!(
+            pane_work(false, running.status().working, None),
+            RunningWork::NONE,
+            "a shell that has ended runs nothing, though its C stands"
         );
 
         // An agent typed into the integrated shell: its command's C stands for its whole life.
@@ -162,9 +184,14 @@ mod tests {
             1,
         );
         assert_eq!(
-            pane_work(running.status().working, typed.agent_turn()),
+            pane_work(true, running.status().working, typed.agent_turn()),
             agent,
             "a bound agent mid-turn is an agent working"
+        );
+        assert_eq!(
+            pane_work(false, running.status().working, typed.agent_turn()),
+            RunningWork::NONE,
+            "and nothing once its shell has ended"
         );
         typed.hear_turn_step(
             TurnStep::Ended,
@@ -174,7 +201,7 @@ mod tests {
         );
         assert!(running.status().working, "its command's C is still up");
         assert_eq!(
-            pane_work(running.status().working, typed.agent_turn()),
+            pane_work(true, running.status().working, typed.agent_turn()),
             RunningWork::NONE,
             "and the same agent waiting at its prompt is nothing"
         );
@@ -189,12 +216,12 @@ mod tests {
         let mut heard = unheard.clone();
         heard.hear_turn_step(TurnStep::Began, CLAUDE_CODE, Child::Agent(claude), 1);
         assert_eq!(
-            pane_work(false, unheard.agent_turn()),
+            pane_work(true, false, unheard.agent_turn()),
             RunningWork::NONE,
             "an agent whose hooks were never heard is not counted"
         );
         assert_eq!(
-            pane_work(false, heard.agent_turn()),
+            pane_work(true, false, heard.agent_turn()),
             agent,
             "and is, once its turn is heard"
         );
@@ -203,7 +230,9 @@ mod tests {
     /// RED — **the counts add pane by pane**, and `any` is either of them.
     #[test]
     fn running_work_adds_pane_by_pane() {
-        let total = pane_work(true, None) + pane_work(true, None) + pane_work(false, None);
+        let total = pane_work(true, true, None)
+            + pane_work(true, true, None)
+            + pane_work(true, false, None);
         assert_eq!(
             total,
             RunningWork {

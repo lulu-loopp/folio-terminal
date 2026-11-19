@@ -1153,14 +1153,17 @@ fn a_put_away_window_publishes_nothing_and_its_first_frame_back_is_built_then() 
 // ── The quit asks while something runs (0.4.10 plan row 87, part 87e; T-TRAY-87E-QUIT-ASKS) ──
 
 impl PutAwayRun {
-    /// A command started in the first pane's shell: `OSC 133` `C`, and no `D`.
+    /// A command started in the first pane's shell, landed live first: `OSC 133` `C`, and no `D`.
     fn a_command_runs(&mut self) {
         let tab = &mut self.window().tabs[0];
         let seat = tab.seats.terminals()[0];
-        tab.sessions
+        let shell = &mut tab
+            .sessions
             .get_mut(&seat)
             .expect("the fixture's seat holds a shell")
-            .session
+            .session;
+        crate::test_support::land_a_live_shell(shell);
+        shell
             .session
             .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07cargo build\r\n\x1b]133;C\x07")
             .expect("the bytes parse");
@@ -1173,27 +1176,59 @@ impl PutAwayRun {
     }
 }
 
-/// RED (T10f; the coordinator's item 18) — **the system's end, the Restart Manager's close and the
-/// quit from outside never ask**, a command running or not: nobody is there to answer. None of the
-/// three begins Folio's quit: the system's question is answered and the window stays; the close
-/// and the outside quit leave, every window let go.
+/// RED (T10f; the coordinator's item 18, the judgement's risk 1) — **the system's end, the Restart
+/// Manager's close and the quit from outside never ask**, a command running or not: nobody is
+/// there to answer. None of the three begins Folio's quit: the system's question is answered and
+/// the window stays; the close and the outside quit leave, every window let go. **And a person's
+/// card already standing holds none of them**: with the running-work card up, the close and the
+/// outside quit still leave, and the system's end leaves the window and its card as they were.
 ///
-/// PLANT 87e-P35: in `FolioApp::settle_session_end_keeping_in`, answer `Settled::Closed` by asking
-/// for Folio's own quit (`app.ask_to_quit()`) instead of leaving — the close's case asks.
+/// PLANT 87e-P35: in `FolioApp::settle_session_end_keeping_in`, answer `Settled::Closed` by leaving
+/// only when no quit is under way (`closed = !a_quit_holds_it && app.quit.is_none()`) — the
+/// standing card holds the close and the outside quit.
 #[test]
 fn the_system_end_the_restart_managers_close_and_the_outside_quit_never_ask() {
     let _news = crate::test_support::EndSessionHome::new("87e-never-ask");
-    for road in ["end", "close", "outside"] {
-        let mut run = PutAwayRun::open(&format!("87e-never-{road}"), true);
+    for (road, standing) in [
+        ("end", false),
+        ("close", false),
+        ("outside", false),
+        ("end", true),
+        ("close", true),
+        ("outside", true),
+    ] {
+        let road_now = if standing {
+            format!("{road} under a card")
+        } else {
+            road.to_owned()
+        };
+        let mut run = PutAwayRun::open(
+            &format!(
+                "87e-never-{road}-{}",
+                if standing { "card" } else { "bare" }
+            ),
+            true,
+        );
         run.a_command_runs();
         assert!(
             run.application
                 .folio
-                .running_work()
+                .every_windows_running_work()
                 .expect("the windows are read")
                 .any(),
-            "{road}: the fixture's own precondition: a command runs"
+            "{road_now}: the fixture's own precondition: a command runs"
         );
+        if standing {
+            run.app().ask_to_quit();
+            run.application
+                .folio
+                .begin_quit_if_asked()
+                .expect("the quit begins");
+            assert!(
+                run.application.runtime().quit_card_layout().is_some(),
+                "{road_now}: the fixture's own precondition: the running-work card stands"
+            );
+        }
         match road {
             "end" => assert_eq!(crate::test_support::the_system_asks(), Some(1)),
             "close" => {
@@ -1226,12 +1261,21 @@ fn the_system_end_the_restart_managers_close_and_the_outside_quit_never_ask() {
             .application
             .folio
             .settle_session_end_keeping_in(&run.application.event_loop, &recovery);
-        assert!(run.no_quit(), "{road}: nothing asks");
         assert_eq!(
             run.application.folio.windows.len(),
             usize::from(road == "end"),
-            "{road}: leaves, or stays for the end"
+            "{road_now}: leaves, or stays for the end"
         );
+        if standing {
+            if road == "end" {
+                assert!(
+                    run.application.runtime().quit_card_layout().is_some(),
+                    "{road_now}: the card still stands"
+                );
+            }
+        } else {
+            assert!(run.no_quit(), "{road_now}: nothing asks");
+        }
     }
 }
 

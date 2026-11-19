@@ -867,6 +867,32 @@ impl Quit {
         }
     }
 
+    /// **The system is ending the session: no applier starts** (0.4.10 plan row 87, part 87e;
+    /// the coordinator's ruling of 2026-11-19 on the review's P2-3). An update this quit carries
+    /// and has not yet handed over is given up — live, or with its session landed and its
+    /// hand-over still owed — and the job is owed [`Abandon::SystemEndingTheSession`]: its journal
+    /// stays `Prepared`, and the next start offers it again. The quit itself goes on wherever it
+    /// was. Answers whether the hand-over is already on its way (sent, or answered): that is the
+    /// applier's own, and nothing is given up.
+    pub(crate) fn give_up_the_update_for_the_systems_end(&mut self) -> bool {
+        if let Phase::Leaving {
+            handoff: Handoff::Sent { .. } | Handoff::Done,
+        } = self.phase
+        {
+            return true;
+        }
+        if let Some(update) = self.update.as_mut()
+            && matches!(update.leg, Leg::Live | Leg::Landed)
+        {
+            update.leg = Leg::Abandoned;
+            update.owed = Some(Step::QuitAbandoned(Abandon::SystemEndingTheSession));
+        }
+        if let Phase::Leaving { handoff } = &mut self.phase {
+            *handoff = Handoff::NotOwed;
+        }
+        false
+    }
+
     /// What the driver owes right now.
     #[must_use]
     pub fn step(&self) -> QuitStep {
@@ -965,7 +991,7 @@ impl Quit {
     /// **What the card says is running** (0.4.10 plan row 87, part 87e): its last line when
     /// anything is.
     #[must_use]
-    pub(crate) fn running_work(&self) -> RunningWork {
+    pub(crate) fn card_running_work(&self) -> RunningWork {
         self.work
     }
 

@@ -1312,6 +1312,10 @@ pub(crate) enum Abandon {
     /// [`crate::quit::UPDATE_RECEIPT_DEADLINE`]. The quit went on; the update
     /// did not, because nobody saw the document land.
     SessionTimedOut,
+    /// **The system is ending the session** — a log-out, a restart or a shut-down answered the
+    /// quit's card — and no applier starts while it does (0.4.10 plan row 87, part 87e; the
+    /// coordinator's ruling of 2026-11-19 on the review's P2-3).
+    SystemEndingTheSession,
 }
 
 impl Abandon {
@@ -1324,6 +1328,7 @@ impl Abandon {
             Self::SessionRefused => "the session could not be written",
             Self::DocumentsUnsaved => "a change to a configuration file could not be saved",
             Self::SessionTimedOut => "the session write did not finish in time",
+            Self::SystemEndingTheSession => "the system is ending the session",
         }
     }
 }
