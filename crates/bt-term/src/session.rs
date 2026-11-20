@@ -60,7 +60,10 @@ use crate::{
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     palette::TerminalPalette,
-    scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
+    scheduling::{
+        EnqueueOutcome, PARSE_QUANTUM, RESIZE_STAGING_BUDGET_CELLS, ResizeEpoch, WORKER_QUEUE_CAP,
+        WorkerScheduler,
+    },
 };
 
 pub const SPIKE_CELL_HEIGHT_SUBPIXELS: NonZeroI64 = NonZeroI64::new(18 * SUBPIXELS_PER_PX).unwrap();
@@ -1138,6 +1141,19 @@ pub enum SessionError {
     ResizeCandidateMismatch { vendor: usize, staging: usize },
 }
 
+/// **Which door closed a resize transaction** (0.4.10 plan row 108), named in its
+/// [`ResizeTraceKind::TransactionEnd`] so a `BT_RESIZE_TRACE` log says why it closed when it did.
+/// Every door opens only once the child has been told the size the transaction ends at.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResizeSettleReason {
+    /// The child's output went quiet for `RESIZE_IDLE_AFTER_OUTPUT`.
+    OutputQuiet,
+    /// [`crate::RESIZE_SETTLE_BOUND`] passed since the child was told, its output still going.
+    TimeBound,
+    /// The tail grew by [`crate::RESIZE_STAGING_BUDGET_CELLS`] since the child was told.
+    StagingBudget,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResizeTraceRowOrigin {
     NormalScroll,
@@ -1206,7 +1222,9 @@ pub enum ResizeTraceKind {
         cursor_column: u32,
         cursor_visible: bool,
     },
-    TransactionEnd,
+    TransactionEnd {
+        reason: ResizeSettleReason,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1502,6 +1520,12 @@ pub struct DualPlaneSession {
     decorations: BTreeMap<TranscriptId, DecorationRecord>,
     scheduler: WorkerScheduler,
     resize_epoch: ResizeEpoch,
+    /// The cells of the open transaction's tail, as its last stage handed them to the
+    /// transcript's resize staging. 0 outside a transaction.
+    resize_tail_cells: usize,
+    /// [`Self::resize_tail_cells`] as it stood when the child was last told a size: what the
+    /// reflow itself pushed off, which the staging budget does not count.
+    resize_tail_cells_at_request: usize,
     resize_trace_transaction: u64,
     resize_trace_started: Option<Instant>,
     resize_trace_next_ordinal: u64,
@@ -2264,6 +2288,8 @@ impl DualPlaneSession {
             decorations: BTreeMap::new(),
             scheduler: WorkerScheduler::default(),
             resize_epoch: ResizeEpoch::default(),
+            resize_tail_cells: 0,
+            resize_tail_cells_at_request: 0,
             resize_trace_transaction: 0,
             resize_trace_started: None,
             resize_trace_next_ordinal: 0,
@@ -4950,6 +4976,7 @@ impl DualPlaneSession {
         );
         if reconciled {
             self.stage_resize_history();
+            self.resize_tail_cells_at_request = self.resize_tail_cells;
             self.reseat_anchors_after_reflow(reflow);
             self.retire_marks_with_stale_anchors();
             // The console host's reconcile is the second reflow of a resize transaction, and it ends
@@ -4959,17 +4986,28 @@ impl DualPlaneSession {
         reconciled
     }
 
-    /// Finish only after both resize and output have been silent for their configured intervals.
+    /// Finish a resize transaction once the child has been told its size and one of the three
+    /// doors of [`ResizeSettleReason`] is open: its output quiet, [`crate::RESIZE_SETTLE_BOUND`]
+    /// since it was told, or [`crate::RESIZE_STAGING_BUDGET_CELLS`] staged since then.
     /// Returns true when this call closed a resize transaction.
+    ///
+    /// **Settling while the child is still writing reflows nothing** (0.4.10 plan row 108). The
+    /// reflow a person sees happened when the child was told: `settle_resize_transaction`
+    /// installed the canonical branch at the final size then. What closes here is the tail's
+    /// ownership: the staged rows are committed to history in order, the grid's transaction and
+    /// the canonical fork end, the history quota applies, and formulas are scanned for again.
+    /// A reaction of the child's that arrives after it is ordinary output, as it is after a pause.
     pub fn finish_resize_if_quiescent(
         &mut self,
         observed_at: Instant,
     ) -> Result<bool, SessionError> {
-        if !self.resize_epoch.is_quiescent_at(observed_at) {
+        let Some(reason) = self.resize_settle_reason(observed_at) else {
             return Ok(false);
-        }
+        };
         self.harvest_resize_transaction(observed_at)?;
-        self.trace_resize_event(observed_at, ResizeTraceKind::TransactionEnd);
+        self.resize_tail_cells = 0;
+        self.resize_tail_cells_at_request = 0;
+        self.trace_resize_event(observed_at, ResizeTraceKind::TransactionEnd { reason });
         // Retain a short post-transaction window so a real wheel-up oracle is represented without
         // tracing every unrelated frame for the remainder of the session.
         self.resize_trace_post_end_frames_remaining = Some(16);
@@ -4991,6 +5029,25 @@ impl DualPlaneSession {
         }
         self.schedule_existing_artifacts();
         Ok(true)
+    }
+
+    /// Which door, if any, lets the open transaction settle at `now`: the first open one, in the
+    /// order of [`ResizeSettleReason`].
+    fn resize_settle_reason(&self, now: Instant) -> Option<ResizeSettleReason> {
+        if self.resize_epoch.is_quiescent_at(now) {
+            Some(ResizeSettleReason::OutputQuiet)
+        } else if self.resize_epoch.settle_bound_reached_at(now) {
+            Some(ResizeSettleReason::TimeBound)
+        } else if self.resize_epoch.child_told()
+            && self
+                .resize_tail_cells
+                .saturating_sub(self.resize_tail_cells_at_request)
+                >= RESIZE_STAGING_BUDGET_CELLS
+        {
+            Some(ResizeSettleReason::StagingBudget)
+        } else {
+            None
+        }
     }
 
     pub fn resize_trace(&self) -> &[ResizeTraceEvent] {
@@ -12111,6 +12168,7 @@ impl DualPlaneSession {
     /// the sole presented owner, so viewport scroll, selection, and copy all see the same rows.
     fn stage_resize_history(&mut self) {
         let rows = self.terminal.stage_resize_transaction();
+        self.resize_tail_cells = rows.iter().map(|row| row.cells.len()).sum();
         let ids = self.transcript.stage_resize_rows(rows);
         for id in ids {
             self.staging_sources.insert(id, SourceLifecycle::Live);
@@ -21188,7 +21246,7 @@ mod tests {
             session
                 .resize_trace()
                 .iter()
-                .any(|event| event.kind == ResizeTraceKind::TransactionEnd),
+                .any(|event| matches!(event.kind, ResizeTraceKind::TransactionEnd { .. })),
             "and the transaction is closed in the file as well as in the epoch"
         );
     }
@@ -21202,15 +21260,20 @@ mod tests {
             .unwrap();
         let resized_at = start + Duration::from_millis(250);
         session.resize_at(nz(41), nz(4), resized_at).unwrap();
-        session.mark_pty_resize_requested_at(
-            nz(41),
-            nz(4),
-            resized_at + Duration::from_millis(200),
-        );
+        let told = resized_at + Duration::from_millis(200);
+        session.mark_pty_resize_requested_at(nz(41), nz(4), told);
 
+        // While the transaction is open: up to the bound after the child was told, where it is
+        // meant to close (0.4.10 plan row 108).
+        let bound = told + crate::RESIZE_SETTLE_BOUND;
         let mut immediate_timer_wakes = 0usize;
+        let mut steps = 0u64;
         for step in 0..20u64 {
             let observed_at = resized_at + Duration::from_millis(250 + step * 50);
+            if observed_at >= bound {
+                break;
+            }
+            steps += 1;
             session
                 .feed_at(format!("\r\x1b[2Kspin-{step}").as_bytes(), observed_at)
                 .unwrap();
@@ -21227,10 +21290,16 @@ mod tests {
             immediate_timer_wakes +=
                 usize::from(wake_deadline.is_some_and(|deadline| deadline <= observed_at));
         }
+        assert_eq!(steps, 19, "the loop ran the whole open transaction");
         assert_eq!(
             immediate_timer_wakes, 0,
-            "one second of 20 Hz output adds no timer-driven wake loop"
+            "a second of 20 Hz output adds no timer-driven wake loop"
         );
+        // At the bound the deadline is due, and it is the settle the window wakes for: one ask
+        // closes the transaction, so the due deadline is answered rather than looped on.
+        assert_eq!(session.resize_finish_deadline(), Some(bound));
+        assert!(session.finish_resize_if_quiescent(bound).unwrap());
+        assert_eq!(session.resize_finish_deadline(), None);
     }
 
     #[test]

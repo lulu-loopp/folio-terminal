@@ -77,6 +77,7 @@ All notable changes to Folio are recorded here. The format follows
 - When a pane rings its bell, as many agents do when a turn has finished, Folio now announces it at once even while another pane in the same window is printing fast; it used to wait for that output to pause. <!-- zh: 窗格响铃时（许多 agent 在一个回合结束时会这样做），即使同一窗口中另一个窗格正在快速输出，Folio 现在也会立即发出提醒；以前要等那些输出停下来才提醒。 -->
 - In a Markdown preview, a page holding a very long paragraph written over many lines now opens, and takes each keystroke anywhere in it, in time that grows with the paragraph's length rather than with its square. <!-- zh: 在 Markdown 预览中，若页面里有一个分多行写成的很长的段落，现在打开该页面、在页面中任意位置按键所需的时间，随段落长度增长，而不再随长度的平方增长。 -->
 - A pane no longer keeps a second copy of everything it prints once it has been resized, which a split, a window resize or the layout a new pane gets all do: the copy grew by about 6 KB for each long line until the pane was closed or resized again, and resizing it again also put that earlier output into its scrollback a second time. <!-- zh: 窗格改变大小后（拆分窗格、调整窗口大小、新窗格加入布局都会改变窗格大小），不再为它输出的全部内容另存一份副本：以前这份副本每遇到一个长行约增长 6 KB，直到窗格关闭或再次改变大小；再次改变大小时，之前的那些输出还会第二次放进它的回滚区。 -->
+- After a pane is resized while its program keeps writing (an agent at work, a progress bar), formulas are typeset again within a second, and the pane no longer keeps a growing second copy of everything printed since. <!-- zh: pending T-RESIZE-DURING-A-FLOOD-NEVER-SETTLES -->
 
 ## 0.4.8-preview — 2026-10-23
 

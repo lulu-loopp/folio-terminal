@@ -36,7 +36,7 @@ impl PutAwayRun {
         self.app().settings_store.loaded().first_hide_toast
     }
 
-    fn switch(&mut self) -> bool {
+    fn stored_switch(&mut self) -> bool {
         self.app().settings_store.loaded().close_keeps_running
     }
 
@@ -259,7 +259,7 @@ fn a_click_on_it_brings_the_window_back_and_opens_nothing() {
 fn the_rows_press_is_the_switch_the_next_close_reads() {
     let mut run = PutAwayRun::open("row-off", true);
     run.press_keep_running(1);
-    assert!(!run.switch(), "Off is stored");
+    assert!(!run.stored_switch(), "Off is stored");
     let _ = run.close();
     assert!(!run.window().put_away, "nothing is put away");
     assert!(
@@ -270,7 +270,7 @@ fn the_rows_press_is_the_switch_the_next_close_reads() {
 
     let mut run = PutAwayRun::open("row-on", false);
     run.press_keep_running(0);
-    assert!(run.switch(), "On is stored");
+    assert!(run.stored_switch(), "On is stored");
     let _ = run.close();
     assert!(run.window().put_away, "the window is put away");
     assert!(run.sentinel_stands(), "and the run keeps running");
@@ -307,7 +307,7 @@ fn turning_the_switch_off_brings_a_put_away_window_back() {
             "{road}: the fixture's window is put away"
         );
         off(&mut run);
-        assert!(!run.switch(), "{road}: Off is stored");
+        assert!(!run.stored_switch(), "{road}: Off is stored");
         let effects = run.an_event();
         assert!(
             effects.contains(&WindowEffect::Visible(true)),
@@ -355,7 +355,7 @@ fn a_hand_edit_to_off_brings_a_put_away_window_back_on_the_turn_alone() {
             .folio
             .take_document_answers()
             .expect("the answers are heard");
-        !run.switch()
+        !run.stored_switch()
     });
     assert!(
         run.window().put_away,

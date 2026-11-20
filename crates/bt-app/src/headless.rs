@@ -39,7 +39,7 @@ use crate::ime_report::NativeFacts;
 use crate::window_seam::{
     Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
     ImeCaretDoor, LoopDoor, LoopProxy, MathMenuDoor, PageTree, SavePickerDoor, TaskbarDoor,
-    ToastDoor, WindowHost,
+    ToastDoor, TrayDoor, WindowHost,
 };
 use crate::{App, AppEvent, TabState, WindowRuntime};
 
@@ -178,6 +178,15 @@ pub(crate) enum WindowEffect {
     ImeCaretDestroyed,
     /// The loop told to stop.
     Exit,
+    /// The run's icon put up in the notification area, showing this (`Backend::put_up_tray`,
+    /// 0.4.10 plan row 87, part 87b).
+    TrayShown(bt_platform::tray::TrayPicture),
+    /// The icon told to show this (`TrayDoor::change`).
+    TrayChanged(bt_platform::tray::TrayPicture),
+    /// The icon's menu given these words (`TrayDoor::relabel`).
+    TrayRelabelled(bt_platform::tray::TrayLabels),
+    /// The icon taken out of the notification area (`TrayDoor::remove_the_icon`).
+    TrayRemoved,
     /// The loop told how to wait.
     ControlFlow(ControlFlow),
     /// Every surface built again.
@@ -294,6 +303,7 @@ impl Backend for Headless {
     type ImeCaret = HeadlessImeCaret;
     type Loop = HeadlessLoop;
     type Toasts = HeadlessToasts;
+    type Tray = HeadlessTray;
 
     fn rebuild_every_surface(
         _gpu: &mut HeadlessDevice,
@@ -339,6 +349,29 @@ impl Backend for Headless {
             .ledger
             .record(WindowEffect::ShutdownLevelAsked { level });
         Ok(())
+    }
+
+    fn has_a_notification_area(event_loop: &HeadlessLoop) -> bool {
+        event_loop.tray.area.get()
+    }
+
+    fn put_up_tray(
+        event_loop: &HeadlessLoop,
+        _labels: bt_platform::tray::TrayLabels,
+        picture: bt_platform::tray::TrayPicture,
+        _wake: Box<dyn Fn()>,
+        _note: Box<dyn Fn(&str)>,
+    ) -> Result<HeadlessTray, String> {
+        if event_loop.tray.refused.get() {
+            return Err("a headless host the test refused".to_owned());
+        }
+        event_loop.ledger.record(WindowEffect::TrayShown(picture));
+        Ok(HeadlessTray {
+            ledger: event_loop.ledger.clone(),
+            gestures: Rc::clone(&event_loop.tray.gestures),
+            watched: Rc::clone(&event_loop.tray.watched),
+            watched_at_the_removal: Rc::clone(&event_loop.tray.watched_at_the_removal),
+        })
     }
 }
 
@@ -1683,6 +1716,75 @@ impl ToastDoor for HeadlessToasts {
 /// **A loop that is not running**: it records being told to stop and how to wait.
 pub(crate) struct HeadlessLoop {
     pub(crate) ledger: Ledger,
+    /// What the loop's icon in the notification area answers, and the gestures a test makes on
+    /// it (0.4.10 plan row 87, part 87b).
+    pub(crate) tray: HeadlessTrayHand,
+}
+
+impl HeadlessLoop {
+    /// A loop recording to `ledger`, on a platform with a notification area.
+    pub(crate) fn recording_to(ledger: Ledger) -> Self {
+        Self {
+            ledger,
+            tray: HeadlessTrayHand::default(),
+        }
+    }
+}
+
+/// **A headless loop's notification area** (0.4.10 plan row 87, part 87b): whether the platform
+/// has one, whether the host would be refused, and the gestures a test makes on the icon — parked
+/// where the icon's [`TrayDoor::take_gestures`] takes them, as the host's procedure parks them.
+#[derive(Clone)]
+pub(crate) struct HeadlessTrayHand {
+    pub(crate) area: Rc<Cell<bool>>,
+    pub(crate) refused: Rc<Cell<bool>>,
+    /// A person's gestures on the icon, parked for the loop's next turn: a test pushes them.
+    pub(crate) gestures: Rc<RefCell<Vec<bt_platform::tray::TrayGesture>>>,
+    /// **A file whose presence the icon's removal reads**: whether it was there then lands in
+    /// [`Self::watched_at_the_removal`] — the run's sentinel, for a test of the order of the end.
+    pub(crate) watched: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// Whether the watched file was there when the icon was taken down; `None` before.
+    pub(crate) watched_at_the_removal: Rc<Cell<Option<bool>>>,
+}
+
+impl Default for HeadlessTrayHand {
+    fn default() -> Self {
+        Self {
+            area: Rc::new(Cell::new(true)),
+            refused: Rc::new(Cell::new(false)),
+            gestures: Rc::default(),
+            watched: Rc::default(),
+            watched_at_the_removal: Rc::default(),
+        }
+    }
+}
+
+/// **A headless run's icon**: each thing it is told, recorded on the loop's ledger.
+pub(crate) struct HeadlessTray {
+    ledger: Ledger,
+    gestures: Rc<RefCell<Vec<bt_platform::tray::TrayGesture>>>,
+    watched: Rc<RefCell<Option<std::path::PathBuf>>>,
+    watched_at_the_removal: Rc<Cell<Option<bool>>>,
+}
+
+impl TrayDoor for HeadlessTray {
+    fn change(&self, picture: &bt_platform::tray::TrayPicture) {
+        self.ledger
+            .record(WindowEffect::TrayChanged(picture.clone()));
+    }
+    fn relabel(&self, labels: &bt_platform::tray::TrayLabels) {
+        self.ledger
+            .record(WindowEffect::TrayRelabelled(labels.clone()));
+    }
+    fn take_gestures(&self) -> Vec<bt_platform::tray::TrayGesture> {
+        std::mem::take(&mut *self.gestures.borrow_mut())
+    }
+    fn remove_the_icon(self) {
+        if let Some(path) = self.watched.borrow().as_ref() {
+            self.watched_at_the_removal.set(Some(path.exists()));
+        }
+        self.ledger.record(WindowEffect::TrayRemoved);
+    }
 }
 
 impl LoopDoor for HeadlessLoop {
@@ -1958,7 +2060,7 @@ impl HeadlessApplication {
         Self {
             folio: application,
             id,
-            event_loop: HeadlessLoop { ledger },
+            event_loop: HeadlessLoop::recording_to(ledger),
             _scratch: scratch,
         }
     }
@@ -2582,9 +2684,7 @@ mod tests {
         parts.ime_caret.update(5, 6).expect("recorded");
         parts.ime_caret.destroy();
 
-        let event_loop = HeadlessLoop {
-            ledger: ledger.clone(),
-        };
+        let event_loop = HeadlessLoop::recording_to(ledger.clone());
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.exit();
 
@@ -2748,9 +2848,7 @@ mod tests {
         Headless::rebuild_every_surface(&mut folio.app.gpu, vec![&mut folio.window])
             .expect("a headless rebuild answers");
         let like = folio.window.window.id();
-        let event_loop = HeadlessLoop {
-            ledger: folio.ledger.clone(),
-        };
+        let event_loop = HeadlessLoop::recording_to(folio.ledger.clone());
         assert!(
             Headless::open_window(
                 &event_loop,
