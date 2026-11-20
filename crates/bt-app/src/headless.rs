@@ -1702,9 +1702,11 @@ impl HeadlessLoop {
 pub(crate) struct HeadlessTrayHand {
     pub(crate) area: Rc<Cell<bool>>,
     pub(crate) refused: Rc<Cell<bool>>,
-    gestures: Rc<RefCell<Vec<bt_platform::tray::TrayGesture>>>,
-    /// A file whose presence the icon's removal reads ([`Self::watch_at_the_removal`]).
-    watched: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// A person's gestures on the icon, parked for the loop's next turn: a test pushes them.
+    pub(crate) gestures: Rc<RefCell<Vec<bt_platform::tray::TrayGesture>>>,
+    /// **A file whose presence the icon's removal reads**: whether it was there then lands in
+    /// [`Self::watched_at_the_removal`] — the run's sentinel, for a test of the order of the end.
+    pub(crate) watched: Rc<RefCell<Option<std::path::PathBuf>>>,
     /// Whether the watched file was there when the icon was taken down; `None` before.
     pub(crate) watched_at_the_removal: Rc<Cell<Option<bool>>>,
 }
@@ -1718,23 +1720,6 @@ impl Default for HeadlessTrayHand {
             watched: Rc::default(),
             watched_at_the_removal: Rc::default(),
         }
-    }
-}
-
-impl HeadlessTrayHand {
-    /// A person's gesture on the icon, parked for the loop's next turn.
-    /// Read only by `put_away_tests`, which are Windows-only until 87c.
-    #[cfg(windows)]
-    pub(crate) fn make_the_gesture(&self, gesture: bt_platform::tray::TrayGesture) {
-        self.gestures.borrow_mut().push(gesture);
-    }
-
-    /// **`path` read at the moment the icon is taken down**: whether it was there then lands in
-    /// [`Self::watched_at_the_removal`] — the run's sentinel, for a test of the order of the end.
-    /// Read only by `put_away_tests`, which are Windows-only until 87c.
-    #[cfg(windows)]
-    pub(crate) fn watch_at_the_removal(&self, path: std::path::PathBuf) {
-        *self.watched.borrow_mut() = Some(path);
     }
 }
 

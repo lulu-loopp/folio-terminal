@@ -128,7 +128,12 @@ impl PutAwayRun {
 
     /// A person's `gesture` on the run's icon, parked for the loop's next turn.
     fn poke(&mut self, gesture: TrayGesture) {
-        self.application.event_loop.tray.make_the_gesture(gesture);
+        self.application
+            .event_loop
+            .tray
+            .gestures
+            .borrow_mut()
+            .push(gesture);
     }
 
     /// The switch (`close_keeps_running`) set to `on`.
@@ -1492,7 +1497,8 @@ fn the_icons_quit_leaves_and_takes_the_icon_down() {
     run.application
         .event_loop
         .tray
-        .watch_at_the_removal(run.dir.join("session.lock"));
+        .watched
+        .replace(Some(run.dir.join("session.lock")));
     run.turn_the_tray().expect("the icon is put up");
     let _ = run.application.event_loop.ledger.take();
     run.poke(TrayGesture::Quit);
