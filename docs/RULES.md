@@ -540,7 +540,7 @@ nothing is asked, the summoned terminal stays as it was, and both go when the ru
 goes, which is only at a quit, the system's end, the outside quit message
 (Windows), or the exit of the put-away window's last shell (Windows; on macOS that
 window is filed into Recent and the application stays in the Dock, whose click
-brings a put-away window back). A
+then opens a fresh window). A
 put-away run the system restarts comes back on the glass: the layout keeps no
 put-away bit. The summoned terminal never stands alone.
 **From.** §7.1.3; §7.1.3q; §7.1.3s *undo lives on the buffer, and the dirty dot is

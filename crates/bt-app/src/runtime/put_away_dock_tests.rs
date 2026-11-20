@@ -160,6 +160,38 @@ fn a_macs_last_window_whose_shells_exited_is_filed_and_the_application_stays() {
     assert!(run.sentinel_stands(), "and the run goes on, in the Dock");
 }
 
+/// RED (87a's review P1-3 on a Mac; the review's P2-4 of 2026-11-20) — **a put-away Mac window
+/// whose last shell exits is filed and let go, and the application stays**: the close its final
+/// tab asks for when every shell has exited reaches the window while it is away, and it is the
+/// Mac's close of a shown window — the window on its way out, its tab filed into Recent, the run's
+/// sentinel standing, and no exit once the window has gone. A Dock click then opens a fresh
+/// window.
+///
+/// PLANT 87c-P66: answer `CloseFate::AlreadyAway` for that close in `FolioApp::close_fate` (87a's
+/// P23) — the put-away window stays, with nothing in it.
+#[test]
+fn a_put_away_macs_window_whose_shells_exited_is_filed_and_the_application_stays() {
+    let mut run = PutAwayRun::put_away_on_a_mac("mac-away-exited");
+    let effects = run.close_by(OwnCloseRoad::ShellsExited);
+    assert!(
+        run.window().leaving.is_some(),
+        "the window is on its way out"
+    );
+    assert_eq!(run.app().recent.len(), 1, "its tab is filed in Recent");
+    assert!(run.sentinel_stands(), "the run's sentinel stands");
+    let _ = run
+        .application
+        .folio
+        .reap_leaving_windows(&run.application.event_loop, std::time::Instant::now())
+        .expect("the reap");
+    let reaped = run.application.event_loop.ledger.take();
+    assert!(
+        !effects.contains(&WindowEffect::Exit) && !reaped.contains(&WindowEffect::Exit),
+        "and the application stays in the Dock: {effects:?} {reaped:?}"
+    );
+    assert!(run.sentinel_stands(), "the run goes on");
+}
+
 /// RED (T6, the Mac's arm; R10, R13, R4 of 2026-11-20) — **a click on the Dock icon brings the
 /// put-away window back as it was**: on the glass and given the keyboard, with the same tabs as
 /// the session writes them (the resume records among them), the same pane ids and the same rows,
@@ -204,12 +236,15 @@ fn a_reopen_brings_the_put_away_window_back_as_it_was() {
     );
 }
 
-/// RED (R4 of 2026-11-20, the hand-over) — **a file Finder hands over while the run is put away
-/// opens in the window brought back**: the door first, then the preview, and no second window.
+/// RED (R4 of 2026-11-20, the hand-over; the review's P2-3) — **a file Finder hands over while the
+/// run is put away opens in the window brought back**: the door first, then the preview of that
+/// file in the window's active tab, and no second window.
 ///
 /// PLANT 87c-P51: take the file's window in `FolioApp::open_one_path_for_the_delegate` as the
 /// window the reader was last in (no door) — the preview opens in the hidden window, which stays
 /// put away.
+/// PLANT 87c-P65: drop `open_preview` from that function's file arm — the window comes back with
+/// no preview of the file.
 #[test]
 fn a_file_handed_over_while_put_away_opens_in_the_window_brought_back() {
     let mut run = PutAwayRun::put_away_on_a_mac("mac-file");
@@ -217,7 +252,7 @@ fn a_file_handed_over_while_put_away_opens_in_the_window_brought_back() {
     std::fs::write(&file, "handed over\n").expect("the file is written");
     run.hand_the_delegate(
         AppDelegateOrigin::OpenUrls,
-        AppDelegateEventKind::OpenPaths(vec![file]),
+        AppDelegateEventKind::OpenPaths(vec![file.clone()]),
     );
     let effects = run.application.event_loop.ledger.take();
     assert!(
@@ -228,6 +263,21 @@ fn a_file_handed_over_while_put_away_opens_in_the_window_brought_back() {
     assert!(
         !effects.contains(&WindowEffect::WindowOpened),
         "and the file did not open a second window: {effects:?}"
+    );
+    let window = run.window();
+    let shown: Vec<_> = window.tabs[window.active_tab]
+        .preview_panes
+        .iter()
+        .filter_map(|(_, pane)| match pane.source()? {
+            crate::preview::PreviewSource::File(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        shown
+            .iter()
+            .any(|path| path.file_name() == file.file_name()),
+        "the file is shown in a preview of the window brought back: {shown:?}"
     );
 }
 
@@ -251,20 +301,33 @@ fn the_docks_new_tab_brings_the_put_away_window_back_and_lands_in_it() {
 }
 
 /// RED (R3 of 2026-11-20; 87b's item 8) — **the Dock menu's New window opens a window of its own
-/// and leaves the put-away one away**: one verb, one thing. The window is recorded to open, and the
-/// put-away window is neither shown nor given the keyboard nor asked to be.
+/// and leaves the put-away one away**: one verb, one thing, on the icon's road. The window is
+/// asked for there and then (a headless loop opens no second window, so the door's own refusal is
+/// the answer, as in the icon's T10), and the put-away window is neither shown nor given the
+/// keyboard nor asked to be.
 ///
-/// PLANT: drop the `a_dock_row_opens_a_window_of_its_own` term from `answer_a_menu_row`'s Dock arm
-/// — New window brings the put-away window back as well.
+/// PLANT 87c-P63: drop the `a_dock_row_opens_a_window_of_its_own` branch from
+/// `answer_a_menu_row`'s Dock arm — New window brings the put-away window back as well.
 #[test]
 fn the_docks_new_window_leaves_the_put_away_window_away() {
     let mut run = PutAwayRun::put_away_on_a_mac("mac-dock-window");
-    run.press_on_the_dock("new-window");
+    let answered = run.application.folio.answer_one_delegate_event(
+        &run.application.event_loop,
+        AppDelegateEvent {
+            origin: AppDelegateOrigin::Dock,
+            kind: AppDelegateEventKind::MenuChosen(bt_platform::menu::MenuChoice::Verb(
+                "new-window",
+            )),
+        },
+    );
+    assert!(
+        answered.is_err(),
+        "the headless door opens no second window"
+    );
     let effects = run.application.event_loop.ledger.take();
-    assert_eq!(
-        run.app().pending_new_windows.len(),
-        1,
-        "a window is recorded to open"
+    assert!(
+        effects.contains(&WindowEffect::WindowOpened),
+        "a window is asked for: {effects:?}"
     );
     assert!(run.window().put_away, "the put-away window stays away");
     assert!(
@@ -279,6 +342,31 @@ fn the_docks_new_window_leaves_the_put_away_window_away() {
         )),
         "nor raised and refused: {effects:?}"
     );
+}
+
+/// RED (R3 of 2026-11-20; the review's P2-1) — **the Dock menu's New window raises the window it
+/// opened**: a Dock press does not activate this application, and no window before the new one
+/// may be raised to do it (the one the reader was last in may be put away), so the window that
+/// opened is raised once it stands — the icon's New window's two lines. The raise follows a window
+/// that stands, which no headless loop opens, so the Dock arm's own source is what is read.
+///
+/// PLANT 87c-P67: drop `raise_the_window_the_icon_named(opened)` from that branch of
+/// `answer_a_menu_row` — the new window can open behind the application in front.
+#[test]
+fn the_docks_new_window_raises_the_window_it_opened() {
+    let arm = crate::test_support::squeezed_body("FolioApp", "answer_a_menu_row");
+    let branch = arm
+        .find("ifself.a_dock_row_opens_a_window_of_its_own(choice){")
+        .expect("the Dock's New window has a branch of its own");
+    let rest = &arm[branch..];
+    let opened = rest
+        .find("ifletSome(opened)=self.open_a_window_for_a_launch(")
+        .expect("the window is opened on the icon's road");
+    let raised = rest
+        .find("self.raise_the_window_the_icon_named(opened);")
+        .expect("the window opened is raised");
+    let spent = rest.find("returnOk(());").expect("the branch is spent");
+    assert!(opened < raised && raised < spent, "{rest}");
 }
 
 /// RED (R4 of 2026-11-20; the report's §1.0 point 1) — **a put-away window is given the keyboard
@@ -427,17 +515,21 @@ fn a_persons_quit_of_a_put_away_mac_run_asks_on_the_window_brought_back() {
     );
 }
 
-/// RED (T14m; 87e's R9 on a Mac) — **a log-out reaches a put-away Mac run and leaves without
-/// asking**, a command running or not: nobody is there to answer, so no card is put up and the
-/// window is not shown for one; the quit goes on to its documents, and its way out writes the
-/// layout, the put-away window in it.
+/// RED (T14m; 87e's R9 on a Mac; the review's P2-2) — **a log-out reaches a put-away Mac run and
+/// leaves without asking**, a command running or not: nobody is there to answer, so no card is
+/// put up and the window is not shown for one; the quit goes on to its documents, and its way out
+/// writes the layout, the put-away window in it, claims the clean exit and asks the loop to exit.
 ///
 /// PLANT: 87e-P42 (drop the begin-and-answer block from `FolioApp::begin_the_systems_quit_for`) —
 /// the log-out stands asking.
+/// PLANT 87c-P64: answer the quit's write in `FolioApp::settle_quit`'s `Write` arm without the
+/// flush (`session_store.flush_for_quit` dropped) — the way out leaves no layout.
 #[test]
 fn a_macs_log_out_writes_a_put_away_runs_layout_and_leaves() {
     let mut run = PutAwayRun::put_away_on_a_mac("mac-log-out");
     run.a_command_runs();
+    // The layout on the disk is the quit's own write, not the one the close left.
+    let _ = std::fs::remove_file(run.dir.join("session.json"));
     run.application
         .folio
         .begin_the_systems_quit_for(bt_platform::QuitReason::LogOut);
@@ -459,6 +551,21 @@ fn a_macs_log_out_writes_a_put_away_runs_layout_and_leaves() {
         "and the window is not shown for one"
     );
     assert!(run.window().put_away, "it is still put away");
+    let effects = run.turn_the_quit_to_its_end();
+    assert!(
+        effects.contains(&WindowEffect::Exit),
+        "the run leaves: {effects:?}"
+    );
+    assert!(
+        !effects.contains(&WindowEffect::Visible(true)),
+        "and its way out shows nothing: {effects:?}"
+    );
+    assert_eq!(
+        run.written_windows(),
+        1,
+        "the layout is written, the put-away window in it"
+    );
+    assert!(!run.sentinel_stands(), "the run claims its clean exit");
 }
 
 /// The loop's activity fold, as its turn runs it after every window's turn
@@ -482,7 +589,6 @@ fn times_seen(effects: &[WindowEffect], effect: &WindowEffect) -> usize {
 /// activity, once, and lets it go when the window comes back**: begun on the first turn after the
 /// close with a command running, not begun again on the next turn, ended on the turn after the
 /// Dock brings the window back.
-///
 #[test]
 fn a_put_away_run_that_works_holds_the_activity_until_the_window_is_back() {
     let mut run = PutAwayRun::put_away_on_a_mac("mac-activity");

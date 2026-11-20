@@ -3364,7 +3364,9 @@ mod tests;
 mod put_away_tests;
 
 // The put-away run on the roads only Windows has: Folio's quit from outside and the system's
-// question at the end of the session, both Windows messages (part 87c, R11 of 2026-11-20).
+// question at the end of the session, both Windows messages, with 87e's T10f (those messages
+// while a command runs) and T10h (the quit from the run's icon in the notification area)
+// (part 87c, R11 of 2026-11-20).
 #[cfg(all(test, windows))]
 #[path = "put_away_windows_tests.rs"]
 mod put_away_windows_tests;

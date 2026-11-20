@@ -17,6 +17,15 @@ use bt_platform::tray::TrayGesture;
 use winit::event::WindowEvent;
 use winit::window::WindowId;
 
+impl PutAwayRun {
+    /// Whether no quit was begun or asked for: nothing could have asked (87e's T10f; here and not
+    /// in `put_away_tests`, whose every host would find it unused).
+    fn no_quit(&mut self) -> bool {
+        let app = self.app();
+        app.quit.is_none() && !app.quit_requested
+    }
+}
+
 /// RED (review P1-1) — **while Folio's quit from outside holds the document, a close closes
 /// nothing**: the `WM_CLOSE` posted after the quit for older builds reaches a window that is not
 /// the last before the settle, and it is neither filed into Recent nor sent on its way out nor put

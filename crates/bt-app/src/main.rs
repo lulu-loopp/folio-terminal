@@ -48588,7 +48588,8 @@ impl<B: Backend> FolioApp<B> {
     }
 
     /// **The window the icon's gesture landed in is the one the reader is in now**, raised: the
-    /// launch's own two lines ([`Self::land_one_launch_request`]).
+    /// launch's own two lines ([`Self::land_one_launch_request`]). The Dock menu's `New window`
+    /// lands here too (0.4.10 plan row 87, part 87c; [`Self::answer_a_menu_row`]).
     fn raise_the_window_the_icon_named(&mut self, id: WindowId) {
         if let Some(app) = self.app.as_mut() {
             app.activated.retain(|visited| *visited != id);
@@ -49490,9 +49491,9 @@ impl<B: Backend> FolioApp<B> {
     }
 
     /// **Whether a row of the Dock tile's menu opens a window of its own** (0.4.10 plan row 87,
-    /// part 87c, R3): `New window`, whose verb records a window to open and needs the one it is
-    /// run on only as the place the new one is like. Read through the shortcut table, as the
-    /// verb itself is.
+    /// part 87c, R3): `New window`, which needs the window the reader was last in only as the
+    /// place the new one is like, and is answered by the icon's road (the review's P2-1). Read
+    /// through the shortcut table, as the verb itself is.
     fn a_dock_row_opens_a_window_of_its_own(&self, choice: bt_platform::menu::MenuChoice) -> bool {
         let bt_platform::menu::MenuChoice::Verb(row) = choice else {
             return false;
@@ -49542,8 +49543,12 @@ impl<B: Backend> FolioApp<B> {
     /// `New window` needs the window, so the put-away one comes back through the one door first
     /// (`New tab` then lands in it, R10's "bring it back, then land as asked"). `New window` opens
     /// a window of its own and leaves the put-away one away, as the icon's New window does (87b,
-    /// item 8: one verb, one thing); the put-away window it is run on is not raised — only the
-    /// door shows a put-away window (R4).
+    /// item 8: one verb, one thing): **it is the icon's road** — the window opened there and then,
+    /// like the one the reader was last in, and raised once it stands (the review's P2-1 of
+    /// 2026-11-20). The Dock press does not activate this application, and no window before it may
+    /// be raised to do so: the one the reader was last in may be the put-away one, which only the
+    /// door shows (R4). The same road with nothing put away, where raising the old window first
+    /// and opening the new one behind its activation came to the same thing.
     fn answer_a_menu_row(
         &mut self,
         event_loop: &B::Loop,
@@ -49572,8 +49577,18 @@ impl<B: Backend> FolioApp<B> {
             return Ok(());
         }
         let id = if origin == bt_platform::AppDelegateOrigin::Dock {
-            let its_own_window = self.a_dock_row_opens_a_window_of_its_own(choice);
-            if !its_own_window && let Some(back) = self.bring_the_window_back()? {
+            if self.a_dock_row_opens_a_window_of_its_own(choice) {
+                let like = self.the_window_the_reader_was_last_in();
+                if let Some(opened) = self.open_a_window_for_a_launch(
+                    event_loop,
+                    like,
+                    &launch_wire::LaunchRequest::default(),
+                )? {
+                    self.raise_the_window_the_icon_named(opened);
+                }
+                return Ok(());
+            }
+            if let Some(back) = self.bring_the_window_back()? {
                 back
             } else {
                 let Some(id) = self.the_window_the_reader_was_last_in() else {
@@ -49582,13 +49597,7 @@ impl<B: Backend> FolioApp<B> {
                     }
                     return Ok(());
                 };
-                if !self
-                    .windows
-                    .get_mut(id)
-                    .is_some_and(|window| window.put_away)
-                {
-                    self.raise_for_a_launch(id);
-                }
+                self.raise_for_a_launch(id);
                 id
             }
         } else {
@@ -60941,8 +60950,10 @@ mod platform_gate_tests {
         "runtime/mod.rs",
         // The put-away run's tests on the roads only Windows has, gated to Windows (2026-11-20,
         // 0.4.10 plan row 87, part 87c, R11): Folio's quit from outside and the system's question
-        // at the end of the session are Windows messages; every other put-away test runs on every
-        // host, the platform a value (part 87a's gate on the whole module went with 87c).
+        // at the end of the session are Windows messages, which 87e's T10f sends while a command
+        // runs, and 87e's T10h quits from the run's icon in the notification area; every other
+        // put-away test runs on every host, the platform a value (part 87a's gate on the whole
+        // module went with 87c).
         "runtime/windows.rs",
         // One test gated off macOS (2026-11-18, 0.4.10 plan row 103): the summoned terminal's
         // question held over the run's end, which a Mac run never reaches because its

@@ -83,9 +83,9 @@ mod tests {
     use std::rc::Rc;
 
     /// An activity that says when it ends.
-    struct Told(Rc<RefCell<Vec<&'static str>>>);
+    struct EndSaid(Rc<RefCell<Vec<&'static str>>>);
 
-    impl Drop for Told {
+    impl Drop for EndSaid {
         fn drop(&mut self) {
             self.0.borrow_mut().push("ended");
         }
@@ -116,7 +116,7 @@ mod tests {
         let told = Rc::new(RefCell::new(Vec::new()));
         let begin = |told: &Rc<RefCell<Vec<&'static str>>>| {
             told.borrow_mut().push("begun");
-            Ok(Told(Rc::clone(told)))
+            Ok(EndSaid(Rc::clone(told)))
         };
         let mut stand = ActivityStand::default();
         stand.answer_the_turn(true, || begin(&told), |_| panic!("nothing refused"));
