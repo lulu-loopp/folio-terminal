@@ -54,6 +54,15 @@ impl PutAwayRun {
             .expect("the press is answered");
     }
 
+    /// **One turn of the loop, as `about_to_wait` takes it** (review P2-1): the application's
+    /// settles and every window's clocks, with no window event — the only door a put-away run's
+    /// sole window gets, since a hidden window is sent none.
+    fn turn_with_no_window_event(&mut self) {
+        self.application
+            .folio
+            .about_to_wait_inner(&self.application.event_loop);
+    }
+
     /// One event the loop delivers to a window, hidden or not, so the event's door runs.
     fn an_event(&mut self) -> Vec<WindowEffect> {
         self.application.window_event(WindowEvent::Focused(false));
@@ -353,7 +362,7 @@ fn a_hand_edit_to_off_brings_a_put_away_window_back_on_the_turn_alone() {
         "the answer itself brings nothing back: the turn's door spends the ask"
     );
     let _ = run.application.event_loop.ledger.take();
-    run.application.turn();
+    run.turn_with_no_window_event();
     let effects = run.application.event_loop.ledger.take();
     assert!(
         effects.contains(&WindowEffect::Visible(true)),
