@@ -662,8 +662,8 @@ pub struct Quit {
     /// document handed over once more, before the phase's first turn hears anything.
     documents_begun: bool,
     /// **The one budget itself** (T-QUIT-FLUSH-BUDGET-PER-QUIT):
-    /// [`crate::persist::SESSION_SAVE_BUDGET`] from [`Self::begin_for`] for every quit the
-    /// product begins. The documents phase ends at half of it, the recovery phase at five
+    /// [`crate::persist::SESSION_SAVE_BUDGET`] from [`Self::begin_asking`], where every quit the
+    /// product begins starts. The documents phase ends at half of it, the recovery phase at five
     /// sixths, and the session write's wait at all of it, each from `documents_from`
     /// ([`Self::documents_by`], [`Self::recovery_by`], [`Self::session_write_until`]).
     /// Only a test changes it ([`Self::set_budget`]).

@@ -181,7 +181,6 @@ crate::quit::Quit::recovery	QUIT_RECOVERY_BY	unresolved	crate::quit	quit.rs
 crate::quit::Quit::recovery_by	QUIT_RECOVERY_BY	unresolved	crate::quit	quit.rs
 crate::quit::QuitStep::Documents	QUIT_DOCUMENTS_BY	unresolved	crate::quit	quit.rs
 crate::quit::QuitStep::Recovery	QUIT_RECOVERY_BY	unresolved	crate::quit	quit.rs
-crate::restore::QuitContent::message_lines	crate::i18n::quit_unsaved_message	unresolved	crate::restore	restore.rs
 crate::restore::layout	crate::settings::layout_for_menu	unresolved	crate::restore	restore.rs
 crate::restore::unsaved_lines	crate::quit::Quit::begin	unresolved	crate::restore	restore.rs
 crate::runtime::attention::Runtime::raise_notification_refusal	NotificationDesk	unresolved	crate::runtime::attention	runtime/attention.rs
