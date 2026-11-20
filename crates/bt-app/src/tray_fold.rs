@@ -41,11 +41,14 @@ pub(crate) struct TabSight {
 }
 
 /// **Whether work is running in `tab`, as the icon reads it** — the one reading the fold and the
-/// tip's count take, written once so that the reading can change in one place (0.4.10 plan row
-/// 87, part 87e's R10 builds a per-pane reader of an agent's turns and switches this line to it).
-/// Today the strip's: any pane breathing (`TabState::fleet_working`).
+/// tip's count take, written once so that the reading changes in one place. Since 87e's R10
+/// (0.4.10 plan row 87, the coordinator's ruling of 2026-11-19) it is the quit's own reader of
+/// running work, pane by pane ([`crate::running_work`], through `TabState::tab_running_work`): an
+/// agent working while its turn runs, any other pane while its live shell runs a command, full
+/// screen included. Not the strip's breath (`TabState::fleet_working`): that reads an agent
+/// waiting at its prompt as a command running, and a profile's agent mid-turn as nothing.
 pub(crate) fn tray_reads_working(tab: &TabState) -> bool {
-    tab.fleet_working()
+    tab.tab_running_work().any()
 }
 
 /// **What the icon shows**, the first that holds.
@@ -350,6 +353,83 @@ mod tests {
             body.matches("self.tell_the_tray();").count(),
             1,
             "and once a turn:\n{body}"
+        );
+    }
+
+    /// RED (87e's R10) — **the icon reads running work pane by pane, as the quit does**: an agent
+    /// typed into an integrated shell and waiting at its prompt shows plain, though its command's
+    /// `C` keeps the tab breathing; an agent a profile started, mid-turn, shows working, though no
+    /// `C` ever came. The claim is held at `Silent`: this test's subject is the working reading.
+    ///
+    /// PLANT 87e-P44: read the tab by its breath again (`tab.fleet_working()` in
+    /// `tray_reads_working`) — the waiting agent shows working.
+    #[test]
+    fn the_icon_reads_running_work_pane_by_pane() {
+        use super::tray_reads_working;
+        use crate::agent_resume::{AgentAccount, Child, VENDORS};
+        use crate::agent_turns::TurnAccount;
+        use crate::attention_map::{CLAUDE_CODE, TurnStep};
+        let shaped = |shape: &dyn Fn(&mut crate::ShellSession)| {
+            let mut tab = crate::test_support::ringing_tab(1, 1);
+            let seat = tab.seats.terminals()[0];
+            let shell = &mut tab
+                .sessions
+                .get_mut(&seat)
+                .expect("the fixture's seat holds a shell")
+                .session;
+            crate::test_support::land_a_live_shell(shell);
+            shape(shell);
+            tab
+        };
+        let sight = |tab: &crate::TabState| {
+            tray_state_of(&[tab_sight_of(StatusClaim::Silent, tray_reads_working(tab))])
+        };
+
+        let typed_and_waiting = shaped(&|shell| {
+            shell
+                .session
+                .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07claude\r\n\x1b]133;C\x07")
+                .expect("the bytes parse");
+            for (seq, step) in [(1, TurnStep::Began), (2, TurnStep::Ended)] {
+                shell.turn_account.hear_turn_step(
+                    step,
+                    CLAUDE_CODE,
+                    Child::Shell(shell.session.command_marks()),
+                    seq,
+                );
+            }
+        });
+        assert!(
+            typed_and_waiting.fleet_working(),
+            "the fixture's own precondition: the waiting agent's tab breathes"
+        );
+        assert_eq!(
+            sight(&typed_and_waiting),
+            TrayState::Plain,
+            "an agent waiting at its prompt is not work running"
+        );
+
+        let profile_mid_turn = shaped(&|shell| {
+            let claude = VENDORS
+                .iter()
+                .find(|vendor| vendor.family == CLAUDE_CODE)
+                .expect("Claude Code is a vendor");
+            shell.turn_account = TurnAccount::born_beside(&AgentAccount::default());
+            shell.turn_account.hear_turn_step(
+                TurnStep::Began,
+                CLAUDE_CODE,
+                Child::Agent(claude),
+                1,
+            );
+        });
+        assert!(
+            !profile_mid_turn.fleet_working(),
+            "the fixture's own precondition: no C, so the tab does not breathe"
+        );
+        assert_eq!(
+            sight(&profile_mid_turn),
+            TrayState::Working,
+            "a profile's agent mid-turn is work running"
         );
     }
 

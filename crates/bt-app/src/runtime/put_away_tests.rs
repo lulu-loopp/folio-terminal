@@ -1331,9 +1331,10 @@ fn the_system_end_the_restart_managers_close_and_the_outside_quit_never_ask() {
     }
 }
 
-/// RED (T10h; R7) — **a put-away run's quit brings the window back before it asks**: a question
-/// needs a window on the glass, so the one door back is taken first, and the card stands on it.
-/// A quit that asks nothing leaves without showing it.
+/// RED (T10h; R7; the review's P2-5) — **a put-away run's quit brings the window back before it
+/// asks**: a question needs a window on the glass, so the one door back is taken first, and the
+/// card stands on it. A quit that asks nothing leaves without showing it. Each quit is the icon's
+/// Quit, as its menu's post delivers it to the loop's turn (`FolioApp::settle_tray`).
 ///
 /// PLANT 87e-P37: drop the bring-back from `FolioApp::begin_quit_if_asked` — the card stands on a
 /// window nobody can see.
@@ -1343,7 +1344,14 @@ fn a_put_away_runs_tray_quit_brings_the_window_back_before_it_asks() {
     let _ = run.close();
     assert!(run.window().put_away, "the fixture's window is put away");
     run.a_command_runs();
-    run.app().ask_to_quit();
+    run.turn_the_tray().expect("the icon is put up");
+    let _ = run.application.event_loop.ledger.take();
+    run.poke(TrayGesture::Quit);
+    run.turn_the_tray().expect("the icon's turn");
+    assert!(
+        run.app().quit_requested,
+        "the icon's Quit asks for the quit"
+    );
     run.application
         .folio
         .begin_quit_if_asked()
@@ -1361,7 +1369,14 @@ fn a_put_away_runs_tray_quit_brings_the_window_back_before_it_asks() {
 
     let mut idle = PutAwayRun::open("87e-not-brought", true);
     let _ = idle.close();
-    idle.app().ask_to_quit();
+    idle.turn_the_tray().expect("the icon is put up");
+    let _ = idle.application.event_loop.ledger.take();
+    idle.poke(TrayGesture::Quit);
+    idle.turn_the_tray().expect("the icon's turn");
+    assert!(
+        idle.app().quit_requested,
+        "the icon's Quit asks for the quit"
+    );
     idle.application
         .folio
         .begin_quit_if_asked()

@@ -63638,6 +63638,13 @@ mod quit_with_no_window_tests {
             method_body("FolioApp", "settle_tray").contains("app.ask_to_quit();"),
             "the notification-area icon's Quit no longer records it through the one door"
         );
+        // **And it names no reason of its own** (0.4.10 plan row 87, part 87e, the review's
+        // P2-5): the icon's Quit is a person's, `Reason::Asked` as the chord's is, so it asks
+        // about running work.
+        assert!(
+            !method_body("FolioApp", "settle_tray").contains("quit_reason"),
+            "the notification-area icon's Quit writes a quit reason of its own"
+        );
         // And nothing writes the flag behind that door's back. Counted over the
         // package and not over one file, because "somewhere other than
         // `App::ask_to_quit`" includes somewhere else entirely. The needle
