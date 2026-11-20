@@ -21403,8 +21403,7 @@ mod tests {
     /// [`no_settings_sentence_needs_a_third_line`] holds the English to, wrapped
     /// in the column the Appearance page really draws — the Mac sentence is the
     /// longer of the two and the one no walk of the host's own dialog measures
-    /// on a Windows build server. The Chinese of the Mac column is owed
-    /// (`Text::CHINESE_PENDING`) and stands on the English until opus46 writes it.
+    /// on a Windows build server.
     ///
     /// MUTATION: turn `Text::DescDarkScheme` back into a `pick` of the Windows
     /// pair, and the Mac half of this names `%APPDATA%`.

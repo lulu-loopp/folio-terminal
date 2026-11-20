@@ -2920,17 +2920,16 @@ text_entries! {
     RowCopyOnSelect,
     /// Its sentence.
     DescCopyOnSelect,
-    /// **CHINESE PENDING (2026-09-23)** — `Terminal ▸ Ask before pasting several lines`, the
-    /// one row the owner ruled for the multi-line paste card (2026-09-22). English stands in both
-    /// columns until opus46 writes it.
+    /// `Terminal ▸ Ask before pasting several lines`, the one row the owner ruled for the
+    /// multi-line paste card (2026-09-22).
     RowMultilinePaste,
-    /// **CHINESE PENDING (2026-09-23)** — its sentence.
+    /// Its sentence.
     DescMultilinePaste,
 
     // ── the multi-line paste card (0.4.4 ticket 02) ──
     //
     // Three strings and no sentence: the owner ruled the card's words (2026-09-22) and 界面字要少
-    // (2026-09-20) rules out an explanation. **CHINESE PENDING (2026-09-23)** on all three.
+    // (2026-09-20) rules out an explanation.
     /// `N lines → <shell>` — the card's only line. `{lines}` and `{shell}` are filled by
     /// [`paste_card_title`].
     PasteCardTitle,
@@ -3386,7 +3385,7 @@ text_entries! {
     /// The new build is not the offered, signed Folio (`update_job::Stop::Identity`).
     UpdateFailedIdentity,
     /// The release statement does not vouch for the offer (`update_job::Stop::StatementRefused`;
-    /// 0.4.10 plan row 102). The Chinese is a draft (`zh pending`).
+    /// 0.4.10 plan row 102). 担保 is the word PRIVACY gives the statement's vouching.
     UpdateFailedUnvouched,
     /// The new build could not be copied off the image (`update_job::Stop::Copy`).
     UpdateFailedCopy,
@@ -3473,7 +3472,7 @@ text_entries! {
 
     // ── codex's entry by its version, and its rows (0.4.10 plan row 69c) ──
     //
-    // The Chinese column is a draft for the Chinese pass (R11).
+    // The builder's Chinese (R11), reviewed in Chinese pass 5.
     /// `config.toml` cannot be read — not UTF-8, not TOML, or a `notify` that is
     /// not a list of words. Named, because this row has two files.
     CodexConfigUnreadable,
@@ -5170,53 +5169,54 @@ impl Text {
             Self::QuitSave => pick(lang, "Save all", "全部保存"),
             // **The running-work card** (0.4.10 plan row 87, part 87e; the coordinator's items 14
             // and 16 of 2026-11-14, R4 and R6 of 2026-11-19). Whole sentences by shape, so that the
-            // Chinese is written sentence by sentence; the Chinese is owed (`CHINESE_PENDING`), and
-            // stands on the English until written.
-            Self::QuitRunningTitle => pick(lang, "Quit Folio?", "Quit Folio?"),
-            Self::QuitRestartTitle => pick(lang, "Restart Folio?", "Restart Folio?"),
-            Self::QuitRunningQuit => pick(lang, "Quit", "Quit"),
-            Self::QuitRunningRestart => pick(lang, "Restart", "Restart"),
+            // Chinese is written sentence by sentence: in its own order, the consequence first and
+            // what runs as its object, so that no pronoun stands for "it" / "them"; counts in
+            // digits, one included, so that a card naming 1 agent and 3 commands reads alike
+            // (Chinese pass 5). The buttons are the short verbs; Cancel is `GateCancel`'s 取消.
+            Self::QuitRunningTitle => pick(lang, "Quit Folio?", "退出 Folio？"),
+            Self::QuitRestartTitle => pick(lang, "Restart Folio?", "重启 Folio？"),
+            Self::QuitRunningQuit => pick(lang, "Quit", "退出"),
+            Self::QuitRunningRestart => pick(lang, "Restart", "重启"),
             Self::QuitRunningAgent => pick(
                 lang,
                 "An agent is working; quitting ends it.",
-                "An agent is working; quitting ends it.",
+                "退出会结束正在工作的 1 个 agent。",
             ),
             Self::QuitRunningAgents => pick(
                 lang,
                 "{agents} agents are working; quitting ends them.",
-                "{agents} agents are working; quitting ends them.",
+                "退出会结束正在工作的 {agents} 个 agent。",
             ),
             Self::QuitRunningCommand => pick(
                 lang,
                 "A command is running; quitting ends it.",
-                "A command is running; quitting ends it.",
+                "退出会结束正在运行的 1 条命令。",
             ),
             Self::QuitRunningCommands => pick(
                 lang,
                 "{commands} commands are running; quitting ends them.",
-                "{commands} commands are running; quitting ends them.",
+                "退出会结束正在运行的 {commands} 条命令。",
             ),
             Self::QuitRunningAgentCommand => pick(
                 lang,
                 "An agent is working and a command is running; quitting ends them.",
-                "An agent is working and a command is running; quitting ends them.",
+                "退出会结束正在工作的 1 个 agent 和正在运行的 1 条命令。",
             ),
             Self::QuitRunningAgentCommands => pick(
                 lang,
                 "An agent is working and {commands} commands are running; quitting ends them.",
-                "An agent is working and {commands} commands are running; quitting ends them.",
+                "退出会结束正在工作的 1 个 agent 和正在运行的 {commands} 条命令。",
             ),
             Self::QuitRunningAgentsCommand => pick(
                 lang,
                 "{agents} agents are working and a command is running; quitting ends them.",
-                "{agents} agents are working and a command is running; quitting ends them.",
+                "退出会结束正在工作的 {agents} 个 agent 和正在运行的 1 条命令。",
             ),
             Self::QuitRunningAgentsCommands => pick(
                 lang,
                 "{agents} agents are working and {commands} commands are running; quitting ends \
                  them.",
-                "{agents} agents are working and {commands} commands are running; quitting ends \
-                 them.",
+                "退出会结束正在工作的 {agents} 个 agent 和正在运行的 {commands} 条命令。",
             ),
             Self::QuitSessionNotWritten => pick(
                 lang,
@@ -6361,36 +6361,30 @@ impl Text {
                 "在上次使用的窗口中新建标签页",
             ),
             // The coordinator's wording (2026-11-19, R2 of T-TRAY-87D): the label as the owner's row
-            // was ruled; the Chinese is owed (`CHINESE_PENDING`) and stands on the English.
-            // zh: pending T-TRAY-87D
-            Self::RowCloseKeepsRunning => {
-                pick(lang, "Keep running when closed", "Keep running when closed")
-            }
+            // was ruled; the Chinese written in Chinese pass 5.
+            Self::RowCloseKeepsRunning => pick(lang, "Keep running when closed", "关闭后继续运行"),
             // **One sentence on each platform** (R2 of T-TRAY-87D): what the switch keeps, said
             // as the place the run goes. The Windows column names the notification area, where
             // the icon is; the Mac's has no such place (the Dock icon stays where it is), so it
             // names what keeps running instead. The macOS column is shown since part 87c
             // (2026-11-20, `Capability::KeepRunningWhenClosed`).
-            // zh: pending T-TRAY-87D
             Self::DescCloseKeepsRunning => pick_platform(
                 lang,
                 platform,
                 "Closing the last window leaves Folio running in the notification area.",
-                "Closing the last window leaves Folio running in the notification area.",
+                "关闭最后一个窗口后，Folio 在通知区域继续运行。",
                 "Closing the last window leaves shells and agents running.",
-                "Closing the last window leaves shells and agents running.",
+                "关闭最后一个窗口后，shell 和 agent 继续运行。",
             ),
             // R12's two sentences, split as a Windows notification is: a title under the
-            // identity's own header, then the body. Windows only (`WINDOWS_ONLY_SURFACES`).
-            // zh: pending T-TRAY-87D
-            Self::ToastStillRunningTitle => {
-                pick(lang, "Folio is still running", "Folio is still running")
-            }
-            // zh: pending T-TRAY-87D
+            // identity's own header, then the body. Windows only (`WINDOWS_ONLY_SURFACES`). The
+            // body names the icon and not a click on it, as the English does: a click, Enter and
+            // the menu's Show Folio all bring the window back.
+            Self::ToastStillRunningTitle => pick(lang, "Folio is still running", "Folio 仍在运行"),
             Self::ToastStillRunningBody => pick(
                 lang,
                 "Its icon in the notification area brings the window back.",
-                "Its icon in the notification area brings the window back.",
+                "通过通知区域中的 Folio 图标可重新显示窗口。",
             ),
             // Names what the key does and not what the window is called: a
             // reader scanning the shortcut list is looking for the verb.
@@ -6660,10 +6654,11 @@ impl Text {
                 "Windows may warn about this update.",
                 "Windows 可能会对此更新发出警告。",
             ),
-            // English in both columns until the Chinese pass writes them (`CHINESE_PENDING`).
-            Self::TrayMenuShow => pick(lang, "Show Folio", "Show Folio"),
-            Self::TrayMenuNewWindow => pick(lang, "New window", "New window"),
-            Self::TrayMenuQuit => pick(lang, "Quit Folio", "Quit Folio"),
+            // The notification-area icon's menu (0.4.10 plan row 87, part 87b): the words the
+            // shortcut list's `New window` and the Mac menu's `Quit Folio` already have.
+            Self::TrayMenuShow => pick(lang, "Show Folio", "显示 Folio"),
+            Self::TrayMenuNewWindow => pick(lang, "New window", "新建窗口"),
+            Self::TrayMenuQuit => pick(lang, "Quit Folio", "退出 Folio"),
             Self::UpdateCardProgress => pick(
                 lang,
                 "{received} / {total} MB",
@@ -6915,7 +6910,7 @@ impl Text {
             Self::AgentHooksPlaced => pick(
                 lang,
                 "An entry of Folio’s under {events} is one Folio did not put there. Folio does not change it.",
-                "{events} 下有一项 Folio 的条目不是 Folio 放的。Folio 不改动这一项。",
+                "{events} 下有一项 Folio 的条目并非由 Folio 放在此处。Folio 不改动这一项。",
             ),
             Self::AgentHooksRepairHeld => pick(
                 lang,
@@ -6930,7 +6925,7 @@ impl Text {
             Self::AgentHooksBeingRepaired => pick(
                 lang,
                 "Folio is updating this file. Try again.",
-                "Folio 正在更新此文件，请重试。",
+                "Folio 正在更新此文件，请稍后再试。",
             ),
             Self::UpdateCardRestartMissed => {
                 pick(lang, "The restart did not happen.", "未能重启。")
@@ -6958,12 +6953,12 @@ impl Text {
             Self::CodexConfigUnreadable => pick(
                 lang,
                 "Codex's config.toml is in a form Folio cannot read. Folio does not change the file.",
-                "Codex 的 config.toml 格式 Folio 无法读取。Folio 不改动此文件。",
+                "Codex 的 config.toml 格式无法识别。Folio 不改动此文件。",
             ),
             Self::CodexHookAddedToast => pick(
                 lang,
                 "Hook added. Codex asks once to trust it, the next time it starts.",
-                "已添加 hook。Codex 下次启动时会请你确认一次是否信任它。",
+                "已添加 hook。Codex 下次启动时会请你确认一次是否信任。",
             ),
             Self::CodexHookRemovedConfigLeft => pick(
                 lang,
@@ -7203,77 +7198,7 @@ impl Text {
     /// The entries whose Chinese is owed, by column: the English stands in both until the
     /// Chinese pass writes it.
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &{
-        use HostPlatform::{MacOs, OtherUnix, Windows};
-        use Text::{
-            DescCloseKeepsRunning, QuitRestartTitle, QuitRunningAgent, QuitRunningAgentCommand,
-            QuitRunningAgentCommands, QuitRunningAgents, QuitRunningAgentsCommand,
-            QuitRunningAgentsCommands, QuitRunningCommand, QuitRunningCommands, QuitRunningQuit,
-            QuitRunningRestart, QuitRunningTitle, RowCloseKeepsRunning, ToastStillRunningBody,
-            ToastStillRunningTitle, TrayMenuNewWindow, TrayMenuQuit, TrayMenuShow,
-        };
-        [
-            // — the running-work card (0.4.10 plan row 87, part 87e, T-TRAY-87E-QUIT-ASKS)
-            (QuitRunningTitle, Windows),
-            (QuitRunningTitle, MacOs),
-            (QuitRunningTitle, OtherUnix),
-            (QuitRestartTitle, Windows),
-            (QuitRestartTitle, MacOs),
-            (QuitRestartTitle, OtherUnix),
-            (QuitRunningQuit, Windows),
-            (QuitRunningQuit, MacOs),
-            (QuitRunningQuit, OtherUnix),
-            (QuitRunningRestart, Windows),
-            (QuitRunningRestart, MacOs),
-            (QuitRunningRestart, OtherUnix),
-            (QuitRunningAgent, Windows),
-            (QuitRunningAgent, MacOs),
-            (QuitRunningAgent, OtherUnix),
-            (QuitRunningAgents, Windows),
-            (QuitRunningAgents, MacOs),
-            (QuitRunningAgents, OtherUnix),
-            (QuitRunningCommand, Windows),
-            (QuitRunningCommand, MacOs),
-            (QuitRunningCommand, OtherUnix),
-            (QuitRunningCommands, Windows),
-            (QuitRunningCommands, MacOs),
-            (QuitRunningCommands, OtherUnix),
-            (QuitRunningAgentCommand, Windows),
-            (QuitRunningAgentCommand, MacOs),
-            (QuitRunningAgentCommand, OtherUnix),
-            (QuitRunningAgentCommands, Windows),
-            (QuitRunningAgentCommands, MacOs),
-            (QuitRunningAgentCommands, OtherUnix),
-            (QuitRunningAgentsCommand, Windows),
-            (QuitRunningAgentsCommand, MacOs),
-            (QuitRunningAgentsCommand, OtherUnix),
-            (QuitRunningAgentsCommands, Windows),
-            (QuitRunningAgentsCommands, MacOs),
-            (QuitRunningAgentsCommands, OtherUnix),
-            // — the notification-area icon's menu (0.4.10 plan row 87, part 87b): Windows draws
-            //   it; macOS has no notification area, and its column waits with Windows'
-            (TrayMenuShow, Windows),
-            (TrayMenuShow, MacOs),
-            (TrayMenuNewWindow, Windows),
-            (TrayMenuNewWindow, MacOs),
-            (TrayMenuQuit, Windows),
-            (TrayMenuQuit, MacOs),
-            // — the Settings row "Keep running when closed" and the first put-away's
-            //   notification (0.4.10 plan row 87, part 87d, T-TRAY-87D)
-            (RowCloseKeepsRunning, Windows),
-            (RowCloseKeepsRunning, MacOs),
-            (RowCloseKeepsRunning, OtherUnix),
-            (DescCloseKeepsRunning, Windows),
-            (DescCloseKeepsRunning, MacOs),
-            (DescCloseKeepsRunning, OtherUnix),
-            (ToastStillRunningTitle, Windows),
-            (ToastStillRunningTitle, MacOs),
-            (ToastStillRunningTitle, OtherUnix),
-            (ToastStillRunningBody, Windows),
-            (ToastStillRunningBody, MacOs),
-            (ToastStillRunningBody, OtherUnix),
-        ]
-    };
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -7295,13 +7220,15 @@ pub fn could_not_resume_text(title: &str, id: &str) -> String {
 
 /// **The tip of the run's icon in the notification area** (0.4.10 plan row 87, part 87b; item 9):
 /// how many tabs have work running and how many are waiting for the person, a zero count left
-/// out, and the program's name alone when both are zero. The Chinese is a draft (`zh pending`).
+/// out, and the program's name alone when both are zero. The Chinese (Chinese pass 5) takes the
+/// strip's own 运行中 and puts the name before a full-width colon, `Folio：2 个运行中，1 个在等你`,
+/// where the English has a spaced hyphen.
 #[must_use]
 pub fn tray_tooltip(working: usize, waiting: usize) -> String {
     let lang = current();
     let working = (working > 0).then(|| match lang {
         Lang::English => format!("{working} working"),
-        Lang::Chinese => format!("{working} 个在运行"),
+        Lang::Chinese => format!("{working} 个运行中"),
     });
     let waiting = (waiting > 0).then(|| match lang {
         Lang::English => format!("{waiting} waiting for you"),
@@ -7311,17 +7238,16 @@ pub fn tray_tooltip(working: usize, waiting: usize) -> String {
     if counts.is_empty() {
         return "Folio".to_owned();
     }
-    let separator = match lang {
-        Lang::English => ", ",
-        Lang::Chinese => "，",
-    };
-    format!("Folio - {}", counts.join(separator))
+    match lang {
+        Lang::English => format!("Folio - {}", counts.join(", ")),
+        Lang::Chinese => format!("Folio：{}", counts.join("，")),
+    }
 }
 
 /// **The line a resumed pane opens with when its launch did not all come back** (0.4.10 plan row
 /// 74): the vendor's title and the flags it was started with that the resume was not handed, by
 /// name and never with a value — or, with none named, that the launch could not be read. The
-/// Chinese is a draft (`zh pending`).
+/// Chinese was reviewed in Chinese pass 5 and stands as the builder wrote it.
 #[must_use]
 pub fn resumed_without_text(title: &str, flags: &[String]) -> String {
     match (current(), flags.is_empty()) {
@@ -7863,7 +7789,7 @@ pub fn first_run_tip_codex_notify(path: &str) -> String {
 
 /// **The Codex row's sentence on a codex below 0.148** (0.4.10 plan row 69c): it names the version,
 /// and the `notify` line written there in place of a hook. Interned ([`intern`]): one per version
-/// per language. The Chinese is a draft for the Chinese pass.
+/// per language. The builder's Chinese, reviewed in Chinese pass 5.
 pub(crate) fn codex_row_old_version(version: &str) -> &'static str {
     intern(match current() {
         Lang::English => format!(
@@ -7878,7 +7804,7 @@ pub(crate) fn codex_row_old_version(version: &str) -> &'static str {
 /// **`[features] hooks = false` (or `codex_hooks`) in codex's `config.toml`** (row 69's review N6):
 /// codex runs no hook, so Folio writes none, and says it as the row's line — naming the file that
 /// says so, which is under `CODEX_HOME` when that is set (the 69c review's C6). Interned
-/// ([`intern`]): one per path per language. The Chinese is a draft for the Chinese pass.
+/// ([`intern`]): one per path per language. The builder's Chinese, reviewed in Chinese pass 5.
 pub(crate) fn codex_hooks_off(path: &str) -> &'static str {
     intern(codex_hooks_off_in_lang(current(), path))
 }
@@ -7896,14 +7822,14 @@ pub(crate) fn codex_hooks_off_in_lang(lang: Lang, path: &str) -> String {
 
 /// **Somebody else's program on codex's one `notify` key, on a codex below 0.148** (row 69's
 /// report §1b.6, R12): the refusal names the version and their program, and what a newer codex
-/// lets Folio do instead. Interned ([`intern`]). The Chinese is a draft for the Chinese pass.
+/// lets Folio do instead. Interned ([`intern`]). The Chinese reviewed in Chinese pass 5.
 pub(crate) fn codex_notify_held_old_version(version: &str, program: &str) -> &'static str {
     intern(match current() {
         Lang::English => format!(
             "Codex {version} runs {program} when a turn ends, and its notify line takes one program. Codex 0.148 or later lets Folio add a hook of its own instead."
         ),
         Lang::Chinese => format!(
-            "Codex {version} 在回合结束时运行 {program}，而它的 notify 只能设一个程序。Codex 0.148 或更高版本允许 Folio 另加自己的 hook。"
+            "Codex {version} 在回合结束时运行 {program}，而 notify 只能设一个程序。Codex 0.148 或更高版本允许 Folio 另加自己的 hook。"
         ),
     })
 }
