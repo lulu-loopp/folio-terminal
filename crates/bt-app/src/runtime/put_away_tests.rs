@@ -1494,6 +1494,20 @@ fn the_icons_quit_asks_its_question_on_the_glass() {
 fn the_icons_quit_leaves_and_takes_the_icon_down() {
     let mut run = PutAwayRun::open("icon-quit", true);
     let _ = run.close();
+    // **The first put-away's receipt heard first** (0.4.10 plan row 87, part 87d, at the stack on
+    // 87b): that close wrote `first_hide_toast` to `settings.json`, and the turns below run on a
+    // clock of their own, a turn apart, inside which no answer of the storage worker can arrive —
+    // the quit's documents phase would wait past its bound and cancel the quit. The product's
+    // loop hears the answer on the worker's wake (`AppEvent::DocumentsAnswered`), long before a
+    // person reaches the icon's Quit.
+    crate::lane::wait_until("the first put-away's receipt, written and heard", || {
+        run.application
+            .folio
+            .take_document_answers()
+            .expect("the answers are heard");
+        crate::document_request::QuitDocument::standing(&run.app().settings_store)
+            == crate::quit::Standing::Settled
+    });
     run.application
         .event_loop
         .tray
