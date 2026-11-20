@@ -81,6 +81,13 @@ pub(crate) enum WindowEffect {
     Backdrop(bool),
     /// The window told to stay above other windows, or not (`WindowHost::set_topmost`).
     Topmost(bool),
+    /// The window named in the system's lists of the application's windows, or taken off them
+    /// (`WindowHost::set_listed`, 0.4.10 plan row 87, part 87c).
+    WindowListed(bool),
+    /// The put-away run's activity begun (`Backend::begin_activity`, part 87c): App Nap held off.
+    ActivityHeld,
+    /// And ended: the activity's token dropped.
+    ActivityLetGo,
     /// The frame's dark plate, or its light one (`WindowHost::set_dark_mode`).
     DarkMode(bool),
     /// The window stood at an outer rectangle (`WindowHost::stand_at`).
@@ -304,6 +311,7 @@ impl Backend for Headless {
     type Loop = HeadlessLoop;
     type Toasts = HeadlessToasts;
     type Tray = HeadlessTray;
+    type Activity = HeadlessActivity;
 
     fn rebuild_every_surface(
         _gpu: &mut HeadlessDevice,
@@ -372,6 +380,28 @@ impl Backend for Headless {
             watched: Rc::clone(&event_loop.tray.watched),
             watched_at_the_removal: Rc::clone(&event_loop.tray.watched_at_the_removal),
         })
+    }
+
+    fn begin_activity(
+        event_loop: &HeadlessLoop,
+        _reason: &str,
+    ) -> Result<HeadlessActivity, String> {
+        event_loop.ledger.record(WindowEffect::ActivityHeld);
+        Ok(HeadlessActivity {
+            ledger: event_loop.ledger.clone(),
+        })
+    }
+}
+
+/// **A headless run's activity** (0.4.10 plan row 87, part 87c): its beginning and its end,
+/// recorded on the loop's ledger, and nothing held.
+pub(crate) struct HeadlessActivity {
+    ledger: Ledger,
+}
+
+impl Drop for HeadlessActivity {
+    fn drop(&mut self) {
+        self.ledger.record(WindowEffect::ActivityLetGo);
     }
 }
 
@@ -596,6 +626,10 @@ impl WindowHost for HeadlessWindow {
     }
     fn set_topmost(&self, topmost: bool) -> Result<(), String> {
         self.ledger.record(WindowEffect::Topmost(topmost));
+        Ok(())
+    }
+    fn set_listed(&self, listed: bool) -> Result<(), String> {
+        self.ledger.record(WindowEffect::WindowListed(listed));
         Ok(())
     }
     fn set_dark_mode(&self, dark: bool) -> Result<(), String> {

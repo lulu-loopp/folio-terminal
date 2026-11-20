@@ -174,6 +174,7 @@ mod psreadline;
 #[cfg(test)]
 mod psreadline_artefact;
 mod pty_door;
+mod put_away_activity;
 mod quake;
 mod quit;
 mod recent_folders;
@@ -9832,6 +9833,11 @@ struct App<B: Backend = Native> {
     /// `FolioApp::tell_the_tray` once a turn, and taken out of the area by [`App::finish`],
     /// after the run's last write, on every road to the end. See [`tray_fold`].
     tray: tray_fold::TrayStand<B::Tray>,
+    /// **The activity a put-away run holds while it works** (0.4.10 plan row 87, part 87c), so
+    /// macOS does not nap its drains: begun and let go by
+    /// `FolioApp::settle_the_put_away_activity` once a turn, let go for good by [`App::finish`].
+    /// See [`put_away_activity`].
+    put_away_activity: put_away_activity::ActivityStand<B::Activity>,
 }
 
 /// **What an [`App`] is built from**: every field its builder computes — the device, the workers it
@@ -10069,6 +10075,7 @@ impl<B: Backend> App<B> {
             pane_retirement_deadline: PANE_RETIREMENT_DEADLINE,
             carry_ask: carry_pass::begin_carry_pass,
             tray: tray_fold::TrayStand::default(),
+            put_away_activity: put_away_activity::ActivityStand::default(),
         }
     }
 }
@@ -10134,15 +10141,26 @@ static SUMMON_PROXY: std::sync::OnceLock<EventLoopProxy<AppEvent>> = std::sync::
 /// process that kept its `session.lock` and then exited anyway, or one AppKit
 /// was told to keep and that took itself away.
 ///
-/// Asked of `bt_platform::host_platform()`, which is a **value**: §4.3's whole
-/// design is that the application reads values and the platform crate reads the
-/// machine, and `only_the_named_files_decide_what_platform_this_is` is what
-/// keeps a `cfg!` out of this page. It also means the Mac's answer is a claim a
-/// Windows runner can check, which is what the case below does.
-const fn a_run_ends_with_its_last_visible_window(visible_windows: usize, keeping: bool) -> bool {
+/// **`keeping` counts only where a put-away run has a way back** (0.4.10 plan row 87, part 87c;
+/// the coordinator's R2 of 2026-11-20, `HostPlatform::a_put_away_run_has_a_way_back`): on
+/// Windows the icon, on macOS the Dock. A platform with neither ends the run at its last close
+/// whatever the switch says, as before 87a — a kept close there would be a process with no window
+/// and no road to it.
+///
+/// Asked of `platform`, a **value** (R1 of the same date): §4.3's whole design is that the
+/// application reads values and the platform crate reads the machine, and
+/// `only_the_named_files_decide_what_platform_this_is` is what keeps a `cfg!` out of this page.
+/// The product hands it `FolioApp::platform`, which is `bt_platform::host_platform()`; a test
+/// names the platform it pins, so the Mac's answer is a claim a Windows runner checks and every
+/// arm of the close runs on every host.
+const fn a_run_ends_with_its_last_visible_window(
+    platform: bt_platform::HostPlatform,
+    visible_windows: usize,
+    keeping: bool,
+) -> bool {
     visible_windows == 0
-        && !keeping
-        && !bt_platform::host_platform().an_application_outlives_its_last_window()
+        && !(keeping && platform.a_put_away_run_has_a_way_back())
+        && !platform.an_application_outlives_its_last_window()
 }
 
 /// **The close that would have ended the run puts its window away instead** (0.4.10 plan row 87,
@@ -10151,15 +10169,17 @@ const fn a_run_ends_with_its_last_visible_window(visible_windows: usize, keeping
 /// The other half of [`a_run_ends_with_its_last_visible_window`], from the same three facts, so
 /// that the two can never both answer yes: with no ordinary window left after this one and the
 /// close keeping the run, the window is hidden — itself, not a stand-in (R3) — and everything in it
-/// keeps running. A platform whose application outlives its last window (macOS) answers no here
-/// as well: its last close is part 87c's, and this part changes nothing there.
+/// keeps running. **The same on macOS** (part 87c): there the run never ended at a close — the
+/// application outlives its last window — and with the switch on its last window is put away
+/// instead of being filed into Recent with its shells ended, and the Dock click brings it back. A
+/// platform with no way back to a put-away run answers no
+/// (`HostPlatform::a_put_away_run_has_a_way_back`).
 const fn the_last_visible_windows_close_puts_the_run_away(
+    platform: bt_platform::HostPlatform,
     visible_windows: usize,
     keeping: bool,
 ) -> bool {
-    visible_windows == 0
-        && keeping
-        && !bt_platform::host_platform().an_application_outlives_its_last_window()
+    visible_windows == 0 && keeping && platform.a_put_away_run_has_a_way_back()
 }
 
 /// **What a close of one window does, read before the window is told anything** (0.4.10 plan row
@@ -38157,6 +38177,9 @@ impl<B: Backend> App<B> {
         // the exit was asked, and a window its last shell's exit closed stays in the registry
         // until its pages let go; neither puts the icon up again.
         self.tray.take_down_for_good();
+        // **And the put-away run's activity ends with it** (part 87c), for good, for the icon's
+        // reason: the loop's last turns run after this, and none of them begins it again.
+        self.put_away_activity.let_go_for_good();
     }
 
     /// **Ask for the quit transaction**, from whichever of the four doors the
@@ -39203,7 +39226,7 @@ mod launch_landing_tests {
     /// which is the one case nobody would notice until they used it.
     #[test]
     fn a_service_opens_the_folder_and_a_document_opens_itself() {
-        let settle = method_body("FolioApp", "settle_app_delegate_events");
+        let settle = method_body("FolioApp", "answer_one_delegate_event");
         assert!(
             settle.contains("AppDelegateOrigin::Services")
                 && settle.contains("self.open_one_place_for_a_service(event_loop, &path)?")
@@ -47078,6 +47101,13 @@ struct FolioApp<B: Backend = Native> {
     /// (T-WINDOW-THREAD-UNDER-LOAD), set beside it by [`Self::park_until`] on every road that
     /// sets one; `None` with `Wait`.
     wake_owner: Option<WakeOwner>,
+    /// **The platform the close's rules are asked of** (0.4.10 plan row 87, part 87c; the
+    /// coordinator's R1 of 2026-11-20): `bt_platform::host_platform()` in the product, set once in
+    /// [`Self::new`]; a headless test names the platform it pins, so a Mac's last close runs on a
+    /// Windows runner and a Windows one on a Mac. Read by [`a_run_ends_with_its_last_visible_window`],
+    /// [`the_last_visible_windows_close_puts_the_run_away`] and the put-away's first-hide toast
+    /// (`Runtime::put_the_window_away`), and nowhere else.
+    platform: bt_platform::HostPlatform,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47157,6 +47187,7 @@ impl<B: Backend> FolioApp<B> {
             termination: None,
             main_menu_inputs: None,
             wake_owner: None,
+            platform: bt_platform::host_platform(),
         }
     }
 
@@ -48184,7 +48215,11 @@ impl<B: Backend> FolioApp<B> {
             CloseFate::Shut | CloseFate::ShutWhileAway => {}
         }
         let keeping = self.the_close_keeps_the_run(id);
-        let ending = a_run_ends_with_its_last_visible_window(self.windows_left_after(id), keeping);
+        let ending = a_run_ends_with_its_last_visible_window(
+            self.platform,
+            self.windows_left_after(id),
+            keeping,
+        );
         // **And a close that ends the run asks the summoned terminal first**
         // (T-SUMMON-DIRTY-PREVIEW): it goes with this window, so this close is
         // its shut too, and an unsaved buffer in it is asked about in it before
@@ -48292,6 +48327,7 @@ impl<B: Backend> FolioApp<B> {
         }
         let keeping = self.the_close_keeps_the_run(id);
         if the_last_visible_windows_close_puts_the_run_away(
+            self.platform,
             self.windows_on_the_glass_after(id),
             keeping,
         ) {
@@ -48370,10 +48406,11 @@ impl<B: Backend> FolioApp<B> {
     /// spare retired, no `App::finish`, no last-window line — which is the whole of the
     /// difference from [`Self::close`].
     fn put_the_run_away(&mut self, id: WindowId) -> Result<()> {
+        let platform = self.platform;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
         };
-        runtime.put_the_window_away()
+        runtime.put_the_window_away(platform)
     }
 
     /// **The one door back for a put-away run** (0.4.10 plan row 87, part 87a; R10, R13): every
@@ -48572,6 +48609,39 @@ impl<B: Backend> FolioApp<B> {
         let labels = tray_fold::tray_labels();
         if let Some(app) = self.app.as_mut() {
             app.tray.tell_the_icon(picture, labels);
+        }
+    }
+
+    /// **The put-away run's activity, held while it works** (0.4.10 plan row 87, part 87c; R14 of
+    /// 2026-11-12, item 19 of 2026-11-14, R6-R8 of 2026-11-20): once a turn, after every window
+    /// has taken its turn, compared with what the last turn held
+    /// ([`put_away_activity::ActivityStand::answer_the_turn`]). Wanted while a window is put away
+    /// ([`Self::a_window_is_put_away`]) and the one reader of running work says something runs
+    /// ([`Self::every_windows_running_work`]); begun through the backend's door, so that on macOS
+    /// App Nap leaves the drains alone, and let go on the turn the window comes back or the work
+    /// ends. A window that could not be read is read as nothing running, and said.
+    fn settle_the_put_away_activity(&mut self, event_loop: &B::Loop) {
+        let put_away = self.a_window_is_put_away();
+        let work = if put_away {
+            self.every_windows_running_work().unwrap_or_else(|error| {
+                crate::diagnostics::note(&format!("BT_PUT_AWAY the running work: {error:#}"));
+                running_work::RunningWork::NONE
+            })
+        } else {
+            running_work::RunningWork::NONE
+        };
+        let wanted = put_away_activity::the_activity_is_wanted(put_away, work);
+        if let Some(app) = self.app.as_mut() {
+            app.put_away_activity.answer_the_turn(
+                wanted,
+                || {
+                    B::begin_activity(
+                        event_loop,
+                        "Folio is running shells and agents in a window that is put away",
+                    )
+                },
+                crate::diagnostics::note,
+            );
         }
     }
 
@@ -48833,7 +48903,7 @@ impl<B: Backend> FolioApp<B> {
         // An emptied registry keeps nothing: the put-away window is one of the registry's, and
         // with none left there is no run to keep (0.4.10 plan row 87, part 87a).
         web_spare::after_the_last_window(
-            a_run_ends_with_its_last_visible_window(self.windows.len(), false),
+            a_run_ends_with_its_last_visible_window(self.platform, self.windows.len(), false),
             let_go,
             spare_next,
             bound,
@@ -49329,76 +49399,108 @@ impl<B: Backend> FolioApp<B> {
     /// X-4's first rule.
     fn settle_app_delegate_events(&mut self, event_loop: &B::Loop) -> Result<()> {
         for event in app_delegate_wire::take() {
-            if !matches!(
-                event.kind,
-                bt_platform::AppDelegateEventKind::LastWindowClosed
-            ) {
-                bt_platform::file_reads::input();
+            self.answer_one_delegate_event(event_loop, event)?;
+        }
+        Ok(())
+    }
+
+    /// **One event the application delegate parked, answered** (0.4.10 plan row 87, part 87c):
+    /// [`Self::settle_app_delegate_events`]' body for one event, a door of its own so that a test
+    /// hands a reopen, a hand-over or a Dock row to the loop's own answer without the
+    /// process-wide inbox (`app_delegate_wire`), whose drain another test's turn could spend.
+    fn answer_one_delegate_event(
+        &mut self,
+        event_loop: &B::Loop,
+        event: bt_platform::AppDelegateEvent,
+    ) -> Result<()> {
+        if !matches!(
+            event.kind,
+            bt_platform::AppDelegateEventKind::LastWindowClosed
+        ) {
+            bt_platform::file_reads::input();
+        }
+        let origin = event.origin;
+        match event.kind {
+            bt_platform::AppDelegateEventKind::Reopen { .. } => {
+                // **The flag AppKit sent is deliberately not read.** X-4
+                // measured that `hasVisibleWindows` is YES for a minimised
+                // window and YES for one hidden with `-[NSApplication
+                // hide:]`, so it does not answer the question it looks like
+                // it answers. The list that does is this one.
+                //
+                // **A put-away run comes back through the one door** (0.4.10 plan row 87,
+                // part 87c; R10, R13): a Dock click, `open -a Folio` and a second Finder
+                // launch are the Mac's way back, and `a_window_for_the_delegate` asks the
+                // door before it looks for a window.
+                if let Some(id) = self.a_window_for_the_delegate(event_loop)? {
+                    self.raise_for_a_launch(id);
+                }
             }
-            let origin = event.origin;
-            match event.kind {
-                bt_platform::AppDelegateEventKind::Reopen { .. } => {
-                    // **The flag AppKit sent is deliberately not read.** X-4
-                    // measured that `hasVisibleWindows` is YES for a minimised
-                    // window and YES for one hidden with `-[NSApplication
-                    // hide:]`, so it does not answer the question it looks like
-                    // it answers. The list that does is this one.
-                    if let Some(id) = self.a_window_for_the_delegate(event_loop)? {
-                        self.raise_for_a_launch(id);
+            // **One list of paths, two readings of what a file among them
+            // means, and the origin is what separates them** (M4-9,
+            // §13.36). A document handed over by Finder or by `open -a` is
+            // the thing the reader named, so a file opens a preview of
+            // itself; a selection sent through *Services ▸ Open in Folio* is
+            // the verb `folder_for` has answered on the other platform since
+            // the first-page row existed, so a file opens a tab in **its
+            // folder**. A multi-selection is one landing per path, in the
+            // order the reader's own selection was written.
+            bt_platform::AppDelegateEventKind::OpenPaths(paths) => {
+                let a_service = origin == bt_platform::AppDelegateOrigin::Services;
+                for path in paths {
+                    if a_service {
+                        self.open_one_place_for_a_service(event_loop, &path)?;
+                    } else {
+                        self.open_one_path_for_the_delegate(event_loop, path)?;
                     }
                 }
-                // **One list of paths, two readings of what a file among them
-                // means, and the origin is what separates them** (M4-9,
-                // §13.36). A document handed over by Finder or by `open -a` is
-                // the thing the reader named, so a file opens a preview of
-                // itself; a selection sent through *Services ▸ Open in Folio* is
-                // the verb `folder_for` has answered on the other platform since
-                // the first-page row existed, so a file opens a tab in **its
-                // folder**. A multi-selection is one landing per path, in the
-                // order the reader's own selection was written.
-                bt_platform::AppDelegateEventKind::OpenPaths(paths) => {
-                    let a_service = origin == bt_platform::AppDelegateOrigin::Services;
-                    for path in paths {
-                        if a_service {
-                            self.open_one_place_for_a_service(event_loop, &path)?;
-                        } else {
-                            self.open_one_path_for_the_delegate(event_loop, path)?;
-                        }
-                    }
-                }
-                bt_platform::AppDelegateEventKind::TerminationRequested(answer) => {
-                    self.begin_the_systems_quit(answer);
-                }
-                bt_platform::AppDelegateEventKind::LastWindowClosed => {}
-                // **A row of the menu bar** (M3-2, §13.26 ③). It lands here and
-                // not on a channel of its own for the reason
-                // `AppDelegateOrigin::Menu` gives: the press arrived at AppKit
-                // inside a callback with the menu's own tracking underneath it,
-                // which is this channel's whole subject. **A verb reaches
-                // `run_shortcut`, which is the very function the chord reaches**;
-                // the whole of what the menu adds is the id of the row pressed.
-                //
-                // The window is the one the keyboard is on. A choice for a
-                // *window* verb that arrives with none is dropped rather than
-                // held: the only state that reaches it is macOS's own, the
-                // application alive in the Dock with every window closed, and
-                // the bar says so meanwhile by greying those rows
-                // (`menubar::plan`). The door that opens a window again is the
-                // reopen three arms up. **A row that is the application's own
-                // is answered there and then** — Quit, since RB-4 — because
-                // that state is the one it is reached from.
-                //
-                // **A row of the Dock tile's menu lands here too**
-                // (T-MAC-DOCKMENU, §13.50 ③), carrying the same choice and
-                // separated by the origin alone — which is what makes the
-                // paragraph above *not* true of it: that menu is read from
-                // outside Folio, in the very state the bar greys itself for.
-                bt_platform::AppDelegateEventKind::MenuChosen(choice) => {
-                    self.answer_a_menu_row(event_loop, origin, choice)?;
-                }
+            }
+            bt_platform::AppDelegateEventKind::TerminationRequested(answer) => {
+                self.begin_the_systems_quit(answer);
+            }
+            bt_platform::AppDelegateEventKind::LastWindowClosed => {}
+            // **A row of the menu bar** (M3-2, §13.26 ③). It lands here and
+            // not on a channel of its own for the reason
+            // `AppDelegateOrigin::Menu` gives: the press arrived at AppKit
+            // inside a callback with the menu's own tracking underneath it,
+            // which is this channel's whole subject. **A verb reaches
+            // `run_shortcut`, which is the very function the chord reaches**;
+            // the whole of what the menu adds is the id of the row pressed.
+            //
+            // The window is the one the keyboard is on. A choice for a
+            // *window* verb that arrives with none is dropped rather than
+            // held: the only state that reaches it is macOS's own, the
+            // application alive in the Dock with every window closed, and
+            // the bar says so meanwhile by greying those rows
+            // (`menubar::plan`). The door that opens a window again is the
+            // reopen three arms up. **A row that is the application's own
+            // is answered there and then** — Quit, since RB-4 — because
+            // that state is the one it is reached from.
+            //
+            // **A row of the Dock tile's menu lands here too**
+            // (T-MAC-DOCKMENU, §13.50 ③), carrying the same choice and
+            // separated by the origin alone — which is what makes the
+            // paragraph above *not* true of it: that menu is read from
+            // outside Folio, in the very state the bar greys itself for.
+            bt_platform::AppDelegateEventKind::MenuChosen(choice) => {
+                self.answer_a_menu_row(event_loop, origin, choice)?;
             }
         }
         Ok(())
+    }
+
+    /// **Whether a row of the Dock tile's menu opens a window of its own** (0.4.10 plan row 87,
+    /// part 87c, R3): `New window`, whose verb records a window to open and needs the one it is
+    /// run on only as the place the new one is like. Read through the shortcut table, as the
+    /// verb itself is.
+    fn a_dock_row_opens_a_window_of_its_own(&self, choice: bt_platform::menu::MenuChoice) -> bool {
+        let bt_platform::menu::MenuChoice::Verb(row) = choice else {
+            return false;
+        };
+        self.app
+            .as_ref()
+            .and_then(|app| app.shortcuts.row(row))
+            .is_some_and(|row| row.action == shortcuts::Action::NewWindow)
     }
 
     /// **One row of the menu bar, run on the window that has the keyboard**
@@ -49435,6 +49537,13 @@ impl<B: Backend> FolioApp<B> {
     ///   Dock press does not activate this application by itself, and raising
     ///   afterwards would pull the keyboard back off whatever `New window` had
     ///   just opened.
+    ///
+    /// **And a put-away run** (0.4.10 plan row 87, part 87c, R3 of 2026-11-20): every row but
+    /// `New window` needs the window, so the put-away one comes back through the one door first
+    /// (`New tab` then lands in it, R10's "bring it back, then land as asked"). `New window` opens
+    /// a window of its own and leaves the put-away one away, as the icon's New window does (87b,
+    /// item 8: one verb, one thing); the put-away window it is run on is not raised — only the
+    /// door shows a put-away window (R4).
     fn answer_a_menu_row(
         &mut self,
         event_loop: &B::Loop,
@@ -49463,14 +49572,25 @@ impl<B: Backend> FolioApp<B> {
             return Ok(());
         }
         let id = if origin == bt_platform::AppDelegateOrigin::Dock {
-            let Some(id) = self.the_window_the_reader_was_last_in() else {
-                if let Some(opened) = self.a_window_for_the_delegate(event_loop)? {
-                    self.raise_for_a_launch(opened);
+            let its_own_window = self.a_dock_row_opens_a_window_of_its_own(choice);
+            if !its_own_window && let Some(back) = self.bring_the_window_back()? {
+                back
+            } else {
+                let Some(id) = self.the_window_the_reader_was_last_in() else {
+                    if let Some(opened) = self.a_window_for_the_delegate(event_loop)? {
+                        self.raise_for_a_launch(opened);
+                    }
+                    return Ok(());
+                };
+                if !self
+                    .windows
+                    .get_mut(id)
+                    .is_some_and(|window| window.put_away)
+                {
+                    self.raise_for_a_launch(id);
                 }
-                return Ok(());
-            };
-            self.raise_for_a_launch(id);
-            id
+                id
+            }
         } else {
             let Some(id) = self.frontmost_window() else {
                 return Ok(());
@@ -49592,13 +49712,24 @@ impl<B: Backend> FolioApp<B> {
         }
     }
 
-    /// The window a delegate event lands in: the one the reader was last in, or
-    /// a fresh one when this run has none left.
+    /// The window a delegate event lands in: the put-away window brought back, or the one the
+    /// reader was last in, or a fresh one when this run has none left.
+    ///
+    /// **The door first** (0.4.10 plan row 87, part 87c; R10, R13, and R4 of 2026-11-20): the
+    /// window list keeps a put-away window, so "the window the reader was last in" names it, and
+    /// on macOS giving it the keyboard (`bt_platform::hotkey::give_foreground_to`'s
+    /// `makeKeyAndOrderFront:`) would order it in behind the door's back — on the glass with its
+    /// put-away mark standing, its picture never published again and its recordings paused. So
+    /// a Dock click, `open -a`, a file Finder hands over and the Dock menu's no-window arm all ask
+    /// [`Self::bring_the_window_back`] before anything else, and land in the window it brings back.
     ///
     /// `None` only where a window could not be opened at all, which is the same
     /// answer [`Self::open_a_window_for_a_launch`] gives and for the same reason.
     fn a_window_for_the_delegate(&mut self, event_loop: &B::Loop) -> Result<Option<WindowId>> {
-        let id = match self.the_window_the_reader_was_last_in() {
+        let id = match self
+            .bring_the_window_back()?
+            .or_else(|| self.the_window_the_reader_was_last_in())
+        {
             Some(id) => id,
             // A request that names no place: the window opens holding the
             // default profile's one tab and nothing is retired behind it, which
@@ -50219,10 +50350,26 @@ impl<B: Backend> FolioApp<B> {
     /// nothing a person can do about a foreground lock, and the tab they asked
     /// for is there either way — see `bt_platform::hotkey::give_foreground_to`,
     /// whose own note this is.
+    ///
+    /// **Never a put-away window** (0.4.10 plan row 87, part 87c, R4 of 2026-11-20): on macOS
+    /// `give_foreground_to` is `makeKeyAndOrderFront:`, which orders a window in, so a raise of a
+    /// put-away window would show it behind the door's back — on the glass with its put-away mark
+    /// standing, so the publish gate draws nothing on it again and its recordings stay paused. The
+    /// door ([`Self::bring_the_window_back`]) is the one road that shows a put-away window; this
+    /// refuses with one line, so that a road added later that forgets the door is a line in
+    /// `diagnostics.log` and not a frozen window.
     fn raise_for_a_launch(&mut self, id: WindowId) {
         let Some(runtime) = self.runtime(id) else {
             return;
         };
+        if runtime.window.put_away {
+            // Through the window's note door, which is `diagnostics.log` (review P2-10 of 87a).
+            runtime.window.window.note(
+                "BT_PUT_AWAY a raise reached the put-away window and was refused; only the door \
+                 back shows it",
+            );
+            return;
+        }
         if let Err(error) = bring_owned_window_forward(&runtime.window.window) {
             crate::diagnostics::stderr_line(format!("BT_LAUNCH {error}"));
         }
@@ -52592,6 +52739,9 @@ impl<B: Backend> FolioApp<B> {
         // **The run's icon, told what the turns above settled** (0.4.10 plan row 87, part 87b;
         // R2): after every window's turn, so every attention pass has run; a read, booking no wake.
         self.tell_the_tray();
+        // **And the put-away run's activity, from what the same turns settled** (part 87c): an
+        // agent's turn heard this turn is read on this turn.
+        self.settle_the_put_away_activity(event_loop);
         // **And the quit's bound, while it waits for an answer across turns** (0.4.6 U-21): an
         // update's quit looks for its session's receipt with the windows still up. The answer
         // itself wakes the loop (`AppEvent::DocumentsAnswered`); the clock is only the bound.
@@ -52690,6 +52840,7 @@ impl<B: Backend> FolioApp<B> {
             // 87, part 87a): `close_fate` asks of the whole registry, which the borrow below would
             // hold; the request's arrival is noted on the way (row 103).
             let close_fate = self.close_fate_of(window_id, &event);
+            let platform = self.platform;
             let Some(mut runtime): Option<Runtime<'_, B>> =
                 hang_watch::during(hang_watch::Station::EventLookup, || self.runtime(window_id))
             else {
@@ -52780,7 +52931,7 @@ impl<B: Backend> FolioApp<B> {
                 // the put-away says it on its own close line, the ignored close names its road in
                 // the once-a-run note (0.4.10 plan row 103; review P1-2).
                 WindowEvent::CloseRequested if close_fate == CloseFate::PutAway => {
-                    runtime.put_the_window_away()
+                    runtime.put_the_window_away(platform)
                 }
                 WindowEvent::CloseRequested if close_fate == CloseFate::AlreadyAway => {
                     runtime.ignore_the_close_while_away();
@@ -57138,9 +57289,18 @@ mod floated_page_tests {
     /// would be this process tearing down a run AppKit had just been told to
     /// keep — the reader clicks the Dock icon and there is nothing behind it.
     ///
+    /// **With the switch since 2026-11-20** (0.4.10 plan row 87, part 87c): the Mac still never ends
+    /// its run at a close, and with `close_keeps_running` on its last window is put away instead of
+    /// being filed into Recent with its shells ended — the Dock click is the way back. Windows puts
+    /// away with the switch on and ends with it off; a platform with no way back to a put-away run
+    /// (`HostPlatform::a_put_away_run_has_a_way_back`) ends either way, and never keeps a process
+    /// with no window and no road to it. Asked of the platform as a value (R1), so every arm runs
+    /// on every host.
+    ///
     /// MUTATION: drop the platform term from the rule and the macOS half fails;
     /// make `an_application_outlives_its_last_window` answer for Windows too and
-    /// the Windows half does.
+    /// the Windows half does. PLANT 87c-P13: answer `false` for macOS from
+    /// `a_put_away_run_has_a_way_back` — the Mac's last close files its window with the switch on.
     #[test]
     fn only_a_mac_keeps_an_application_standing_with_no_window_left() {
         use bt_platform::HostPlatform;
@@ -57156,53 +57316,83 @@ mod floated_page_tests {
                  any screen is one nobody can reach"
             );
         }
+        // (platform, keeping) -> (the run ends, the window is put away), for the run's last
+        // ordinary window.
+        let table = [
+            (HostPlatform::MacOs, false, (false, false)),
+            (HostPlatform::MacOs, true, (false, true)),
+            (HostPlatform::Windows, false, (true, false)),
+            (HostPlatform::Windows, true, (false, true)),
+            (HostPlatform::OtherUnix, false, (true, false)),
+            (HostPlatform::OtherUnix, true, (true, false)),
+        ];
+        for (platform, keeping, expected) in table {
+            let answered = (
+                a_run_ends_with_its_last_visible_window(platform, 0, keeping),
+                the_last_visible_windows_close_puts_the_run_away(platform, 0, keeping),
+            );
+            assert_eq!(
+                answered, expected,
+                "{platform:?}, the switch {keeping}: (the run ends, the window is put away)"
+            );
+        }
         // And the rule this page keeps is that value and not a second reading of
         // the same question.
         let rule = free_fn_body("a_run_ends_with_its_last_visible_window");
         assert!(
-            rule.contains("an_application_outlives_its_last_window()"),
-            "the rule decides for itself whether a run outlives its windows:\n{rule}"
+            rule.contains("platform.an_application_outlives_its_last_window()")
+                && rule.contains("platform.a_put_away_run_has_a_way_back()")
+                && !rule.contains("host_platform()"),
+            "the rule decides for itself whether a run outlives its windows, or reads the machine \
+             instead of the platform it is handed:\n{rule}"
         );
     }
 
     #[test]
     fn a_run_ends_with_its_last_visible_window_even_with_a_summon_hidden_behind_it() {
-        // **On this platform**, which M3-1 is what made a qualification rather
-        // than a redundancy: a Mac answers the other way and the case below is
-        // the one that says so.
-        let outlives = bt_platform::host_platform().an_application_outlives_its_last_window();
+        // **On Windows**, which M3-1 is what made a qualification rather than a redundancy: a Mac
+        // answers the other way and the case above is the one that says so. Asked of the platform
+        // as a value (0.4.10 plan row 87, part 87c, R1), so this runs the same on every host.
+        let windows = bt_platform::HostPlatform::Windows;
         // The switch off: the 2026-09-05 rule.
-        assert_eq!(
-            a_run_ends_with_its_last_visible_window(0, false),
-            !outlives,
+        assert!(
+            a_run_ends_with_its_last_visible_window(windows, 0, false),
             "the last window a person can see has gone and the process is still in the task list, \
              reachable only by a chord the reader may have bound weeks ago"
         );
         assert!(
-            !the_last_visible_windows_close_puts_the_run_away(0, false),
+            !the_last_visible_windows_close_puts_the_run_away(windows, 0, false),
             "the switch is off and the last window was put away anyway"
         );
         // The switch on: the same close keeps the run, and puts the window away instead.
         assert!(
-            !a_run_ends_with_its_last_visible_window(0, true),
+            !a_run_ends_with_its_last_visible_window(windows, 0, true),
             "the close kept the run and ended it anyway"
         );
-        assert_eq!(
-            the_last_visible_windows_close_puts_the_run_away(0, true),
-            !outlives,
+        assert!(
+            the_last_visible_windows_close_puts_the_run_away(windows, 0, true),
             "the close keeps the run, and its last window was neither closed nor put away"
         );
-        // Either way, a window still on the glass is no end and no put-away.
-        for keeping in [false, true] {
-            for left in [1, 4] {
-                assert!(
-                    !a_run_ends_with_its_last_visible_window(left, keeping),
-                    "a run with a window still on the glass ended anyway ({left}, {keeping})"
-                );
-                assert!(
-                    !the_last_visible_windows_close_puts_the_run_away(left, keeping),
-                    "a window that was not the last was put away ({left}, {keeping})"
-                );
+        // Either way, and on every platform, a window still on the glass is no end and no
+        // put-away.
+        for platform in [
+            windows,
+            bt_platform::HostPlatform::MacOs,
+            bt_platform::HostPlatform::OtherUnix,
+        ] {
+            for keeping in [false, true] {
+                for left in [1, 4] {
+                    assert!(
+                        !a_run_ends_with_its_last_visible_window(platform, left, keeping),
+                        "a run with a window still on the glass ended anyway \
+                         ({platform:?}, {left}, {keeping})"
+                    );
+                    assert!(
+                        !the_last_visible_windows_close_puts_the_run_away(platform, left, keeping),
+                        "a window that was not the last was put away \
+                         ({platform:?}, {left}, {keeping})"
+                    );
+                }
             }
         }
 
@@ -57231,8 +57421,8 @@ mod floated_page_tests {
         );
         let shut = method_body("FolioApp", "close");
         assert!(
-            shut.contains(
-                "a_run_ends_with_its_last_visible_window(self.windows_left_after(id), keeping)"
+            crate::test_support::squeezed(shut).contains(
+                "a_run_ends_with_its_last_visible_window(self.platform,self.windows_left_after(id),keeping,)"
             ) && shut.contains("let keeping = self.the_close_keeps_the_run(id);"),
             "the shut door decides residency for itself instead of reading the one rule, so it \
              can answer differently from the reap:\n{shut}"
@@ -57252,7 +57442,9 @@ mod floated_page_tests {
         );
         let run_end = method_body("FolioApp", "run_end");
         assert!(
-            run_end.contains("a_run_ends_with_its_last_visible_window(self.windows.len(), false)"),
+            crate::test_support::squeezed(run_end).contains(
+                "a_run_ends_with_its_last_visible_window(self.platform,self.windows.len(),false)"
+            ),
             "the run's end decides residency for itself instead of reading the one rule:\n{run_end}"
         );
 
@@ -57260,7 +57452,7 @@ mod floated_page_tests {
         // the turn its last visible window goes, exactly as above; with one parked it ends when
         // the spare lets go — the last closed window waits for it hidden, as it waits for its own
         // pages — and never later than the run's bound.
-        let ends = a_run_ends_with_its_last_visible_window(0, false);
+        let ends = a_run_ends_with_its_last_visible_window(windows, 0, false);
         let now = std::time::Instant::now();
         let bound = now + crate::quit::PAGE_TEARDOWN_DEADLINE;
         assert_eq!(
@@ -60747,9 +60939,10 @@ mod platform_gate_tests {
         // A test re-export gated as its only test caller is: a share handed over, which
         // only Windows names by its own spelling (`tests.rs`).
         "runtime/mod.rs",
-        // The put-away tests' module, gated to Windows (0.4.10 plan row 87, part 87a): on macOS an
-        // application outlives its last window, so their close neither puts away nor ends the run;
-        // 87c writes the macOS arms and the gate goes.
+        // The put-away run's tests on the roads only Windows has, gated to Windows (2026-11-20,
+        // 0.4.10 plan row 87, part 87c, R11): Folio's quit from outside and the system's question
+        // at the end of the session are Windows messages; every other put-away test runs on every
+        // host, the platform a value (part 87a's gate on the whole module went with 87c).
         "runtime/windows.rs",
         // One test gated off macOS (2026-11-18, 0.4.10 plan row 103): the summoned terminal's
         // question held over the run's end, which a Mac run never reaches because its
@@ -63679,7 +63872,7 @@ mod quit_with_no_window_tests {
     /// `answer_the_systems_quit(… Now)` line in `settle_quit` above `app.finish()`.
     #[test]
     fn should_terminate_takes_the_quit_road() {
-        let settle = method_body("FolioApp", "settle_app_delegate_events");
+        let settle = method_body("FolioApp", "answer_one_delegate_event");
         let asked = settle
             .find("AppDelegateEventKind::TerminationRequested(answer) =>")
             .expect("the delegate's termination request is read");

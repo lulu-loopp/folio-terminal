@@ -125,6 +125,10 @@ pub(crate) trait Backend: Sized + 'static {
     type Toasts: ToastDoor;
     /// The run's icon in the notification area (0.4.10 plan row 87, part 87b).
     type Tray: TrayDoor;
+    /// **The activity a put-away run holds while it works** (0.4.10 plan row 87, part 87c), held
+    /// for as long as the value lives — `bt_platform::process_activity::ProcessActivity` for the
+    /// product, which keeps App Nap off on macOS.
+    type Activity;
 
     /// **Every window's surface, built again on the device layer** — what a device the driver
     /// took away, and the debug build's surface self-test, ask of every window at once.
@@ -173,6 +177,10 @@ pub(crate) trait Backend: Sized + 'static {
         wake: Box<dyn Fn()>,
         note: Box<dyn Fn(&str)>,
     ) -> Result<Self::Tray, String>;
+
+    /// **Begin the activity** (part 87c), `reason` the sentence the system's tools show for it —
+    /// `bt_platform::process_activity::ProcessActivity::begin_holding`. Dropping the answer ends it.
+    fn begin_activity(event_loop: &Self::Loop, reason: &str) -> Result<Self::Activity, String>;
 }
 
 /// **The product's backend**: winit's window, `bt-render`'s renderer over the shared device,
@@ -193,6 +201,7 @@ impl Backend for Native {
     type Loop = ActiveEventLoop;
     type Toasts = crate::NotificationDesk;
     type Tray = bt_platform::tray::TrayIcon;
+    type Activity = bt_platform::process_activity::ProcessActivity;
 
     fn rebuild_every_surface(
         gpu: &mut Self::Device,
@@ -237,6 +246,13 @@ impl Backend for Native {
         note: Box<dyn Fn(&str)>,
     ) -> Result<bt_platform::tray::TrayIcon, String> {
         bt_platform::tray::TrayIcon::put_up(labels, picture, wake, note)
+    }
+
+    fn begin_activity(
+        _event_loop: &ActiveEventLoop,
+        reason: &str,
+    ) -> Result<bt_platform::process_activity::ProcessActivity, String> {
+        bt_platform::process_activity::ProcessActivity::begin_holding(reason)
     }
 }
 
@@ -342,6 +358,10 @@ pub(crate) trait WindowHost {
     fn set_backdrop(&self, acrylic: bool) -> Result<(), String>;
     /// Whether the window stays above other windows — `bt_platform::set_window_topmost`.
     fn set_topmost(&self, topmost: bool) -> Result<(), String>;
+    /// Whether the system's own lists of this application's windows name this one —
+    /// `bt_platform::set_window_listed` (0.4.10 plan row 87, part 87c, R5): off while the window
+    /// is put away, so that AppKit's Window menu and Dock list cannot show it behind the door.
+    fn set_listed(&self, listed: bool) -> Result<(), String>;
     /// The frame's dark or light plate — `bt_platform::set_window_dark_mode`.
     fn set_dark_mode(&self, dark: bool) -> Result<(), String>;
     /// The colour the system paints the window with before its first frame, or none —
@@ -572,6 +592,9 @@ impl WindowHost for Arc<Window> {
     }
     fn set_topmost(&self, topmost: bool) -> Result<(), String> {
         bt_platform::set_window_topmost(native_or_say(self)?, topmost)
+    }
+    fn set_listed(&self, listed: bool) -> Result<(), String> {
+        bt_platform::set_window_listed(native_or_say(self)?, listed)
     }
     fn set_dark_mode(&self, dark: bool) -> Result<(), String> {
         bt_platform::set_window_dark_mode(native_or_say(self)?, dark)

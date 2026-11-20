@@ -762,7 +762,14 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// `window_shown` is kept, for `hide_quake_window`'s reason: a hidden window is not a window
     /// that was never shown.
-    pub(crate) fn put_the_window_away(&mut self) -> Result<()> {
+    ///
+    /// `platform` is the one the close's rules were asked of (`FolioApp::platform`, part 87c's R1),
+    /// handed to the first-hide toast's rule so that a Mac's put-away run on any host says what a
+    /// Mac says: nothing.
+    pub(crate) fn put_the_window_away(
+        &mut self,
+        platform: bt_platform::HostPlatform,
+    ) -> Result<()> {
         let how = crate::exit_diagnostics::ClosedHow::Asked(
             self.take_close_asked()
                 .unwrap_or(crate::exit_diagnostics::CloseAsked::UNMARKED),
@@ -777,6 +784,14 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(());
         }
         self.window.put_away = true;
+        // Off AppKit's Window menu and the Dock tile's list while it is away (part 87c, R5): a row
+        // there would order it in behind the door. Nothing to do on Windows, whose taskbar has no
+        // button for a hidden window. A refusal is said; the door still brings the window back.
+        if let Err(error) = self.window.window.set_listed(false) {
+            self.window
+                .window
+                .note(&format!("BT_PUT_AWAY the window list: {error}"));
+        }
         self.window.video.pause_while_away();
         // The turn's facts read again, so that this turn's own fold and present already see a
         // window off the glass (gate 1), not the next turn's.
@@ -786,7 +801,7 @@ impl<B: Backend> Runtime<'_, B> {
         crate::exit_diagnostics::say_window_put_away(how, facts, |line| {
             self.window.window.note(line);
         });
-        self.tell_the_first_put_away();
+        self.tell_the_first_put_away(platform);
         Ok(())
     }
 
@@ -833,6 +848,12 @@ impl<B: Backend> Runtime<'_, B> {
             return Ok(false);
         }
         self.window.put_away = false;
+        // Back on the system's lists of the application's windows (part 87c, R5).
+        if let Err(error) = self.window.window.set_listed(true) {
+            self.window
+                .window
+                .note(&format!("BT_PUT_AWAY the window list: {error}"));
+        }
         let maximized = self.window.window.is_maximized();
         self.hold_the_window_to_a_present_monitor();
         self.put_the_window_on_the_glass(maximized)?;
@@ -3336,9 +3357,14 @@ pub(crate) fn recent_term_leaf_seed(profile_id: &str, cwd: String) -> LeafSeed {
 #[path = "windows_tests.rs"]
 mod tests;
 
-// Windows only until 87c: on macOS an application outlives its last window, so the close these
-// tests make never puts a window away and never ends the run (the rule's own test holds that
-// answer); 87c writes the macOS arms.
-#[cfg(all(test, windows))]
+// On every host since 87c (0.4.10 plan row 87): each test names the platform it pins
+// (`FolioApp::platform`), so a Mac's put-away runs on a Windows runner and a Windows one on a Mac.
+#[cfg(test)]
 #[path = "put_away_tests.rs"]
 mod put_away_tests;
+
+// The put-away run on the roads only Windows has: Folio's quit from outside and the system's
+// question at the end of the session, both Windows messages (part 87c, R11 of 2026-11-20).
+#[cfg(all(test, windows))]
+#[path = "put_away_windows_tests.rs"]
+mod put_away_windows_tests;

@@ -6,6 +6,12 @@
 //! the test's own, so that the run's sentinel (`session.lock`) and the layout it writes
 //! (`session.json`) are files the test can look at. The switch (`close_keeps_running`) is set by
 //! each test, whichever its default.
+//!
+//! **On every host since part 87c** (T-TRAY-87C-MACOS, R1 and R11 of 2026-11-20): the run's
+//! platform is a value (`FolioApp::platform`), Windows unless a test asks for macOS
+//! ([`PutAwayRun::on_the_platform`]), so these Windows arms run on a Mac as they do here, and the Mac's
+//! (`put_away_dock_tests`) on Windows. The two roads only Windows has — the quit from outside and
+//! the system's question — are `put_away_windows_tests`'.
 
 use crate::headless::{
     HeadlessApplication, HeadlessFolio, HeadlessParts, PlatformAnswers, WindowEffect,
@@ -33,13 +39,13 @@ fn counted_carry_ask(ask: CarryAsk) {
 
 /// **One application with one window holding a tab of two shells**, its storage on one working
 /// worker in `dir` (the sentinel armed), the switch set to `keeps_running`, its ledger empty.
-struct PutAwayRun {
-    application: HeadlessApplication,
-    dir: PathBuf,
+pub(super) struct PutAwayRun {
+    pub(super) application: HeadlessApplication,
+    pub(super) dir: PathBuf,
 }
 
 impl PutAwayRun {
-    fn open(tag: &str, keeps_running: bool) -> Self {
+    pub(super) fn start_the_run(tag: &str, keeps_running: bool) -> Self {
         let mut tab = ringing_tab(1, 2);
         // A name of its own, so a window that goes is a row Recent keeps (`Seed::names_itself`).
         tab.manual_name = Some("build".to_owned());
@@ -76,6 +82,8 @@ impl PutAwayRun {
         // On the glass, as a launch leaves it.
         folio.window.window_shown = true;
         let mut application = HeadlessApplication::of(folio);
+        // Windows, whatever the host (part 87c, R1): the run's icon is the way back.
+        application.folio.platform = bt_platform::HostPlatform::Windows;
         // The window directory as the loop's turn publishes it: the windows a launch can land in.
         application.folio.publish_window_directory();
         let _ = application.event_loop.ledger.take();
@@ -83,8 +91,21 @@ impl PutAwayRun {
         Self { application, dir }
     }
 
+    /// **The run on `platform`** (part 87c, R1): the close's rules and the first-hide toast asked
+    /// of it, and the loop's notification area there or not as `platform` has one — on macOS
+    /// there is none, and the Dock is the way back.
+    pub(super) fn on_the_platform(mut self, platform: bt_platform::HostPlatform) -> Self {
+        self.application.folio.platform = platform;
+        self.application
+            .event_loop
+            .tray
+            .area
+            .set(platform.has_a_notification_area());
+        self
+    }
+
     /// A second ordinary window, `2`, beside the first.
-    fn with_a_second_window(self) -> Self {
+    pub(super) fn with_a_second_window(self) -> Self {
         self.with_a_second_window_holding(vec![ringing_tab(2, 1)])
     }
 
@@ -120,14 +141,14 @@ impl PutAwayRun {
     }
 
     /// The loop's look at the run's icon (`FolioApp::settle_tray`), on the test's turn.
-    fn turn_the_tray(&mut self) -> anyhow::Result<()> {
+    pub(super) fn turn_the_tray(&mut self) -> anyhow::Result<()> {
         self.application
             .folio
             .settle_tray(&self.application.event_loop)
     }
 
     /// A person's `gesture` on the run's icon, parked for the loop's next turn.
-    fn poke(&mut self, gesture: TrayGesture) {
+    pub(super) fn poke(&mut self, gesture: TrayGesture) {
         self.application
             .event_loop
             .tray
@@ -144,7 +165,7 @@ impl PutAwayRun {
         let _ = store.store(settings);
     }
 
-    fn window(&mut self) -> &mut crate::WindowRuntime<crate::headless::Headless> {
+    pub(super) fn window(&mut self) -> &mut crate::WindowRuntime<crate::headless::Headless> {
         let id = self.application.id;
         self.application
             .folio
@@ -153,7 +174,7 @@ impl PutAwayRun {
             .expect("the window is in the registry")
     }
 
-    fn app(&mut self) -> &mut crate::App<crate::headless::Headless> {
+    pub(super) fn app(&mut self) -> &mut crate::App<crate::headless::Headless> {
         self.application
             .folio
             .app
@@ -162,7 +183,7 @@ impl PutAwayRun {
     }
 
     /// The person's `×` on the window: a `WM_CLOSE`, dispatched as the loop dispatches it.
-    fn close(&mut self) -> Vec<WindowEffect> {
+    pub(super) fn close(&mut self) -> Vec<WindowEffect> {
         self.application.window_event(WindowEvent::CloseRequested);
         self.application.event_loop.ledger.take()
     }
@@ -203,12 +224,12 @@ impl PutAwayRun {
         (store.loaded().windows.len(), store.deadline().is_some())
     }
 
-    fn sentinel_stands(&self) -> bool {
+    pub(super) fn sentinel_stands(&self) -> bool {
         self.dir.join("session.lock").exists()
     }
 
     /// The windows `session.json` holds, read back as a document.
-    fn written_windows(&self) -> usize {
+    pub(super) fn written_windows(&self) -> usize {
         let text = std::fs::read_to_string(self.dir.join("session.json"))
             .expect("the layout is on the disk");
         let document: serde_json::Value = serde_json::from_str(&text).expect("a document");
@@ -263,7 +284,7 @@ fn with_the_switch_on_the_last_windows_close_puts_it_away() {
         }),
     ];
     for (index, (road, close)) in roads.into_iter().enumerate() {
-        let mut run = PutAwayRun::open(&format!("on-{index}"), true);
+        let mut run = PutAwayRun::start_the_run(&format!("on-{index}"), true);
         let effects = close(&mut run);
         assert!(
             effects.contains(&WindowEffect::Visible(false)),
@@ -341,7 +362,7 @@ fn a_put_away_close_says_its_road() {
         ),
     ];
     for (road, close, says) in roads {
-        let mut run = PutAwayRun::open(&format!("line-{road}"), true);
+        let mut run = PutAwayRun::start_the_run(&format!("line-{road}"), true);
         let effects = close(&mut run);
         assert!(run.window().put_away, "{road}: the window is put away");
         let lines = close_lines_of(&effects);
@@ -363,7 +384,7 @@ fn a_put_away_close_says_its_road() {
 /// second close ends the run.
 #[test]
 fn a_close_that_reaches_a_put_away_window_is_ignored() {
-    let mut run = PutAwayRun::open("again", true);
+    let mut run = PutAwayRun::start_the_run("again", true);
     let _ = run.close();
     let id = run.application.id;
     assert_eq!(run.application.folio.close_fate(id), CloseFate::AlreadyAway);
@@ -387,7 +408,7 @@ fn a_close_that_reaches_a_put_away_window_is_ignored() {
 /// window is put away.
 #[test]
 fn with_the_switch_off_the_last_windows_close_ends_the_run() {
-    let mut run = PutAwayRun::open("off", false);
+    let mut run = PutAwayRun::start_the_run("off", false);
     let _ = run.close();
     let window = run.window();
     assert!(!window.put_away, "nothing is put away");
@@ -403,7 +424,7 @@ fn with_the_switch_off_the_last_windows_close_ends_the_run() {
 /// is put away and nothing is filed.
 #[test]
 fn a_window_that_is_not_the_last_closes_into_recent_with_the_switch_on() {
-    let mut run = PutAwayRun::open("not-last", true).with_a_second_window();
+    let mut run = PutAwayRun::start_the_run("not-last", true).with_a_second_window();
     let _ = run.close();
     let window = run.window();
     assert!(!window.put_away, "nothing is put away");
@@ -435,7 +456,7 @@ fn a_window_that_is_not_the_last_closes_into_recent_with_the_switch_on() {
 /// `FolioApp::the_close_keeps_the_run` — the window is put away.
 #[test]
 fn a_last_window_whose_shells_exited_ends_the_run_with_the_switch_on() {
-    let mut run = PutAwayRun::open("exited", true);
+    let mut run = PutAwayRun::start_the_run("exited", true);
     let id = run.application.id;
     run.application
         .folio
@@ -459,7 +480,7 @@ fn a_last_window_whose_shells_exited_ends_the_run_with_the_switch_on() {
 /// put-away run stays resident with nothing in it.
 #[test]
 fn a_put_away_window_whose_shells_exited_ends_the_run() {
-    let mut run = PutAwayRun::open("away-exited", true);
+    let mut run = PutAwayRun::start_the_run("away-exited", true);
     let _ = run.close();
     assert!(run.window().put_away, "the fixture's window is put away");
     let _ = run.close_by(OwnCloseRoad::ShellsExited);
@@ -541,7 +562,7 @@ fn a_put_away_windows_question_is_asked_back_through_the_one_door() {
 /// put-away's clearing from `Runtime::let_go_of_this_window` — the closing window is shown.
 #[test]
 fn a_closing_window_is_never_brought_back() {
-    let mut run = PutAwayRun::open("away-closing", true);
+    let mut run = PutAwayRun::start_the_run("away-closing", true);
     let _ = run.close();
     let _ = run.close_by(OwnCloseRoad::ShellsExited);
     assert!(
@@ -560,122 +581,6 @@ fn a_closing_window_is_never_brought_back() {
     assert!(
         !effects.contains(&WindowEffect::Visible(true)),
         "nothing is put on the glass: {effects:?}"
-    );
-}
-
-/// RED (review P1-1) — **while Folio's quit from outside holds the document, a close closes
-/// nothing**: the `WM_CLOSE` posted after the quit for older builds reaches a window that is not
-/// the last before the settle, and it is neither filed into Recent nor sent on its way out nor put
-/// away; the settle then writes the layout the quit held, both windows in it.
-///
-/// Each of the two guards is held by a case of its own (re-review P2-12): the window's event door
-/// keeps a lone window from being put away during the hold, and `FolioApp::close` keeps a gate's
-/// answer, re-run during the hold, from closing the window it was asked about.
-///
-/// PLANT P21: drop the hold's guard from `FolioApp::on_window_event` and from `FolioApp::close` —
-/// the window is filed into Recent that the held layout also restores.
-///
-/// PLANT P30: drop only the window event door's guard (`FolioApp::a_close_the_held_document_spends`
-/// answers `false`) — the lone window is put away during the hold.
-///
-/// PLANT P31: drop only `FolioApp::close`'s guard — the gate's `Discard`, re-run during the hold,
-/// sends the window it was asked about on its way out and files it into Recent.
-#[test]
-fn a_close_while_the_outside_quit_holds_the_document_closes_nothing() {
-    held_by_the_outside_quit_two_windows_close_nothing();
-    held_by_the_outside_quit_a_lone_window_is_not_put_away();
-    held_by_the_outside_quit_a_gates_answer_closes_nothing();
-}
-
-/// Folio's quit from outside, heard: the document is held from here until the settle.
-fn the_outside_quit_holds_the_document() {
-    let quit = 0xC123;
-    assert_eq!(
-        bt_platform::session_end::answer_outside_quit(
-            quit,
-            quit,
-            &crate::session_end::hear,
-            &|_| {}
-        ),
-        Some(0),
-        "the quit from outside is heard"
-    );
-    assert!(
-        crate::session_end::holds_the_document(),
-        "and the document is held"
-    );
-}
-
-/// [`a_close_while_the_outside_quit_holds_the_document_closes_nothing`]'s lone window: the hold,
-/// then its close. Not put away, not going.
-fn held_by_the_outside_quit_a_lone_window_is_not_put_away() {
-    let _news = crate::test_support::EndSessionHome::new("put-away-quit-close-one");
-    let mut run = PutAwayRun::open("quit-close-one", true);
-    the_outside_quit_holds_the_document();
-    let _ = run.close();
-    let window = run.window();
-    assert!(
-        !window.put_away && window.leaving.is_none(),
-        "a lone window's close during the hold puts nothing away"
-    );
-}
-
-/// [`a_close_while_the_outside_quit_holds_the_document_closes_nothing`]'s gate answer: a window's
-/// question up, the hold, then its `Discard`, re-run as the window event's tail re-runs it. The
-/// window is not filed and not going.
-fn held_by_the_outside_quit_a_gates_answer_closes_nothing() {
-    let _news = crate::test_support::EndSessionHome::new("put-away-quit-gate");
-    let mut run = PutAwayRun::open("quit-gate", true).with_a_second_window();
-    run.window()
-        .dirty_gate
-        .open(crate::restore::GateRequest::Shut);
-    the_outside_quit_holds_the_document();
-    run.application
-        .runtime()
-        .answer_dirty_gate(crate::restore::GateAnswer::Discard)
-        .expect("the answer is spent");
-    run.application.window_event(WindowEvent::Focused(true));
-    assert!(
-        run.app().recent.is_empty(),
-        "the answer's re-run files nothing into Recent"
-    );
-    assert!(
-        run.window().leaving.is_none(),
-        "and the window it was asked about is not on its way out"
-    );
-}
-
-/// [`a_close_while_the_outside_quit_holds_the_document_closes_nothing`]'s two windows: the hold,
-/// then the close of one that is not the last. Nothing filed, nothing going or put away, and the
-/// settle writes both.
-fn held_by_the_outside_quit_two_windows_close_nothing() {
-    let _news = crate::test_support::EndSessionHome::new("put-away-quit-close");
-    let mut run = PutAwayRun::open("quit-close", true).with_a_second_window();
-    // Both windows in the document, as each records itself when it is born.
-    for id in [1, 2] {
-        run.application
-            .folio
-            .runtime(WindowId::from(id))
-            .expect("the window")
-            .mark_session_dirty(std::time::Instant::now());
-    }
-    the_outside_quit_holds_the_document();
-    let _ = run.close();
-    assert!(run.app().recent.is_empty(), "nothing is filed into Recent");
-    let window = run.window();
-    assert!(
-        window.leaving.is_none() && !window.put_away,
-        "and the window is neither going nor put away"
-    );
-    let recovery = run.dir.join(crate::preview::RECOVERED_FOLDER);
-    let _ = run
-        .application
-        .folio
-        .settle_session_end_keeping_in(&run.application.event_loop, &recovery);
-    assert_eq!(
-        run.written_windows(),
-        2,
-        "the layout the quit held is written, both windows in it"
     );
 }
 
@@ -773,7 +678,7 @@ fn a_put_away_window_comes_back_on_a_monitor_that_is_there() {
         ),
     ];
     for (index, (case, normal, maximised, stood, kept)) in arms.into_iter().enumerate() {
-        let mut run = PutAwayRun::open(&format!("monitor-{index}"), true);
+        let mut run = PutAwayRun::start_the_run(&format!("monitor-{index}"), true);
         // The window stood normal at `normal`, and recorded itself there.
         run.window().window.answers.set(PlatformAnswers {
             outer_rect: Some(normal),
@@ -940,7 +845,7 @@ fn every_road_brings_the_put_away_window_back_as_it_was() {
         ("toast", toast, 0),
         ("icon", icon, 0),
     ] {
-        let mut run = PutAwayRun::open(&format!("back-{road}"), true);
+        let mut run = PutAwayRun::start_the_run(&format!("back-{road}"), true);
         let (tabs, seats, texts) = run.what_the_window_holds();
         let _ = run.close();
         assert!(
@@ -994,7 +899,7 @@ fn every_road_brings_the_put_away_window_back_as_it_was() {
 /// `bring_owned_window_forward`) — the window comes back minimised.
 #[test]
 fn a_window_put_away_minimised_comes_back_restored() {
-    let mut run = PutAwayRun::open("back-minimised", true);
+    let mut run = PutAwayRun::start_the_run("back-minimised", true);
     let _ = run.close();
     run.window().window.answers.set(PlatformAnswers {
         minimized: Some(true),
@@ -1013,82 +918,6 @@ fn a_window_put_away_minimised_comes_back_restored() {
     );
 }
 
-/// RED (T11; R9) — **Folio's quit from outside takes the Restart Manager's close road on a
-/// put-away run**: the layout is written, nothing is asked, every window is let go and the loop
-/// is asked to exit.
-///
-/// PLANT P11: answer `None` from `bt_platform::session_end::answer_outside_quit` (the message read
-/// as a close, which a put-away window ignores) — nothing is heard, the run goes on.
-#[test]
-fn the_outside_quit_writes_the_layout_and_leaves() {
-    let _news = crate::test_support::EndSessionHome::new("put-away-quit");
-    let mut run = PutAwayRun::open("quit", true);
-    let _ = run.close();
-    // A registered message's number, as the session gives one (0xC000 and above).
-    let quit = 0xC123;
-    assert_eq!(
-        bt_platform::session_end::answer_outside_quit(
-            quit,
-            quit,
-            &crate::session_end::hear,
-            &|_| {}
-        ),
-        Some(0),
-        "the message is processed"
-    );
-    let recovery = run.dir.join(crate::preview::RECOVERED_FOLDER);
-    let _ = run
-        .application
-        .folio
-        .settle_session_end_keeping_in(&run.application.event_loop, &recovery);
-    assert_eq!(
-        run.written_windows(),
-        1,
-        "the layout is written, the window in it"
-    );
-    assert!(!run.sentinel_stands(), "the run claims its clean exit");
-    assert_eq!(
-        run.application.folio.windows.len(),
-        0,
-        "every window is let go"
-    );
-    assert!(
-        run.application
-            .event_loop
-            .ledger
-            .take()
-            .contains(&WindowEffect::Exit),
-        "and the loop is asked to exit"
-    );
-}
-
-/// RED (T14; row 18's road with the run put away) — **the system's question reaches a put-away
-/// run and writes its layout at the question**: the window is still the registry's, its session-end
-/// watch with it.
-///
-/// PLANT P14: return from `FolioApp::settle_session_end_keeping_in` before the settle when a
-/// window is put away — no layout is written at the question.
-#[test]
-fn the_systems_question_writes_a_put_away_runs_layout() {
-    let _news = crate::test_support::EndSessionHome::new("put-away-end");
-    let mut run = PutAwayRun::open("end", true);
-    let _ = run.close();
-    let _ = std::fs::remove_file(run.dir.join("session.json"));
-    assert_eq!(crate::test_support::the_system_asks(), Some(1));
-    let recovery = run.dir.join(crate::preview::RECOVERED_FOLDER);
-    let _ = run
-        .application
-        .folio
-        .settle_session_end_keeping_in(&run.application.event_loop, &recovery);
-    assert_eq!(
-        run.written_windows(),
-        1,
-        "the layout is written at the question"
-    );
-    assert!(!run.sentinel_stands(), "and the sentinel goes with it");
-    assert!(run.window().put_away, "the run is still put away");
-}
-
 /// RED (T15; gate 1) — **a put-away window's attention reaches the desktop as a toast**: a
 /// put-away window is hidden (`window_is_hidden` keys on the put-away), and a hidden window
 /// flashes no taskbar button it does not have.
@@ -1097,7 +926,7 @@ fn the_systems_question_writes_a_put_away_runs_layout() {
 /// `Nothing` (the window holds the keyboard and the tab is active).
 #[test]
 fn a_put_away_windows_reach_is_a_toast() {
-    let mut run = PutAwayRun::open("reach", true);
+    let mut run = PutAwayRun::start_the_run("reach", true);
     let _ = run.close();
     let id = run.application.id;
     let mut runtime = run.application.folio.runtime(id).expect("the window");
@@ -1128,7 +957,7 @@ fn frame_says(frame: &bt_viewport::ViewportFrame) -> String {
 /// composes a frame for the put-away window.
 #[test]
 fn a_put_away_window_publishes_nothing_and_its_first_frame_back_is_built_then() {
-    let mut run = PutAwayRun::open("publish", true);
+    let mut run = PutAwayRun::start_the_run("publish", true);
     let _ = run.close();
     assert!(run.window().put_away, "the fixture's window is put away");
     let id = run.application.id;
@@ -1206,7 +1035,7 @@ fn a_put_away_window_publishes_nothing_and_its_first_frame_back_is_built_then() 
 
 impl PutAwayRun {
     /// A command started in the first pane's shell, landed live first: `OSC 133` `C`, and no `D`.
-    fn a_command_runs(&mut self) {
+    pub(super) fn a_command_runs(&mut self) {
         let tab = &mut self.window().tabs[0];
         let seat = tab.seats.terminals()[0];
         let shell = &mut tab
@@ -1214,183 +1043,35 @@ impl PutAwayRun {
             .get_mut(&seat)
             .expect("the fixture's seat holds a shell")
             .session;
-        crate::test_support::land_a_live_shell(shell);
+        // A second command in the same shell (part 87c's TA3) finds it landed already.
+        if !shell.life.shell_is_live() {
+            crate::test_support::land_a_live_shell(shell);
+        }
         shell
             .session
             .feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07cargo build\r\n\x1b]133;C\x07")
             .expect("the bytes parse");
     }
 
+    /// The command [`Self::a_command_runs`] started ends: the shell says so (`133;D`) and its
+    /// prompt comes back (0.4.10 plan row 87, part 87c).
+    pub(super) fn the_command_ends(&mut self) {
+        let tab = &mut self.window().tabs[0];
+        let seat = tab.seats.terminals()[0];
+        tab.sessions
+            .get_mut(&seat)
+            .expect("the fixture's seat holds a shell")
+            .session
+            .session
+            .feed(b"\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07")
+            .expect("the bytes parse");
+    }
+
     /// Whether no quit was begun or asked for: nothing could have asked.
-    fn no_quit(&mut self) -> bool {
+    pub(super) fn no_quit(&mut self) -> bool {
         let app = self.app();
         app.quit.is_none() && !app.quit_requested
     }
-}
-
-/// RED (T10f; the coordinator's item 18, the judgement's risk 1) — **the system's end, the Restart
-/// Manager's close and the quit from outside never ask**, a command running or not: nobody is
-/// there to answer. None of the three begins Folio's quit: the system's question is answered and
-/// the window stays; the close and the outside quit leave, every window let go. **And a person's
-/// card already standing holds none of them**: with the running-work card up, the close and the
-/// outside quit still leave, and the system's end leaves the window and its card as they were.
-///
-/// PLANT 87e-P35: in `FolioApp::settle_session_end_keeping_in`, answer `Settled::Closed` by leaving
-/// only when no quit is under way (`closed = !a_quit_holds_it && app.quit.is_none()`) — the
-/// standing card holds the close and the outside quit.
-#[test]
-fn the_system_end_the_restart_managers_close_and_the_outside_quit_never_ask() {
-    let _news = crate::test_support::EndSessionHome::new("87e-never-ask");
-    for (road, standing) in [
-        ("end", false),
-        ("close", false),
-        ("outside", false),
-        ("end", true),
-        ("close", true),
-        ("outside", true),
-    ] {
-        let road_now = if standing {
-            format!("{road} under a card")
-        } else {
-            road.to_owned()
-        };
-        let mut run = PutAwayRun::open(
-            &format!(
-                "87e-never-{road}-{}",
-                if standing { "card" } else { "bare" }
-            ),
-            true,
-        );
-        run.a_command_runs();
-        assert!(
-            run.application
-                .folio
-                .every_windows_running_work()
-                .expect("the windows are read")
-                .any(),
-            "{road_now}: the fixture's own precondition: a command runs"
-        );
-        if standing {
-            run.app().ask_to_quit();
-            run.application
-                .folio
-                .begin_quit_if_asked()
-                .expect("the quit begins");
-            assert!(
-                run.application.runtime().quit_card_layout().is_some(),
-                "{road_now}: the fixture's own precondition: the running-work card stands"
-            );
-        }
-        match road {
-            "end" => assert_eq!(crate::test_support::the_system_asks(), Some(1)),
-            "close" => {
-                assert_eq!(crate::test_support::the_system_asks(), Some(1));
-                assert_eq!(
-                    bt_platform::session_end::answer(
-                        bt_platform::session_end::WM_ENDSESSION,
-                        1,
-                        bt_platform::session_end::ENDSESSION_CLOSEAPP,
-                        &crate::session_end::hear
-                    ),
-                    Some(0)
-                );
-            }
-            _ => {
-                let quit = 0xC123;
-                assert_eq!(
-                    bt_platform::session_end::answer_outside_quit(
-                        quit,
-                        quit,
-                        &crate::session_end::hear,
-                        &|_| {}
-                    ),
-                    Some(0)
-                );
-            }
-        }
-        let recovery = run.dir.join(crate::preview::RECOVERED_FOLDER);
-        let _ = run
-            .application
-            .folio
-            .settle_session_end_keeping_in(&run.application.event_loop, &recovery);
-        assert_eq!(
-            run.application.folio.windows.len(),
-            usize::from(road == "end"),
-            "{road_now}: leaves, or stays for the end"
-        );
-        if standing {
-            if road == "end" {
-                assert!(
-                    run.application.runtime().quit_card_layout().is_some(),
-                    "{road_now}: the card still stands"
-                );
-            }
-        } else {
-            assert!(run.no_quit(), "{road_now}: nothing asks");
-        }
-    }
-}
-
-/// RED (T10h; R7; the review's P2-5) — **a put-away run's quit brings the window back before it
-/// asks**: a question needs a window on the glass, so the one door back is taken first, and the
-/// card stands on it. A quit that asks nothing leaves without showing it. Each quit is the icon's
-/// Quit, as its menu's post delivers it to the loop's turn (`FolioApp::settle_tray`).
-///
-/// PLANT 87e-P37: drop the bring-back from `FolioApp::begin_quit_if_asked` — the card stands on a
-/// window nobody can see.
-#[test]
-fn a_put_away_runs_tray_quit_brings_the_window_back_before_it_asks() {
-    let mut run = PutAwayRun::open("87e-brought", true);
-    let _ = run.close();
-    assert!(run.window().put_away, "the fixture's window is put away");
-    run.a_command_runs();
-    run.turn_the_tray().expect("the icon is put up");
-    let _ = run.application.event_loop.ledger.take();
-    run.poke(TrayGesture::Quit);
-    run.turn_the_tray().expect("the icon's turn");
-    assert!(
-        run.app().quit_requested,
-        "the icon's Quit asks for the quit"
-    );
-    run.application
-        .folio
-        .begin_quit_if_asked()
-        .expect("the quit begins");
-    let effects = run.application.event_loop.ledger.take();
-    assert!(
-        effects.contains(&WindowEffect::Visible(true)),
-        "the window is shown: {effects:?}"
-    );
-    assert!(!run.window().put_away, "it is back on the glass");
-    assert!(
-        run.application.runtime().quit_card_layout().is_some(),
-        "and the card stands on it"
-    );
-
-    let mut idle = PutAwayRun::open("87e-not-brought", true);
-    let _ = idle.close();
-    idle.turn_the_tray().expect("the icon is put up");
-    let _ = idle.application.event_loop.ledger.take();
-    idle.poke(TrayGesture::Quit);
-    idle.turn_the_tray().expect("the icon's turn");
-    assert!(
-        idle.app().quit_requested,
-        "the icon's Quit asks for the quit"
-    );
-    idle.application
-        .folio
-        .begin_quit_if_asked()
-        .expect("the quit begins");
-    assert!(
-        !idle
-            .application
-            .event_loop
-            .ledger
-            .take()
-            .contains(&WindowEffect::Visible(true)),
-        "a quit that asks nothing does not show the window"
-    );
-    assert!(idle.window().put_away);
 }
 
 // ── The run's icon in the notification area (0.4.10 plan row 87, part 87b) ─────────────────────
@@ -1437,7 +1118,7 @@ fn a_tab_holding_unsaved_work(scratch: &str) -> crate::TabState {
 /// answered.
 #[test]
 fn the_icons_show_with_nothing_put_away_raises_the_window() {
-    let mut run = PutAwayRun::open("icon-raise", true);
+    let mut run = PutAwayRun::start_the_run("icon-raise", true);
     run.poke(TrayGesture::Show);
     run.turn_the_tray().expect("the icon's turn");
     let effects = run.application.event_loop.ledger.take();
@@ -1461,7 +1142,7 @@ fn the_icons_show_with_nothing_put_away_raises_the_window() {
 /// before the window opens — it is shown.
 #[test]
 fn the_icons_new_window_leaves_the_put_away_window_away() {
-    let mut run = PutAwayRun::open("icon-new", true);
+    let mut run = PutAwayRun::start_the_run("icon-new", true);
     let _ = run.close();
     run.turn_the_tray().expect("the icon is put up");
     let _ = run.application.event_loop.ledger.take();
@@ -1489,7 +1170,7 @@ fn the_icons_new_window_leaves_the_put_away_window_away() {
 /// PLANT 87b-P10: drop the comparison from `TrayStand::tell_the_icon` — the quiet turn tells the icon again.
 #[test]
 fn the_icon_is_told_only_what_changed() {
-    let mut run = PutAwayRun::open("icon-told", true);
+    let mut run = PutAwayRun::start_the_run("icon-told", true);
     run.turn_the_tray().expect("the icon is put up");
     let effects = run.application.event_loop.ledger.take();
     let plain = bt_platform::tray::TrayPicture {
@@ -1535,7 +1216,7 @@ fn the_icon_is_told_only_what_changed() {
 /// without its `looked_at` term) — the icon shows nothing.
 #[test]
 fn a_put_away_windows_active_tab_is_read_as_one_nobody_looks_at() {
-    let mut run = PutAwayRun::open("icon-unseen", true);
+    let mut run = PutAwayRun::start_the_run("icon-unseen", true);
     let seat = *run.window().tabs[0].sessions.keys().next().expect("a pane");
     let pane = run.window().tabs[0]
         .sessions
@@ -1570,7 +1251,7 @@ fn a_put_away_windows_active_tab_is_read_as_one_nobody_looks_at() {
 /// goes and the window stays hidden, with nothing left to bring it back.
 #[test]
 fn the_icon_follows_the_switch() {
-    let mut run = PutAwayRun::open("icon-switch", true);
+    let mut run = PutAwayRun::start_the_run("icon-switch", true);
     let _ = run.close();
     run.turn_the_tray().expect("the icon's turn");
     let effects = run.application.event_loop.ledger.take();
@@ -1599,7 +1280,7 @@ fn the_icon_follows_the_switch() {
         "on again: put up again: {effects:?}"
     );
 
-    let mut bare = PutAwayRun::open("icon-no-area", true);
+    let mut bare = PutAwayRun::start_the_run("icon-no-area", true);
     bare.application.event_loop.tray.area.set(false);
     bare.turn_the_tray().expect("the icon's turn");
     assert_eq!(
@@ -1613,7 +1294,7 @@ fn the_icon_follows_the_switch() {
 /// the run goes on without an icon.
 #[test]
 fn a_host_that_could_not_be_made_is_not_asked_again() {
-    let mut run = PutAwayRun::open("icon-refused", true);
+    let mut run = PutAwayRun::start_the_run("icon-refused", true);
     run.application.event_loop.tray.refused.set(true);
     run.turn_the_tray().expect("the icon's turn");
     run.application.event_loop.tray.refused.set(false);
@@ -1683,7 +1364,7 @@ fn the_icons_quit_asks_its_question_on_the_glass() {
 /// (`TrayStand::stand_the_icon`) — the loop's last turn puts the icon up again on a new host.
 #[test]
 fn the_icons_quit_leaves_and_takes_the_icon_down() {
-    let mut run = PutAwayRun::open("icon-quit", true);
+    let mut run = PutAwayRun::start_the_run("icon-quit", true);
     let _ = run.close();
     // **The first put-away's receipt heard first** (0.4.10 plan row 87, part 87d, at the stack on
     // 87b): that close wrote `first_hide_toast` to `settings.json`, and the turns below run on a
@@ -1777,7 +1458,7 @@ fn the_icons_quit_leaves_and_takes_the_icon_down() {
 /// PLANT 87b-P29 (as above): the settle turn puts the icon up again, live on a finished run.
 #[test]
 fn the_icon_stays_down_while_a_window_its_last_shell_closed_waits_for_its_pages() {
-    let mut run = PutAwayRun::open("icon-exited", true);
+    let mut run = PutAwayRun::start_the_run("icon-exited", true);
     run.turn_the_tray().expect("the icon is put up");
     let _ = run.application.event_loop.ledger.take();
     let effects = run.close_by(OwnCloseRoad::ShellsExited);
@@ -1889,7 +1570,7 @@ fn a_credential_that_runs_out_while_away_changes_the_icon_on_that_turn() {
 /// on a hidden window.
 #[test]
 fn a_cancelled_quit_on_a_put_away_run_raises_its_card_on_the_glass() {
-    let mut run = PutAwayRun::open("icon-quit-cancelled", true);
+    let mut run = PutAwayRun::start_the_run("icon-quit-cancelled", true);
     let _ = run.close();
     assert!(run.window().put_away, "the fixture's window is put away");
     let _ = run.application.event_loop.ledger.take();
@@ -1957,7 +1638,7 @@ fn the_icons_show_while_a_quit_asks_raises_the_window_holding_the_question() {
 /// (`windows_left_after` for `windows_on_the_glass_after`) — the second window is shut into Recent.
 #[test]
 fn a_window_beside_a_put_away_one_is_put_away_by_its_close() {
-    let mut run = PutAwayRun::open("icon-beside", true);
+    let mut run = PutAwayRun::start_the_run("icon-beside", true);
     let _ = run.close();
     assert!(run.window().put_away, "the fixture's window is put away");
     let mut run = run.with_a_second_window();
@@ -1992,7 +1673,7 @@ fn a_window_beside_a_put_away_one_is_put_away_by_its_close() {
 /// window.
 #[test]
 fn a_tab_moved_into_a_put_away_window_brings_it_back() {
-    let mut run = PutAwayRun::open("icon-move", true);
+    let mut run = PutAwayRun::start_the_run("icon-move", true);
     let _ = run.close();
     assert!(run.window().put_away, "the fixture's window is put away");
     let mut run = run.with_a_second_window_holding(vec![ringing_tab(2, 1), ringing_tab(3, 1)]);
@@ -2033,3 +1714,7 @@ fn a_tab_moved_into_a_put_away_window_brings_it_back() {
 // part 87d), on this file's fixture.
 #[path = "close_switch_tests.rs"]
 mod close_switch;
+
+// The Mac's arms: the Dock is the way back (0.4.10 plan row 87, part 87c).
+#[path = "put_away_dock_tests.rs"]
+mod dock;

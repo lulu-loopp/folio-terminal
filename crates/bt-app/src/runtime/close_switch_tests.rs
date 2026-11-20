@@ -15,10 +15,10 @@ use crate::test_support::StoragePassRig;
 use bt_persist::FirstHideToastV1;
 
 impl PutAwayRun {
-    /// [`PutAwayRun::open`] with the switch on, and the receipt and the `Notifications` row as
+    /// [`PutAwayRun::start_the_run`] with the switch on, and the receipt and the `Notifications` row as
     /// given.
     fn open_with(tag: &str, receipt: FirstHideToastV1, terminal_notifications: bool) -> Self {
-        let mut run = Self::open(tag, true);
+        let mut run = Self::start_the_run(tag, true);
         let mut settings = run.app().settings_store.loaded().clone();
         settings.first_hide_toast = receipt;
         settings.terminal_notifications = terminal_notifications;
@@ -250,7 +250,7 @@ fn a_click_on_it_brings_the_window_back_and_opens_nothing() {
 /// stores nothing and each close answers the old way.
 #[test]
 fn the_rows_press_is_the_switch_the_next_close_reads() {
-    let mut run = PutAwayRun::open("row-off", true);
+    let mut run = PutAwayRun::start_the_run("row-off", true);
     run.press_keep_running(1);
     assert!(!run.stored_switch(), "Off is stored");
     let _ = run.close();
@@ -261,7 +261,7 @@ fn the_rows_press_is_the_switch_the_next_close_reads() {
     );
     assert!(!run.sentinel_stands(), "and the run has ended");
 
-    let mut run = PutAwayRun::open("row-on", false);
+    let mut run = PutAwayRun::start_the_run("row-on", false);
     run.press_keep_running(0);
     assert!(run.stored_switch(), "On is stored");
     let _ = run.close();
@@ -295,7 +295,7 @@ fn turning_the_switch_off_brings_a_put_away_window_back() {
         .into_iter()
         .enumerate()
     {
-        let mut run = PutAwayRun::open(&format!("off-{index}"), true);
+        let mut run = PutAwayRun::start_the_run(&format!("off-{index}"), true);
         let _ = run.close();
         assert!(
             run.window().put_away,
@@ -327,7 +327,7 @@ fn turning_the_switch_off_brings_a_put_away_window_back() {
 /// what the next close does.
 #[test]
 fn turning_the_switch_on_moves_no_window() {
-    let mut run = PutAwayRun::open("on-moves-nothing", false);
+    let mut run = PutAwayRun::start_the_run("on-moves-nothing", false);
     run.press_keep_running(0);
     let _ = run.application.event_loop.ledger.take();
     run.turn_with_no_window_event();
@@ -351,7 +351,7 @@ fn turning_the_switch_on_moves_no_window() {
 /// without bringing the window back — the window stays put away with the switch off.
 #[test]
 fn a_hand_edit_to_off_brings_a_put_away_window_back_on_the_turn_alone() {
-    let mut run = PutAwayRun::open("hand-edit-off", true);
+    let mut run = PutAwayRun::start_the_run("hand-edit-off", true);
     let _ = run.close();
     assert!(run.window().put_away, "the fixture's window is put away");
     let mut edited = run.app().settings_store.loaded().clone();

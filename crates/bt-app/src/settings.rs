@@ -3477,8 +3477,9 @@ pub enum SettingsRow {
     /// again gives you, this one what closing its last window does — the two ends of a run, both
     /// about Folio itself, and so both above the two rows that reach out of this window.
     ///
-    /// **Windows only until part 87c** ([`Capability::KeepRunningWhenClosed`], ruled 2026-11-14,
-    /// item 13): a Mac's close does not put a window away yet, so the row is not on a Mac's page.
+    /// **On Windows and on macOS since part 87c** ([`Capability::KeepRunningWhenClosed`],
+    /// 2026-11-20; hidden on a Mac until then by the ruling of 2026-11-14, item 13): wherever a
+    /// put-away run has a way back, the icon there and the Dock here, and nowhere else.
     CloseKeepsRunning,
     /// **Whether Folio starts when you sign in** (0.4.10 plan row 22a,
     /// T-START-AT-LOGON-SWITCH): a switch whose answer is the account's sign-in
@@ -6239,8 +6240,8 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // the page's own order already puts everything about Folio itself.
     rows.push(SettingsRow::LaunchOpens);
     // **Directly under it** (0.4.10 plan row 87, part 87d): the row above says what starting
-    // Folio again gives you, this one what closing its last window does. Windows only until part
-    // 87c, through `visible_rows_for`'s one filter.
+    // Folio again gives you, this one what closing its last window does. On Windows and macOS
+    // (part 87c), through `visible_rows_for`'s one filter.
     rows.push(SettingsRow::CloseKeepsRunning);
     // **Directly above the Explorer row** (0.4.10 plan row 22a): the rows that
     // reach out of this window end the page, and this one reaches the account's
@@ -20366,8 +20367,8 @@ mod tests {
 
         const ON_A_MAC: [(SettingsRow, Text); 5] = [
             (SettingsRow::LaunchOpens, Text::DescLaunchOpens),
-            // Written for part 87c and measured now, so the sentence a Mac will read is held
-            // to its column before the row reaches the Mac's page (0.4.10 plan row 87).
+            // Written for part 87c and measured with 87d, so the sentence a Mac reads on its page
+            // since 87c is held to its column (0.4.10 plan row 87).
             (SettingsRow::CloseKeepsRunning, Text::DescCloseKeepsRunning),
             (
                 SettingsRow::TurnEndNotifications,
@@ -20636,7 +20637,8 @@ mod tests {
             ),
             (SettingsRow::QuakeHotkey, Text::DescQuakeHotkey, MacOs),
             (SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt, MacOs),
-            // `Keep running when closed`'s Mac column, written for part 87c (0.4.10 plan row 87).
+            // `Keep running when closed`'s Mac column, on a Mac's page since part 87c (0.4.10 plan
+            // row 87).
             (
                 SettingsRow::CloseKeepsRunning,
                 Text::DescCloseKeepsRunning,
@@ -29113,26 +29115,25 @@ mod tests {
 
         // `StartAtSignIn` is on it until its macOS half (0.4.10 plan row 22b): the Mac's login
         // item is not built, and a row whose switch reached nothing would be a lie on the page.
-        // `CloseKeepsRunning` is on it for the same reason until part 87c (0.4.10 plan row 87,
-        // T17 of T-TRAY-87D; PLANT 87d-P19: answer `true` for `KeepRunningWhenClosed` in
-        // `Capability::on` and the first assertion names the row): a Mac's close does not put
-        // a window away yet.
-        const NOT_ON_A_MAC: [SettingsRow; 4] = [
+        const NOT_ON_A_MAC: [SettingsRow; 3] = [
             SettingsRow::ContextMenu,
             SettingsRow::Acrylic,
             SettingsRow::StartAtSignIn,
-            SettingsRow::CloseKeepsRunning,
         ];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
             let windows = visible_rows_for(Windows, layout);
             // `ResumeAgents` was on the list from row 195 until T-AGENT-RESUME-ON-MACOS: a Mac
-            // resumes agents too, through the pane's own shell.
-            assert!(
-                mac.contains(&SettingsRow::ResumeAgents)
-                    && windows.contains(&SettingsRow::ResumeAgents),
-                "{layout:?}: both platforms resume agents, and both pages hold the switch"
-            );
+            // resumes agents too, through the pane's own shell. `CloseKeepsRunning` was on it from
+            // 87d until part 87c (0.4.10 plan row 87; T17, rewritten 2026-11-20; PLANT 87c-P59:
+            // answer Windows only for `KeepRunningWhenClosed` in `Capability::on`): a Mac's last
+            // close puts its window away too, and the Dock brings it back.
+            for row in [SettingsRow::ResumeAgents, SettingsRow::CloseKeepsRunning] {
+                assert!(
+                    mac.contains(&row) && windows.contains(&row),
+                    "{layout:?}: both platforms have {row:?}, and both pages hold the switch"
+                );
+            }
             for row in NOT_ON_A_MAC {
                 assert!(
                     !mac.contains(&row),
@@ -29153,7 +29154,7 @@ mod tests {
                 "{layout:?}: a Windows keyboard has no Option key"
             );
             // Everything else is on both pages, in the same order, which is what
-            // says the filter took the four rows and nothing else.
+            // says the filter took the three rows and nothing else.
             let expected: Vec<SettingsRow> = windows
                 .iter()
                 .copied()
@@ -29166,7 +29167,7 @@ mod tests {
             sorted_expected.sort_by_key(|row| format!("{row:?}"));
             assert_eq!(
                 sorted_mac, sorted_expected,
-                "{layout:?}: the two pages differ by more than the four rows \
+                "{layout:?}: the two pages differ by more than the three rows \
                  that declare a facility"
             );
         }
@@ -29839,7 +29840,7 @@ mod tests {
                 // What a second start of Folio opens, since 2026-09-11 (§7.59).
                 SettingsRow::LaunchOpens,
                 // What closing its last window does, since 0.4.10 plan row 87 (part
-                // 87d): directly under the row above, Windows only until part 87c.
+                // 87d): directly under the row above, on Windows and macOS (part 87c).
                 SettingsRow::CloseKeepsRunning,
                 // Whether Folio starts at sign-in, since 0.4.10 plan row 22a:
                 // directly above Explorer's row, Windows only until row 22b.
@@ -29920,7 +29921,7 @@ mod tests {
                 // What a second start of Folio opens, since 2026-09-11 (§7.59).
                 SettingsRow::LaunchOpens,
                 // What closing its last window does, since 0.4.10 plan row 87 (part
-                // 87d): directly under the row above, Windows only until part 87c.
+                // 87d): directly under the row above, on Windows and macOS (part 87c).
                 SettingsRow::CloseKeepsRunning,
                 // Whether Folio starts at sign-in, since 0.4.10 plan row 22a:
                 // directly above Explorer's row, Windows only until row 22b.

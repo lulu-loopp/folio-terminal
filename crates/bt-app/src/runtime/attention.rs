@@ -846,13 +846,15 @@ impl<B: Backend> Runtime<'_, B> {
     ///
     /// **Here, beside [`Self::raise_attention`]**: this module is the one writer of the desk
     /// (`App::notifications`); the put-away (`Runtime::put_the_window_away`) asks.
-    pub(super) fn tell_the_first_put_away(&mut self) {
+    ///
+    /// `platform` is the close's (`FolioApp::platform`, part 87c's R1), not the machine's.
+    pub(super) fn tell_the_first_put_away(&mut self, platform: bt_platform::HostPlatform) {
         if self.app.tray.icon_was_refused() {
             return;
         }
         let settings = self.app.settings_store.loaded();
         if !notify::first_hide_toast_owed(
-            bt_platform::host_platform(),
+            platform,
             settings.first_hide_toast,
             settings.terminal_notifications,
         ) {

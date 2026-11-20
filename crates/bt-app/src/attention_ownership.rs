@@ -91,11 +91,14 @@ pub(crate) enum Outcome {
 /// to; elsewhere the path it was started by (a macOS bundle is found from its own executable's
 /// path). The press, the start-time repair and the rows all mean one program, and `None` only when
 /// the system would not say which file this process runs.
+///
+/// **Where the copy stands now** (0.4.10 plan row 87, part 87c, R9 of 2026-11-20;
+/// `bt_platform::running_image_now`): a macOS bundle moved while it runs is named where it was
+/// moved to, so the carry pass's round at the way back from a put-away run writes the agents'
+/// hooks, and the sign-in entry, for the copy that is there.
 #[must_use]
 pub(crate) fn this_copy() -> Option<PathBuf> {
-    bt_platform::running_image()
-        .ok()
-        .map(|image| image.path.clone())
+    bt_platform::running_image_now().ok()
 }
 
 /// The single gate for writing per-copy marks; no PATH-relative fallback.
@@ -759,6 +762,32 @@ mod tests {
     use super::*;
     use bt_source::{Index, ItemQuery, Needle, Pattern, Search, View};
     use std::fs;
+
+    /// RED (0.4.10 plan row 87, part 87c; the judgement's point 2, R9 of 2026-11-20) — **the
+    /// carry pass names the copy where it stands now**: every writer of an agent's file asks
+    /// `this_copy` at its round, and `this_copy` asks `bt_platform::running_image_now`, never the
+    /// start's kept answer, so a macOS bundle moved while it runs is written where it went (the
+    /// move itself is `bt-platform`'s macOS test `the_image_path_follows_a_rename`). On this host
+    /// it names this test executable.
+    ///
+    /// PLANT 87c-P60: answer `bt_platform::running_image()`'s path from `this_copy` — the hooks
+    /// round names the path the bundle had at the start.
+    #[test]
+    fn the_hooks_round_names_the_copy_where_it_stands_now() {
+        let body = crate::test_support::squeezed(crate::test_support::item_body(
+            &ItemQuery::function("this_copy").in_module("crate::attention_ownership"),
+        ));
+        assert!(
+            body.contains("bt_platform::running_image_now()") && !body.contains("running_image()"),
+            "{body}"
+        );
+        let exe = std::env::current_exe().expect("this test executable");
+        assert_eq!(
+            this_copy().as_deref().and_then(Path::file_name),
+            exe.file_name(),
+            "the copy named is this executable"
+        );
+    }
 
     /// A drive that arrives while it is being asked about: its program reads missing until the
     /// volume has been asked for, and a file after (review N2).

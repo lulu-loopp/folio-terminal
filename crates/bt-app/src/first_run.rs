@@ -390,12 +390,13 @@ pub enum Capability {
     /// Keeping the run when its last ordinary window is closed: the window put away, its shells
     /// and agents running (0.4.10 plan row 87).
     ///
-    /// **Windows only until its macOS part** (87c): on Windows the close puts the window away and
-    /// the notification area holds the icon that brings it back (parts 87a and 87b); a Mac's
-    /// close is not built yet, and a row whose switch reached nothing would be a lie on the
-    /// General page (ruled 2026-11-14, item 13). 87c gives this arm macOS. Another Unix has no
-    /// build. **No first-run row**: the switch ships on, and the card asks about writes into other
-    /// people's files.
+    /// **Wherever a put-away run has a way back** (`HostPlatform::a_put_away_run_has_a_way_back`,
+    /// part 87c, 2026-11-20): on Windows the close puts the window away and the notification area
+    /// holds the icon that brings it back (parts 87a and 87b); on macOS the same close puts it away
+    /// and the Dock icon's click brings it back (part 87c). The same fact the close's rule reads,
+    /// so the row is offered exactly where its switch reaches something (ruled 2026-11-14, item
+    /// 13). Another Unix has no build and no way back. **No first-run row**: the switch ships on,
+    /// and the card asks about writes into other people's files.
     KeepRunningWhenClosed,
 }
 
@@ -415,8 +416,8 @@ impl Capability {
             Self::ExplorerMenu
             | Self::AgentDiscovery
             | Self::WindowBackdrop
-            | Self::SignInStart
-            | Self::KeepRunningWhenClosed => matches!(platform, HostPlatform::Windows),
+            | Self::SignInStart => matches!(platform, HostPlatform::Windows),
+            Self::KeepRunningWhenClosed => platform.a_put_away_run_has_a_way_back(),
             Self::AgentResume => matches!(platform, HostPlatform::Windows | HostPlatform::MacOs),
             Self::OptionKey => matches!(platform, HostPlatform::MacOs),
         }

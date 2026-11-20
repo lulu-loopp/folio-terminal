@@ -6369,8 +6369,8 @@ impl Text {
             // **One sentence on each platform** (R2 of T-TRAY-87D): what the switch keeps, said
             // as the place the run goes. The Windows column names the notification area, where
             // the icon is; the Mac's has no such place (the Dock icon stays where it is), so it
-            // names what keeps running instead. The macOS column is shown when part 87c lands; the
-            // row is not on a Mac's page until then (`Capability::KeepRunningWhenClosed`).
+            // names what keeps running instead. The macOS column is shown since part 87c
+            // (2026-11-20, `Capability::KeepRunningWhenClosed`).
             // zh: pending T-TRAY-87D
             Self::DescCloseKeepsRunning => pick_platform(
                 lang,
