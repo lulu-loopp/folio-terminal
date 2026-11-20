@@ -525,7 +525,9 @@ fn a_put_away_run_that_works_holds_the_activity_until_the_window_is_back() {
 ///
 /// PLANT 87c-P58: answer `a_window_is_put_away` alone from
 /// `put_away_activity::the_activity_is_wanted` — the idle put-away run holds one.
-/// PLANT 87c-P55 (the shown half): drop the put-away term — the shown run that works holds one.
+/// The shown half stands on the fold's own reading as well: it reads no work while nothing is put
+/// away, so 87c-P55 (the term dropped from `the_activity_is_wanted` alone) is red in that
+/// function's own test and leaves this one green.
 #[test]
 fn an_idle_put_away_run_and_a_shown_run_hold_no_activity() {
     let mut idle = PutAwayRun::put_away_on_a_mac("mac-activity-idle");
