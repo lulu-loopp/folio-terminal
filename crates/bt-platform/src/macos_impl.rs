@@ -1092,6 +1092,22 @@ pub fn set_window_topmost(window: NativeWindow, topmost: bool) -> Result<(), Str
     Ok(())
 }
 
+/// **Whether AppKit's own lists of this application's windows name this one** —
+/// `NSWindow.excludedFromWindowsMenu`, negated (0.4.10 plan row 87, part 87c, R5).
+///
+/// AppKit lists an application's windows in its Window menu (the menu `bt-app` hands it with
+/// `setWindowsMenu:`) and at the top of the Dock tile's menu, and choosing a row there orders that
+/// window in and makes it key, on AppKit's own stack. For a window `bt-app` has put away
+/// (`orderOut:`, its shells still running) that would be the window on the glass behind the
+/// application's back, still marked away, so nothing is published on it again. `listed = false`
+/// takes it off both lists while it is away; the way back lists it again. The property is the
+/// window's and AppKit reads it each time it builds either list.
+pub fn set_window_listed(window: NativeWindow, listed: bool) -> Result<(), String> {
+    let (_, ns_window) = window_for(window, "listing a window in the Window menu")?;
+    ns_window.setExcludedFromWindowsMenu(!listed);
+    Ok(())
+}
+
 /// **Which of the two canvases this window is wearing** — `NSWindow.appearance`.
 ///
 /// The twin of `DWMWA_USE_IMMERSIVE_DARK_MODE`, and the same statement: the

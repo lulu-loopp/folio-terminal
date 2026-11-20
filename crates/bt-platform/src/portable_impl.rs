@@ -1231,8 +1231,12 @@ pub fn is_window_cloaked(window: NativeWindow) -> bool {
 /// left hidden, for a put-away window that is maximised or minimised (0.4.10 plan row 87, part 87a,
 /// re-review P1-4).
 ///
-/// Refused: only a put-away window is written through it, and a window is put away on Windows
-/// alone until 0.4.10 plan row 87, part 87c (T-TRAY-87C-MACOS) gives macOS its own road.
+/// **Refused off Windows** (0.4.10 plan row 87, part 87c; the coordinator's R13 of 2026-11-20).
+/// On macOS a window is put away too, and no AppKit call writes a zoomed window's unzoomed frame
+/// while it stays zoomed and ordered out; AppKit itself places a titled window on a present screen
+/// when it orders it in. So the door back's judgement of a zoomed or minimised put-away window is
+/// not written here, and `bt-app` says the refusal through the window's note line, as it says
+/// every refusal of a platform door.
 pub fn set_hidden_window_normal_rect(
     window: NativeWindow,
     rect: crate::WindowRect,
@@ -1278,6 +1282,14 @@ pub fn request_window_close(
 pub fn set_window_topmost(window: NativeWindow, topmost: bool) -> Result<(), String> {
     let _ = (window, topmost);
     Err(not_here("keeping a window above the others"))
+}
+
+/// List this window in the system's lists of the application's windows.
+/// `NSWindow.excludedFromWindowsMenu`; 0.4.10 plan row 87, part 87c.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn set_window_listed(window: NativeWindow, listed: bool) -> Result<(), String> {
+    let _ = (window, listed);
+    Err(not_here("listing a window in the Window menu"))
 }
 
 /// Ask the system to draw this window's chrome dark. `NSAppearance`; M1-3.

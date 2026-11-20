@@ -1640,6 +1640,17 @@ mod tests {
         assert!(!HostPlatform::MacOs.has_a_notification_area());
         assert!(!HostPlatform::OtherUnix.has_a_notification_area());
     }
+
+    /// RED (0.4.10 plan row 87, part 87c, R2) — **a put-away run has a way back on Windows and on
+    /// macOS, and on no other platform**: the icon here, the Dock there; a Linux desktop has
+    /// neither written.
+    #[test]
+    fn a_put_away_run_has_a_way_back_on_windows_and_macos() {
+        use crate::HostPlatform;
+        assert!(HostPlatform::Windows.a_put_away_run_has_a_way_back());
+        assert!(HostPlatform::MacOs.a_put_away_run_has_a_way_back());
+        assert!(!HostPlatform::OtherUnix.a_put_away_run_has_a_way_back());
+    }
 }
 
 /// The numbers written down above, held against the ones Windows publishes.

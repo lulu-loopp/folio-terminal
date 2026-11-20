@@ -3218,6 +3218,19 @@ impl HostPlatform {
     pub const fn has_a_notification_area(self) -> bool {
         matches!(self, Self::Windows)
     }
+
+    /// **Whether a run whose last window is put away has a way back here** (0.4.10 plan row 87,
+    /// part 87c; the coordinator's R2 of 2026-11-20): Windows does, the run's icon in the
+    /// notification area ([`Self::has_a_notification_area`]); macOS does, the application's Dock
+    /// icon, which stands whether or not the application has a window, and whose click AppKit
+    /// answers as a reopen. A Linux desktop's tray is not written, so a run put away there would be
+    /// a process with no window and no road to it: `bt-app`'s close keeps the run only where this
+    /// answers yes, and its Settings row is offered only there. A value, for [`host_platform`]'s
+    /// reason.
+    #[must_use]
+    pub const fn a_put_away_run_has_a_way_back(self) -> bool {
+        matches!(self, Self::Windows | Self::MacOs)
+    }
 }
 
 /// **The variable that names this user's home directory on `platform`.**
@@ -3392,6 +3405,50 @@ pub(crate) fn image_of(started_as: std::path::PathBuf) -> Result<RunningImage, S
         path: started_as.clone(),
         started_as,
     })
+}
+
+/// **Where this process's executable stands now** (0.4.10 plan row 87, part 87c; the coordinator's
+/// R9 of 2026-11-20): the path another program's file should name to start this copy, asked each
+/// time it is wanted rather than kept from the start.
+///
+/// **On macOS a bundle moves under the process running it**: Finder moves an application while it
+/// runs, and the executable inside it keeps running from its new place. [`running_image`] is the
+/// start's answer, kept for the process's life, so a round of the carry pass after the move — the
+/// agents' hooks, the sign-in entry — would write the path the bundle had at the start, a path
+/// nothing stands at any more. Here the kernel is asked (`proc_pidpath` of this process, which it
+/// answers from the executable's vnode as it is named now), and the answer is that path.
+///
+/// **Elsewhere, [`running_image`]'s path**: on Windows the start's resolution of the image
+/// (`GetFinalPathNameByHandleW`); a Windows copy renamed while it runs keeps that answer until its
+/// next start, as it did before 87c.
+pub fn running_image_now() -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let size = u32::try_from(buffer.len())
+            .map_err(|_| "the image path's buffer is too large to name".to_owned())?;
+        // SAFETY: the buffer is `size` bytes and lives across the call; `getpid` is this process.
+        let written =
+            unsafe { libc::proc_pidpath(libc::getpid(), buffer.as_mut_ptr().cast(), size) };
+        let written = usize::try_from(written)
+            .ok()
+            .filter(|written| *written > 0)
+            .ok_or_else(|| {
+                format!(
+                    "proc_pidpath refused this process's image ({})",
+                    std::io::Error::last_os_error()
+                )
+            })?;
+        buffer.truncate(written);
+        Ok(std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            buffer,
+        )))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        running_image().map(|image| image.path.clone())
+    }
 }
 #[must_use]
 pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
@@ -6242,6 +6299,85 @@ mod running_image_tests {
             )
         );
         assert_eq!(moved.folder(), Some(Path::new(r"D:\程序")));
+    }
+}
+
+/// **A macOS image is named where it stands now** (0.4.10 plan row 87, part 87c, R9 of
+/// 2026-11-20; [`running_image_now`]): a copy of this test executable, started from a folder of its
+/// own, renames that folder while it runs and asks where it is.
+#[cfg(all(test, target_os = "macos"))]
+mod running_image_now_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const MOVER_MODE: &str = "RUNNING_IMAGE_NOW_MOVER";
+
+    /// The helper: renames the folder it was started from to the one `MOVER_MODE` names, then says
+    /// where it is now and where it was started.
+    #[test]
+    fn mover_says_where_it_stands() {
+        let Ok(moved_to) = std::env::var(MOVER_MODE) else {
+            return;
+        };
+        let started = running_image().expect("the helper's image").path.clone();
+        let folder = started.parent().expect("its folder");
+        std::fs::rename(folder, &moved_to).expect("the folder is renamed under the helper");
+        println!(
+            "now {}",
+            running_image_now().expect("the image now").display()
+        );
+        println!("started {}", started.display());
+    }
+
+    /// RED (PLANT 87c-P60's platform half: answer [`running_image`]'s path from
+    /// [`running_image_now`] on macOS) — **a copy renamed while it runs answers its new path**, and
+    /// the start's answer is still the old one.
+    #[test]
+    fn the_image_path_follows_a_rename() {
+        let exe = std::env::current_exe().expect("this test executable");
+        let root = exe
+            .parent()
+            .expect("its folder")
+            .join(bt_testpath::unique_name("folio-image-now"));
+        let before = root.join("before");
+        let after = root.join("after");
+        std::fs::create_dir_all(&before).expect("the first folder");
+        let copy = before.join(exe.file_name().expect("a file name"));
+        std::fs::copy(&exe, &copy).expect("the test executable is copied");
+        let output = quiet_command(&copy)
+            .args([
+                "--exact",
+                "running_image_now_tests::mover_says_where_it_stands",
+                "--nocapture",
+            ])
+            .env(MOVER_MODE, &after)
+            .output()
+            .expect("start the copy");
+        let _ = std::fs::remove_dir_all(&root);
+        let said = String::from_utf8_lossy(&output.stdout);
+        let line = |word: &str| {
+            said.lines()
+                .find_map(|line| line.strip_prefix(word))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("the helper says `{word}`: {said}"))
+        };
+        let name = exe.file_name().expect("a file name");
+        let now = line("now ");
+        assert_eq!(
+            now.file_name(),
+            Some(name),
+            "the image is still this executable: {said}"
+        );
+        assert!(
+            now.parent().is_some_and(|folder| folder.ends_with("after")),
+            "the image is named in the folder it was moved to: {said}"
+        );
+        assert!(
+            line("started ")
+                .parent()
+                .is_some_and(|folder| folder.ends_with("before")),
+            "and the start's answer is the start's: {said}"
+        );
     }
 }
 /// **A probe's owner reads life, not the clock alone** (G-SWEEP-048, T-PROBE-COLD-CACHE): the
@@ -9253,6 +9389,10 @@ pub use box_icon::ProgramIcons;
 /// asks for. Constructible and showing nothing where there is no notification area
 /// ([`HostPlatform::has_a_notification_area`]).
 pub mod tray;
+
+/// **An activity that keeps macOS from napping this process** (0.4.10 plan row 87, part 87c): held
+/// by `bt-app` while a put-away run works; a token that holds nothing elsewhere.
+pub mod process_activity;
 
 /// **The shell's two icon sides at a display's scale** (0.4.10 plan rows 71 and 72): the small
 /// icon (`SM_CXSMICON`, 16 at 96 DPI) and the big one (`SM_CXICON`, 32 at 96 DPI), each
@@ -14866,6 +15006,16 @@ mod windows_impl {
             )
         }
         .map_err(|error| format!("SetWindowPos(topmost={topmost}) failed: {error}"))
+    }
+
+    /// **Whether the system's own lists of this application's windows name this one** (0.4.10
+    /// plan row 87, part 87c, R5): nothing to do on Windows. The one list Windows keeps of a
+    /// program's windows is the taskbar's, and a hidden window has no button there; Alt+Tab
+    /// skips it too. The macOS arm takes a put-away window out of the Window menu and the Dock
+    /// tile's window list, whose rows would order it in behind the door's back.
+    pub fn set_window_listed(window: NativeWindow, listed: bool) -> Result<(), String> {
+        let _ = (window, listed);
+        Ok(())
     }
 
     /// Tell DWM which of the two canvases this window is wearing —
@@ -20592,13 +20742,13 @@ pub use windows_impl::{
     pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
     register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
     set_current_thread_priority, set_hidden_window_normal_rect, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost, silence_std_streams,
-    stand_window_at, standalone_alert, std_error_is_console, stop_flashing_window,
-    system_backdrop_available, system_high_contrast, system_uses_light_apps, take_keyboard_focus,
-    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
-    write_to_console,
+    set_window_dark_mode, set_window_listed, set_window_outer_rect, set_window_topmost,
+    silence_std_streams, stand_window_at, standalone_alert, std_error_is_console,
+    stop_flashing_window, system_backdrop_available, system_high_contrast, system_uses_light_apps,
+    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_is_dead,
+    virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
+    work_area_at, write_std_error, write_to_console,
 };
 
 /// **Say one thing in the system's box, over no window** — the ownerless door every platform
@@ -20702,9 +20852,9 @@ pub use portable_impl::{
     SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
     get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
     monitor_id_at, os_ui_language, pointer_position, pointer_position_in_window,
-    request_window_close, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    stand_window_at, system_uses_light_apps, take_keyboard_focus, top_level_window_at,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
+    request_window_close, set_window_dark_mode, set_window_listed, set_window_outer_rect,
+    set_window_topmost, stand_window_at, system_uses_light_apps, take_keyboard_focus,
+    top_level_window_at, virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
 };
 
 /// **The window and the screen, over AppKit** (M1-3).
@@ -20726,9 +20876,9 @@ pub use macos_impl::{
     SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
     get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
     monitor_id_at, os_ui_language, pointer_position, pointer_position_in_window,
-    request_window_close, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    stand_window_at, system_uses_light_apps, take_keyboard_focus, top_level_window_at,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
+    request_window_close, set_window_dark_mode, set_window_listed, set_window_outer_rect,
+    set_window_topmost, stand_window_at, system_uses_light_apps, take_keyboard_focus,
+    top_level_window_at, virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
 };
 
 /// **The two doors that own the surface's view, on macOS** (M1-4).
@@ -22421,7 +22571,7 @@ mod macos_window_backend_tests {
 
     /// **The window and screen group**, named once for both pins — the doors
     /// M1-3 moved, in the order the re-export lists spell them.
-    const DOORS: [&str; 23] = [
+    const DOORS: [&str; 24] = [
         "client_area_animation_enabled",
         "dpi_at",
         "get_dpi_for_window",
@@ -22435,6 +22585,7 @@ mod macos_window_backend_tests {
         "pointer_position_in_window",
         "request_window_close",
         "set_window_dark_mode",
+        "set_window_listed",
         "set_window_outer_rect",
         "set_window_topmost",
         "stand_window_at",
