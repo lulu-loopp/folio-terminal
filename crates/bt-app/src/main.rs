@@ -9710,15 +9710,6 @@ struct App<B: Backend = Native> {
     /// So the chord records a debt and [`FolioApp`] spends it at the door, where
     /// the windows all are.
     quit_requested: bool,
-    /// **Every put-away window owed its way back** (0.4.10 plan row 87, part 87d): set when the
-    /// switch `Keep running when closed` is turned off — by its row, an import or a hand edit of
-    /// `settings.json` — so that off is the old behaviour exactly, with no window left hidden.
-    ///
-    /// [`Self::quit_requested`]'s shape for its reason: the switch is answered inside a
-    /// `Runtime`, which is one window by construction, and the door back
-    /// (`FolioApp::bring_the_window_back`) walks every window. Recorded by
-    /// [`Self::ask_for_the_put_away_windows`] and spent at the loop's door.
-    bring_back_requested: bool,
     /// **A refusal the first put-away's notification met, owed its card** (0.4.10 plan row 87,
     /// part 87d, review P1-1): the desk latches its first refusal and answers `Ok` ever after, so
     /// the one "notifications refused" card of a session (DESIGN §7.1.5o ④, 2026-08-25) is
@@ -10054,7 +10045,6 @@ impl<B: Backend> App<B> {
             capture_endings: Vec::new(),
             pending_handover: None,
             quit_requested: false,
-            bring_back_requested: false,
             toast_refusal_unsaid: None,
             quit: None,
             windows_open: Vec::new(),
@@ -38156,13 +38146,6 @@ impl<B: Backend> App<B> {
         self.quit_requested = true;
     }
 
-    /// **Ask for every put-away window back** (0.4.10 plan row 87, part 87d): the debt the loop
-    /// spends at [`FolioApp::settle_bring_back_request`], for [`Self::ask_to_quit`]'s reason —
-    /// the door back walks every window, and the switch is turned off inside one `Runtime`.
-    fn ask_for_the_put_away_windows(&mut self) {
-        self.bring_back_requested = true;
-    }
-
     /// **Leave without this change, on a cancelled quit's card** (T-QUIT-DOCUMENTS;
     /// revision (d)2): the quit is asked for again through the one door every quit
     /// goes through, carrying the choice — the documents the card named are dropped
@@ -48817,19 +48800,6 @@ impl<B: Backend> FolioApp<B> {
         Ok(())
     }
 
-    /// **Bring back every put-away window when the switch was turned off** (0.4.10 plan row 87,
-    /// part 87d): spends [`App::bring_back_requested`] through the one door back. Nothing happens
-    /// when no window is put away, which is the common case of a press on `Off`.
-    fn settle_bring_back_request(&mut self) -> Result<()> {
-        let Some(app) = self.app.as_mut() else {
-            return Ok(());
-        };
-        if !std::mem::take(&mut app.bring_back_requested) {
-            return Ok(());
-        }
-        self.bring_the_window_back().map(drop)
-    }
-
     /// **Write down every window this process has open** (B9, user ruling
     /// 2026-08-25), for the menu that names them.
     ///
@@ -52291,7 +52261,6 @@ impl<B: Backend> FolioApp<B> {
             .and_then(|()| self.settle_window_ring())
             .and_then(|()| self.settle_update_card())
             .and_then(|()| self.settle_application_change())
-            .and_then(|()| self.settle_bring_back_request())
             .and_then(|()| self.settle_restore_answer())
             // **F2 — before the window door and after everything that could have
             // closed a window.** A release that asked for a window of its own
@@ -52863,7 +52832,6 @@ impl<B: Backend> FolioApp<B> {
             let result = result.and_then(|()| {
                 hang_watch::during(hang_watch::Station::EventSettleApplication, || {
                     self.settle_application_change()
-                        .and_then(|()| self.settle_bring_back_request())
                 })
             });
             // The prompt's one answer, if this event was it — before the door below,

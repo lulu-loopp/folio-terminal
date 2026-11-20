@@ -13,7 +13,6 @@ use crate::settings::{SettingsRow, SettingsTarget};
 use crate::settings_bundle::SettingChange;
 use crate::test_support::StoragePassRig;
 use bt_persist::FirstHideToastV1;
-use winit::event::WindowEvent;
 
 impl PutAwayRun {
     /// [`PutAwayRun::open`] with the switch on, and the receipt and the `Notifications` row as
@@ -61,12 +60,6 @@ impl PutAwayRun {
         self.application
             .folio
             .about_to_wait_inner(&self.application.event_loop);
-    }
-
-    /// One event the loop delivers to a window, hidden or not, so the event's door runs.
-    fn an_event(&mut self) -> Vec<WindowEffect> {
-        self.application.window_event(WindowEvent::Focused(false));
-        self.application.event_loop.ledger.take()
     }
 }
 
@@ -279,10 +272,12 @@ fn the_rows_press_is_the_switch_the_next_close_reads() {
 /// RED (T20; R8) — **turning the switch off while the window is put away brings it back**, by
 /// the row, an import and a hand edit alike (the last two enter through the one door,
 /// `Runtime::apply_imported_setting`): off is the old behaviour exactly, and a window left hidden
-/// with its icon gone would be reachable only by a second launch. Spent at the event's door.
+/// with its icon gone would be reachable only by a second launch. Each road only stores the key;
+/// the loop's next turn, where the icon looks at the switch (`FolioApp::settle_tray`), brings the
+/// window back once (one road, ruled 2026-11-19).
 ///
-/// PLANT 87d-P36: drop the ask (`App::ask_for_the_put_away_windows`) from
-/// `Runtime::apply_close_keeps_running` — the window stays put away with the switch off.
+/// PLANT 87b-P18 (87b's, the one road's site): `settle_tray` switched off takes the icon down
+/// without bringing the window back — the window stays put away with the switch off.
 #[test]
 fn turning_the_switch_off_brings_a_put_away_window_back() {
     type Road = fn(&mut PutAwayRun);
@@ -308,10 +303,20 @@ fn turning_the_switch_off_brings_a_put_away_window_back() {
         );
         off(&mut run);
         assert!(!run.stored_switch(), "{road}: Off is stored");
-        let effects = run.an_event();
         assert!(
-            effects.contains(&WindowEffect::Visible(true)),
-            "{road}: the window is back on the glass: {effects:?}"
+            run.window().put_away,
+            "{road}: storing Off brings nothing back by itself"
+        );
+        let _ = run.application.event_loop.ledger.take();
+        run.turn_with_no_window_event();
+        let effects = run.application.event_loop.ledger.take();
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| **effect == WindowEffect::Visible(true))
+                .count(),
+            1,
+            "{road}: the window is back on the glass, once: {effects:?}"
         );
         assert!(!run.window().put_away, "{road}: and no longer put away");
         assert!(run.sentinel_stands(), "{road}: the run goes on");
@@ -324,7 +329,9 @@ fn turning_the_switch_off_brings_a_put_away_window_back() {
 fn turning_the_switch_on_moves_no_window() {
     let mut run = PutAwayRun::open("on-moves-nothing", false);
     run.press_keep_running(0);
-    let effects = run.an_event();
+    let _ = run.application.event_loop.ledger.take();
+    run.turn_with_no_window_event();
+    let effects = run.application.event_loop.ledger.take();
     assert!(
         !effects
             .iter()
@@ -337,10 +344,11 @@ fn turning_the_switch_on_moves_no_window() {
 /// RED (T20c; R8, review P2-1) — **a hand edit of `settings.json` to Off brings a put-away window
 /// back on the turn alone**: the edit arrives with the storage worker's answer
 /// (`AppEvent::DocumentsAnswered`), not with a window event, and a put-away run's sole window is
-/// sent none, so the turn's settle chain is the only door that spends the ask.
+/// sent none, so the turn — where the icon looks at the switch (`FolioApp::settle_tray`) — is the
+/// door that brings it back.
 ///
-/// PLANT 87d-P39: drop `settle_bring_back_request` from `FolioApp::about_to_wait_inner`'s chain —
-/// the window stays put away with the switch off.
+/// PLANT 87b-P18 (87b's, the one road's site): `settle_tray` switched off takes the icon down
+/// without bringing the window back — the window stays put away with the switch off.
 #[test]
 fn a_hand_edit_to_off_brings_a_put_away_window_back_on_the_turn_alone() {
     let mut run = PutAwayRun::open("hand-edit-off", true);
@@ -359,21 +367,18 @@ fn a_hand_edit_to_off_brings_a_put_away_window_back_on_the_turn_alone() {
     });
     assert!(
         run.window().put_away,
-        "the answer itself brings nothing back: the turn's door spends the ask"
+        "the answer itself brings nothing back: the turn does"
     );
     let _ = run.application.event_loop.ledger.take();
     run.turn_with_no_window_event();
     let effects = run.application.event_loop.ledger.take();
-    // The ask's door (`FolioApp::settle_bring_back_request`) and the icon's look at the switch
-    // (`FolioApp::settle_tray`, 87b) both run on this turn; both go through the one door back,
-    // and the second finds nothing put away.
     assert_eq!(
         effects
             .iter()
             .filter(|effect| **effect == WindowEffect::Visible(true))
             .count(),
         1,
-        "back on the glass once, though both doors look on this turn: {effects:?}"
+        "back on the glass, once: {effects:?}"
     );
     assert!(!run.window().put_away, "and no longer put away");
     assert!(run.sentinel_stands(), "the run goes on");
