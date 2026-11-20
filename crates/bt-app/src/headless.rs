@@ -1978,6 +1978,9 @@ impl HeadlessApplication {
     /// **One turn of the loop, as `about_to_wait` takes it** (0.4.10 plan row 87, part 87d,
     /// review P2-1): the application's settles and every window's clocks, with no window event —
     /// the only door a put-away run's sole window gets, since a hidden window is sent none.
+    /// Windows only, as its one caller is (the put-away's tests, `cfg(all(test, windows))` until
+    /// part 87c).
+    #[cfg(windows)]
     pub(crate) fn turn(&mut self) {
         self.folio.about_to_wait_inner(&self.event_loop);
     }
