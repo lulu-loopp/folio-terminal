@@ -839,9 +839,17 @@ impl<B: Backend> Runtime<'_, B> {
     /// have reached the desktop (review P1-1). Its click is [`notify::BRING_BACK_LAUNCH`], which
     /// the door back answers.
     ///
+    /// **Not while the run's icon was refused** (review P2-3, at the merge of 87b): the body names
+    /// the icon as the way back, and a run whose host for it could not be made
+    /// (`tray_fold::TrayStand::icon_was_refused`) has none to point at. The receipt then stays
+    /// owed and nothing is said, so the first put-away of a run whose icon stands says it.
+    ///
     /// **Here, beside [`Self::raise_attention`]**: this module is the one writer of the desk
     /// (`App::notifications`); the put-away (`Runtime::put_the_window_away`) asks.
     pub(super) fn tell_the_first_put_away(&mut self) {
+        if self.app.tray.icon_was_refused() {
+            return;
+        }
         let settings = self.app.settings_store.loaded();
         if !notify::first_hide_toast_owed(
             bt_platform::host_platform(),

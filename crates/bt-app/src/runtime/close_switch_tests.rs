@@ -364,10 +364,42 @@ fn a_hand_edit_to_off_brings_a_put_away_window_back_on_the_turn_alone() {
     let _ = run.application.event_loop.ledger.take();
     run.turn_with_no_window_event();
     let effects = run.application.event_loop.ledger.take();
-    assert!(
-        effects.contains(&WindowEffect::Visible(true)),
-        "the window is back on the glass: {effects:?}"
+    // The ask's door (`FolioApp::settle_bring_back_request`) and the icon's look at the switch
+    // (`FolioApp::settle_tray`, 87b) both run on this turn; both go through the one door back,
+    // and the second finds nothing put away.
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| **effect == WindowEffect::Visible(true))
+            .count(),
+        1,
+        "back on the glass once, though both doors look on this turn: {effects:?}"
     );
     assert!(!run.window().put_away, "and no longer put away");
     assert!(run.sentinel_stands(), "the run goes on");
+}
+
+/// RED (T16f; review P2-3, at the merge of 87b) — **a run whose icon was refused says nothing at
+/// its first put-away and leaves the receipt owed**: the notification's body names the icon as the
+/// way back, and that run has none; a later run whose icon stands says it.
+///
+/// PLANT 87d-P40: drop the icon's term from `Runtime::tell_the_first_put_away` — the notification
+/// points at an icon that is not there and spends the receipt.
+#[test]
+fn a_run_whose_icon_was_refused_says_nothing_at_its_first_put_away_and_stays_owed() {
+    let mut run = PutAwayRun::open_with("told-no-icon", FirstHideToastV1::NotShown, true);
+    run.application.event_loop.tray.refused.set(true);
+    run.turn_the_tray().expect("the icon's look is answered");
+    assert!(
+        run.app().tray.icon_was_refused(),
+        "the fixture's icon was refused"
+    );
+    let _ = run.close();
+    assert!(run.window().put_away, "the fixture's window is put away");
+    assert!(run.toasts_told().is_empty(), "nothing reaches the desk");
+    assert_eq!(
+        run.first_hide_receipt(),
+        FirstHideToastV1::NotShown,
+        "and it is still owed"
+    );
 }
