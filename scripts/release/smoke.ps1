@@ -895,8 +895,10 @@ if (-not $folio.HasExited -and $window -ne [IntPtr]::Zero -and $outsideQuit -ne 
 $closed = $folio.WaitForExit(20000)
 
 # **And the icon left with the run** (row 87b, review N9): after the exit the shell answers for
-# no icon 1 of that host. A host destroyed under a live icon would leave the shell holding a dead
-# one, which it still answers for.
+# no icon 1 of that host. If the shell still holds an icon for a host destroyed under it, this
+# catches it; whether it answers for such a dead icon is not something a run has shown, so the
+# guard against an icon put up again after the exit is the clean VM's count of one
+# `BT_TRAY the icon is put up` per run (re-review N-R3).
 $iconGone = $true
 if ($closed -and $null -ne $icon) {
     $place = New-Object Smoke.Win32+RECT

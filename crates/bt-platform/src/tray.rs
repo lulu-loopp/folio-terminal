@@ -21,7 +21,10 @@
 //! * **the shell's callback** ([`TRAY_CALLBACK_MESSAGE`], version 4): decoded by the pure
 //!   [`tray_callback_for`]. A click or Enter parks [`TrayGesture::Show`] and wakes the loop; a
 //!   right click or the menu key posts the menu to the host itself ([`TRAY_LATER_MESSAGE`]), so
-//!   `TrackPopupMenu`'s nested pump never runs inside the dispatch the callback arrived in;
+//!   `TrackPopupMenu`'s nested pump never runs inside the dispatch the callback arrived in. An
+//!   icon the shell holds but whose version 4 it refused hears version 0's shape instead
+//!   ([`tray_callback_read`]): a button's release is the click, and the version is asked for
+//!   again on it;
 //! * **the posted menu**: drawn with the caller's labels; the row chosen is parked;
 //! * **`TaskbarCreated`**: the shell restarted and took the icon with it, so it is added again;
 //! * **a display or a setting changed** (`WM_DPICHANGED`, `WM_DISPLAYCHANGE`,
@@ -37,11 +40,12 @@
 //!
 //! # What is pure
 //!
-//! The decode ([`tray_callback_for`]), the menu's numbering ([`TrayGesture::menu_id`]), the tip's
-//! cut ([`tray_tip`]), the procedure's answer to each message ([`tray_host_answer`]), the order of
-//! the calls a tell makes of the shell ([`tray_next_shell_call`]), the icon handed when a badge
-//! cannot be drawn ([`tray_icon_to_hand`]) and the badge ([`badge_the_icon`]) are functions a test
-//! holds on any host: they are the parts that can be wrong without a taskbar.
+//! The decode ([`tray_callback_for`], and [`tray_callback_read`] over both shapes), the menu's
+//! numbering ([`TrayGesture::menu_id`]), the tip's cut ([`tray_tip`]), the procedure's answer
+//! to each message ([`tray_host_answer`]), the order of the calls a tell makes of the shell
+//! ([`tray_next_shell_call`]), the icon handed when a badge cannot be drawn
+//! ([`tray_icon_to_hand`]) and the badge ([`badge_the_icon`]) are functions a test holds on any
+//! host: they are the parts that can be wrong without a taskbar.
 //!
 //! # The panic road
 //!
@@ -151,6 +155,8 @@ pub enum TrayCallback {
     Show,
     /// A right click, or the menu key: the menu, at this point of the screen.
     Menu { x: i32, y: i32 },
+    /// A right click in version 0's shape, which names no point: the menu, at the cursor.
+    MenuAtTheCursor,
 }
 
 /// The id the host files its one icon under: an icon is keyed by its window and this number, and
@@ -186,6 +192,8 @@ pub const TRAY_TIP_CAPACITY: usize = 128;
 const WM_APP: u32 = 0x8000;
 const WM_CLOSE: u32 = 0x0010;
 const WM_CONTEXTMENU: u32 = 0x007b;
+const WM_LBUTTONUP: u32 = 0x0202;
+const WM_RBUTTONUP: u32 = 0x0205;
 const WM_SETTINGCHANGE: u32 = 0x001a;
 const WM_DISPLAYCHANGE: u32 = 0x007e;
 const WM_DPICHANGED: u32 = 0x02e0;
@@ -216,6 +224,53 @@ pub fn tray_callback_for(wparam: usize, lparam: isize, icon_id: u32) -> Option<T
             y: i32::from((wparam >> 16) as u16 as i16),
         }),
         _ => None,
+    }
+}
+
+/// **One callback read against the version the shell has taken** ([`tray_callback_read`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TrayCallbackRead {
+    /// The verb, if the callback is one.
+    pub callback: Option<TrayCallback>,
+    /// Whether to ask the shell for version 4 again: a click came in version 0's shape.
+    pub ask_for_the_version: bool,
+}
+
+/// **What one callback means, given whether the shell has taken version 4** (`versioned`, the
+/// host's [`TrayShellHold::versioned`]).
+///
+/// The version-4 shape is [`tray_callback_for`]'s. An icon whose version step the shell refused
+/// (it held the add, or the probe, and answered `NIM_SETVERSION` FALSE) is sent version 0's shape
+/// instead: `wParam` is the icon's id and `lParam` the mouse message, its high word 0. The two
+/// cannot be confused, since version 4 puts the id (never 0) in that high word. In version 0's
+/// shape a left button's release is the click ([`TrayCallback::Show`]) and a right button's
+/// release (or `WM_CONTEXTMENU`) the menu at the cursor; each of them also asks for the version
+/// again, so a person's click is what lets an idle icon hear version 4 again. A hover does not
+/// ask: its callback would cost a call into the shell per mouse move while the shell keeps
+/// refusing. A version-0 callback while the version holds is not one the shell sends, and is read
+/// as nothing.
+#[must_use]
+pub fn tray_callback_read(
+    wparam: usize,
+    lparam: isize,
+    icon_id: u32,
+    versioned: bool,
+) -> TrayCallbackRead {
+    let version_zero = !versioned && (lparam >> 16) & 0xffff == 0 && wparam == icon_id as usize;
+    if !version_zero {
+        return TrayCallbackRead {
+            callback: tray_callback_for(wparam, lparam, icon_id),
+            ask_for_the_version: false,
+        };
+    }
+    let callback = match (lparam & 0xffff) as u32 {
+        WM_LBUTTONUP => Some(TrayCallback::Show),
+        WM_RBUTTONUP | WM_CONTEXTMENU => Some(TrayCallback::MenuAtTheCursor),
+        _ => None,
+    };
+    TrayCallbackRead {
+        callback,
+        ask_for_the_version: callback.is_some(),
     }
 }
 
@@ -488,7 +543,7 @@ mod windows_tray {
     use super::{
         TRAY_CALLBACK_MESSAGE, TRAY_HOST_CLASS, TRAY_ICON_ID, TRAY_LATER_MENU, TRAY_LATER_MESSAGE,
         TRAY_LATER_REDRAW, TrayBadge, TrayCallback, TrayGesture, TrayHostAnswer, TrayIconHanded,
-        TrayLabels, TrayPicture, TrayShellCall, TrayShellHold, badge_the_icon, tray_callback_for,
+        TrayLabels, TrayPicture, TrayShellCall, TrayShellHold, badge_the_icon, tray_callback_read,
         tray_host_answer, tray_icon_to_hand, tray_next_shell_call, tray_tip,
     };
 
@@ -673,6 +728,20 @@ mod windows_tray {
             }
             hold.held
         }
+
+        /// **The version asked for again** on a click that came in version 0's shape
+        /// ([`tray_callback_read`]): the icon is held, only its version is owed. The answer is
+        /// the hold's, as a tell's `SetVersion` step is ([`tray_next_shell_call`]).
+        fn ask_for_the_version_again(&self, hwnd: HWND) {
+            let (hold, _) = tray_next_shell_call(
+                self.hold.get(),
+                Some((TrayShellCall::SetVersion, set_version_4(hwnd))),
+            );
+            self.hold.set(hold);
+            if hold.versioned {
+                self.version_refusal_said.set(false);
+            }
+        }
     }
 
     thread_local! {
@@ -681,8 +750,9 @@ mod windows_tray {
         static DRAWN_BEFORE: RefCell<Option<TrayDrawing>> = const { RefCell::new(None) };
     }
 
-    /// `NIM_SETVERSION` to version 4: the callback shape [`tray_callback_for`] decodes. It does
-    /// not outlive the icon, so it follows every add ([`tray_next_shell_call`]).
+    /// `NIM_SETVERSION` to version 4: the callback shape [`super::tray_callback_for`] decodes.
+    /// It does not outlive the icon, so it follows every add ([`tray_next_shell_call`]), and an
+    /// icon still without it asks again on a click ([`tray_callback_read`]).
     fn set_version_4(hwnd: HWND) -> bool {
         let mut data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -1016,14 +1086,29 @@ mod windows_tray {
         // SAFETY: the increment above made the count this consumes.
         let state = unsafe { Rc::from_raw(pointer) };
         match answer {
-            TrayHostAnswer::Callback => match tray_callback_for(wparam.0, lparam.0, TRAY_ICON_ID) {
-                Some(TrayCallback::Show) => state.park_the_gesture(TrayGesture::Show),
-                Some(TrayCallback::Menu { x, y }) => {
-                    MENU_AT.set(Some((x, y)));
-                    post_later(hwnd, TRAY_LATER_MENU);
+            TrayHostAnswer::Callback => {
+                let read = tray_callback_read(
+                    wparam.0,
+                    lparam.0,
+                    TRAY_ICON_ID,
+                    state.hold.get().versioned,
+                );
+                if read.ask_for_the_version {
+                    state.ask_for_the_version_again(hwnd);
                 }
-                None => {}
-            },
+                match read.callback {
+                    Some(TrayCallback::Show) => state.park_the_gesture(TrayGesture::Show),
+                    Some(TrayCallback::Menu { x, y }) => {
+                        MENU_AT.set(Some((x, y)));
+                        post_later(hwnd, TRAY_LATER_MENU);
+                    }
+                    Some(TrayCallback::MenuAtTheCursor) => {
+                        MENU_AT.set(None);
+                        post_later(hwnd, TRAY_LATER_MENU);
+                    }
+                    None => {}
+                }
+            }
             TrayHostAnswer::Menu => {
                 let at = MENU_AT.take();
                 // A copy, so no borrow of the labels is held across the menu's nested pump.
@@ -1155,9 +1240,10 @@ mod portable_tray {
 mod tests {
     use super::{
         TRAY_CALLBACK_MESSAGE, TRAY_HOST_CLASS, TRAY_ICON_ID, TRAY_LATER_MENU, TRAY_LATER_MESSAGE,
-        TRAY_LATER_REDRAW, TRAY_TIP_CAPACITY, TrayCallback, TrayGesture, TrayHostAnswer,
-        TrayIconHanded, TrayShellCall, TrayShellHold, badge_the_icon, tray_callback_for,
-        tray_host_answer, tray_icon_to_hand, tray_next_shell_call, tray_tip,
+        TRAY_LATER_REDRAW, TRAY_TIP_CAPACITY, TrayCallback, TrayCallbackRead, TrayGesture,
+        TrayHostAnswer, TrayIconHanded, TrayShellCall, TrayShellHold, badge_the_icon,
+        tray_callback_for, tray_callback_read, tray_host_answer, tray_icon_to_hand,
+        tray_next_shell_call, tray_tip,
     };
 
     /// The `lParam` of a version-4 callback: the event in the low word, the icon's id in the high.
@@ -1190,6 +1276,69 @@ mod tests {
             tray_callback_for(0, callback(0x0400, TRAY_ICON_ID + 1), TRAY_ICON_ID),
             None,
             "another icon's select is another icon's"
+        );
+    }
+
+    /// RED (T13; 87b-P30) — **an icon the shell holds without version 4 still answers a click**
+    /// (re-review P2-R1): version 0's shape is read only while the version is owed, a button's
+    /// release is the verb and asks for the version again, a hover asks nothing, and the
+    /// version-4 shape reads as it always did.
+    ///
+    /// PLANT 87b-P30: `tray_callback_read` reads only the version-4 shape — an unversioned icon's
+    /// click is lost.
+    #[test]
+    fn an_icon_without_version_4_hears_version_0s_click_and_asks_again() {
+        let v0 = |message: u32| message as isize;
+        let id = TRAY_ICON_ID as usize;
+        let read = |callback, ask_for_the_version| TrayCallbackRead {
+            callback,
+            ask_for_the_version,
+        };
+        assert_eq!(
+            tray_callback_read(id, v0(0x0202), TRAY_ICON_ID, false),
+            read(Some(TrayCallback::Show), true),
+            "a left button's release is the click, and the version is asked for again"
+        );
+        for message in [0x0205, 0x007b] {
+            assert_eq!(
+                tray_callback_read(id, v0(message), TRAY_ICON_ID, false),
+                read(Some(TrayCallback::MenuAtTheCursor), true),
+                "{message:#x}: the menu at the cursor, the version asked for again"
+            );
+        }
+        for message in [0x0200, 0x0201, 0x0204, 0x0203] {
+            assert_eq!(
+                tray_callback_read(id, v0(message), TRAY_ICON_ID, false),
+                read(None, false),
+                "{message:#x}: a hover or a press is no verb and asks nothing"
+            );
+        }
+        assert_eq!(
+            tray_callback_read(id + 1, v0(0x0202), TRAY_ICON_ID, false),
+            read(None, false),
+            "another icon's click is another icon's"
+        );
+        assert_eq!(
+            tray_callback_read(id, v0(0x0202), TRAY_ICON_ID, true),
+            read(None, false),
+            "while the version holds, version 0's shape is not the shell's"
+        );
+        for versioned in [false, true] {
+            assert_eq!(
+                tray_callback_read(0, callback(0x0400, TRAY_ICON_ID), TRAY_ICON_ID, versioned),
+                read(Some(TrayCallback::Show), false),
+                "the version-4 click reads as it always did (versioned {versioned})"
+            );
+        }
+        assert_eq!(
+            tray_callback_read(
+                (0x0040_usize << 16) | 0xfff6,
+                callback(0x007b, TRAY_ICON_ID),
+                TRAY_ICON_ID,
+                false
+            ),
+            read(Some(TrayCallback::Menu { x: -10, y: 64 }), false),
+            "the version-4 menu, at the point the shell names"
         );
     }
 
@@ -1498,7 +1647,8 @@ mod tests {
 mod win32_constant_tests {
     use windows::Win32::UI::Shell::{NIN_SELECT, NINF_KEY, NOTIFYICONDATAW};
     use windows::Win32::UI::WindowsAndMessaging::{
-        WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE,
+        WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP,
+        WM_RBUTTONUP, WM_SETTINGCHANGE,
     };
 
     /// RED (T13) — this module's copies of Win32's numbers are Win32's.
@@ -1507,6 +1657,8 @@ mod win32_constant_tests {
         assert_eq!(super::WM_APP, WM_APP);
         assert_eq!(super::WM_CLOSE, WM_CLOSE);
         assert_eq!(super::WM_CONTEXTMENU, WM_CONTEXTMENU);
+        assert_eq!(super::WM_LBUTTONUP, WM_LBUTTONUP);
+        assert_eq!(super::WM_RBUTTONUP, WM_RBUTTONUP);
         assert_eq!(super::WM_SETTINGCHANGE, WM_SETTINGCHANGE);
         assert_eq!(super::WM_DISPLAYCHANGE, WM_DISPLAYCHANGE);
         assert_eq!(super::WM_DPICHANGED, WM_DPICHANGED);

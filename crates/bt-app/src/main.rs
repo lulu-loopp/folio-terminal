@@ -57352,6 +57352,18 @@ mod floated_page_tests {
             asks < takes,
             "the hook leaves before it asks whether it is the panic that may:\n{hook}"
         );
+        // And the run's icon goes before the box goes up (0.4.10 plan row 87, part 87b;
+        // re-review N-R1): its menu would be live inside the box's pump.
+        let icon = hook
+            .find(concat!(
+                "bt_platform::tray::take_down_on_",
+                "the_panic_road();"
+            ))
+            .unwrap_or_else(|| panic!("a panic leaves the run's icon up:\n{hook}"));
+        assert!(
+            icon < asks,
+            "the run's icon is taken down only after the panic's box:\n{hook}"
+        );
         // The exit code is the one a caller already reads.
         //
         // **The reading this replaces was satisfied by its own argument**: it
@@ -58959,6 +58971,11 @@ fn install_panic_log_hook() {
 /// with a box of its own (review N2: a regression of the alert's table then raises no real box
 /// in a test).
 fn the_panic_hooks_end(path: &Path, crash_box: &mut impl CrashBox) {
+    // **The run's icon out of the notification area first** (0.4.10 plan row 87, part 87b;
+    // review P2-5, re-review N-R1): a panic that reaches this hook ends the process, whichever
+    // panic leaves, and the process ends without a `Drop`. Taken down before the box, so its menu
+    // is not live inside the box's pump, and no dead icon is left after.
+    bt_platform::tray::take_down_on_the_panic_road();
     if !announce_panic(path, crash_box) {
         return;
     }
@@ -58988,10 +59005,6 @@ fn leave_by_the_panic_road() -> ! {
     // because the next two statements end the process whether one window
     // was hidden or none.
     let _ = bt_platform::hide_every_window_of_this_process();
-    // **And the run's icon out of the notification area** (0.4.10 plan row 87, part 87b; review
-    // P2-5): the process ends below without a `Drop`, and the icon would stay up — its menu live
-    // inside the panic box's pump, and a dead icon after.
-    bt_platform::tray::take_down_on_the_panic_road();
     // **An update's exit guard runs on this road too** (U-34): a panic after
     // the hand-over leaves the applier or starts Folio again, as the
     // process's ordinary end does.
