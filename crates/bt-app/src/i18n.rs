@@ -2509,6 +2509,16 @@ text_entries! {
     OptionLaunchNewWindow,
     /// Its second item.
     OptionLaunchTabInLastWindow,
+    /// `General ▸ Keep running when closed` — the row (0.4.10 plan row 87, part 87d): the switch
+    /// over what closing the run's last ordinary window does (`close_keeps_running`).
+    RowCloseKeepsRunning,
+    /// Its sentence, one per platform: where the run goes when its last window is closed.
+    DescCloseKeepsRunning,
+    /// **The one notification the first put-away raises** (ruling R12): its title. Windows 11
+    /// parks a new notification-area icon out of sight, so the first close would look like a quit.
+    ToastStillRunningTitle,
+    /// Its body: where the window comes back from.
+    ToastStillRunningBody,
     /// **The glance card over a name that opens as a page** (user ruling
     /// 2026-08-23; `docs/DESIGN.md` §7.10 ⑥). The card cannot draw a page, so it
     /// says what the row does instead of what the card cannot do.
@@ -3279,6 +3289,13 @@ text_entries! {
     /// signing service (`update_job::SignatureNote::NotOurService`; 0.4.10 plan row 102 part 3,
     /// R5).
     UpdateCardMayWarn,
+    /// The notification-area icon's menu: its first row, the window back on the glass (0.4.10
+    /// plan row 87, part 87b).
+    TrayMenuShow,
+    /// The icon's menu: a new window.
+    TrayMenuNewWindow,
+    /// The icon's menu: Folio's quit.
+    TrayMenuQuit,
     /// Beside the determinate bar: received and total, in megabytes.
     UpdateCardProgress,
     /// After the reason, when the job stopped before anything installed moved.
@@ -6343,6 +6360,38 @@ impl Text {
                 "A tab in the window you used last",
                 "在上次使用的窗口中新建标签页",
             ),
+            // The coordinator's wording (2026-11-19, R2 of T-TRAY-87D): the label as the owner's row
+            // was ruled; the Chinese is owed (`CHINESE_PENDING`) and stands on the English.
+            // zh: pending T-TRAY-87D
+            Self::RowCloseKeepsRunning => {
+                pick(lang, "Keep running when closed", "Keep running when closed")
+            }
+            // **One sentence on each platform** (R2 of T-TRAY-87D): what the switch keeps, said
+            // as the place the run goes. The Windows column names the notification area, where
+            // the icon is; the Mac's has no such place (the Dock icon stays where it is), so it
+            // names what keeps running instead. The macOS column is shown when part 87c lands; the
+            // row is not on a Mac's page until then (`Capability::KeepRunningWhenClosed`).
+            // zh: pending T-TRAY-87D
+            Self::DescCloseKeepsRunning => pick_platform(
+                lang,
+                platform,
+                "Closing the last window leaves Folio running in the notification area.",
+                "Closing the last window leaves Folio running in the notification area.",
+                "Closing the last window leaves shells and agents running.",
+                "Closing the last window leaves shells and agents running.",
+            ),
+            // R12's two sentences, split as a Windows notification is: a title under the
+            // identity's own header, then the body. Windows only (`WINDOWS_ONLY_SURFACES`).
+            // zh: pending T-TRAY-87D
+            Self::ToastStillRunningTitle => {
+                pick(lang, "Folio is still running", "Folio is still running")
+            }
+            // zh: pending T-TRAY-87D
+            Self::ToastStillRunningBody => pick(
+                lang,
+                "Its icon in the notification area brings the window back.",
+                "Its icon in the notification area brings the window back.",
+            ),
             // Names what the key does and not what the window is called: a
             // reader scanning the shortcut list is looking for the verb.
             Self::ShortcutSummonQuake => pick(lang, "Summon the terminal", "唤出终端"),
@@ -6611,6 +6660,10 @@ impl Text {
                 "Windows may warn about this update.",
                 "Windows 可能会对此更新发出警告。",
             ),
+            // English in both columns until the Chinese pass writes them (`CHINESE_PENDING`).
+            Self::TrayMenuShow => pick(lang, "Show Folio", "Show Folio"),
+            Self::TrayMenuNewWindow => pick(lang, "New window", "New window"),
+            Self::TrayMenuQuit => pick(lang, "Quit Folio", "Quit Folio"),
             Self::UpdateCardProgress => pick(
                 lang,
                 "{received} / {total} MB",
@@ -7064,6 +7117,11 @@ impl Text {
     /// before the feature ships rather than after somebody opens the window.
     #[cfg(test)]
     const WINDOWS_ONLY_SURFACES: &'static [Self] = &[
+        // — the first put-away's notification (0.4.10 plan row 87, part 87d): raised only where a
+        //   close puts the window in the notification area, which `first_hide_toast_owed` answers
+        //   for Windows alone
+        Self::ToastStillRunningTitle,
+        Self::ToastStillRunningBody,
         // — the Settings row that registers a verb in Explorer's folder menu,
         //   which `settings::visible_rows_for` does not offer off Windows
         Self::RowContextMenu,
@@ -7143,17 +7201,19 @@ impl Text {
     ];
 
     /// The entries whose Chinese is owed, by column: the English stands in both until the
-    /// Chinese pass writes it (0.4.10 plan row 87, part 87e: the running-work card).
+    /// Chinese pass writes it.
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &{
         use HostPlatform::{MacOs, OtherUnix, Windows};
         use Text::{
-            QuitRestartTitle, QuitRunningAgent, QuitRunningAgentCommand, QuitRunningAgentCommands,
-            QuitRunningAgents, QuitRunningAgentsCommand, QuitRunningAgentsCommands,
-            QuitRunningCommand, QuitRunningCommands, QuitRunningQuit, QuitRunningRestart,
-            QuitRunningTitle,
+            DescCloseKeepsRunning, QuitRestartTitle, QuitRunningAgent, QuitRunningAgentCommand,
+            QuitRunningAgentCommands, QuitRunningAgents, QuitRunningAgentsCommand,
+            QuitRunningAgentsCommands, QuitRunningCommand, QuitRunningCommands, QuitRunningQuit,
+            QuitRunningRestart, QuitRunningTitle, RowCloseKeepsRunning, ToastStillRunningBody,
+            ToastStillRunningTitle, TrayMenuNewWindow, TrayMenuQuit, TrayMenuShow,
         };
         [
+            // — the running-work card (0.4.10 plan row 87, part 87e, T-TRAY-87E-QUIT-ASKS)
             (QuitRunningTitle, Windows),
             (QuitRunningTitle, MacOs),
             (QuitRunningTitle, OtherUnix),
@@ -7190,6 +7250,28 @@ impl Text {
             (QuitRunningAgentsCommands, Windows),
             (QuitRunningAgentsCommands, MacOs),
             (QuitRunningAgentsCommands, OtherUnix),
+            // — the notification-area icon's menu (0.4.10 plan row 87, part 87b): Windows draws
+            //   it; macOS has no notification area, and its column waits with Windows'
+            (TrayMenuShow, Windows),
+            (TrayMenuShow, MacOs),
+            (TrayMenuNewWindow, Windows),
+            (TrayMenuNewWindow, MacOs),
+            (TrayMenuQuit, Windows),
+            (TrayMenuQuit, MacOs),
+            // — the Settings row "Keep running when closed" and the first put-away's
+            //   notification (0.4.10 plan row 87, part 87d, T-TRAY-87D)
+            (RowCloseKeepsRunning, Windows),
+            (RowCloseKeepsRunning, MacOs),
+            (RowCloseKeepsRunning, OtherUnix),
+            (DescCloseKeepsRunning, Windows),
+            (DescCloseKeepsRunning, MacOs),
+            (DescCloseKeepsRunning, OtherUnix),
+            (ToastStillRunningTitle, Windows),
+            (ToastStillRunningTitle, MacOs),
+            (ToastStillRunningTitle, OtherUnix),
+            (ToastStillRunningBody, Windows),
+            (ToastStillRunningBody, MacOs),
+            (ToastStillRunningBody, OtherUnix),
         ]
     };
 }
@@ -7209,6 +7291,31 @@ pub fn could_not_resume_text(title: &str, id: &str) -> String {
         Lang::English => format!("{title} session {id} could not be resumed."),
         Lang::Chinese => format!("{title} 会话 {id} 无法恢复。"),
     }
+}
+
+/// **The tip of the run's icon in the notification area** (0.4.10 plan row 87, part 87b; item 9):
+/// how many tabs have work running and how many are waiting for the person, a zero count left
+/// out, and the program's name alone when both are zero. The Chinese is a draft (`zh pending`).
+#[must_use]
+pub fn tray_tooltip(working: usize, waiting: usize) -> String {
+    let lang = current();
+    let working = (working > 0).then(|| match lang {
+        Lang::English => format!("{working} working"),
+        Lang::Chinese => format!("{working} 个在运行"),
+    });
+    let waiting = (waiting > 0).then(|| match lang {
+        Lang::English => format!("{waiting} waiting for you"),
+        Lang::Chinese => format!("{waiting} 个在等你"),
+    });
+    let counts: Vec<String> = [working, waiting].into_iter().flatten().collect();
+    if counts.is_empty() {
+        return "Folio".to_owned();
+    }
+    let separator = match lang {
+        Lang::English => ", ",
+        Lang::Chinese => "，",
+    };
+    format!("Folio - {}", counts.join(separator))
 }
 
 /// **The line a resumed pane opens with when its launch did not all come back** (0.4.10 plan row
@@ -10988,7 +11095,11 @@ mod tests {
     /// exemption list, and this names it.
     #[test]
     fn no_string_a_mac_reader_meets_names_a_windows_program() {
-        const WINDOWS_WORDS: [&str; 11] = [
+        const WINDOWS_WORDS: [&str; 13] = [
+            // Where a Windows program keeps its icon (0.4.10 plan row 87, part 87d, R15): a Mac
+            // has a menu bar and a Dock, and neither is called this.
+            "notification area",
+            "通知区域",
             // A folder only one machine has (0.4.4 ticket 07: the dark scheme
             // row sent a Mac reader to `%APPDATA%\Folio\schemes`).
             "APPDATA",

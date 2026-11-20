@@ -300,6 +300,41 @@ pub fn interruption(reach: crate::attention::Reach, desktop_messages: bool) -> I
     }
 }
 
+/// **The launch string of the first put-away's notification** (0.4.10 plan row 87, part 87d;
+/// ruling R12): not a [`NotificationRoute`], because the notification names no pane — it says Folio
+/// is still running, and a click on it means "bring the window back".
+///
+/// The click is answered by the door every click on one of Folio's notifications already takes
+/// first (`FolioApp::route_notification_launches` brings a put-away run back before it routes);
+/// the route loop recognises this string by name so its trace says what happened rather than
+/// `unparsed`. [`NotificationRoute::parse`] refuses it, which is the point: it has no ids.
+pub const BRING_BACK_LAUNCH: &str = "bring-back";
+
+/// **Whether a put-away is owed the one notification that says Folio is still running**
+/// (0.4.10 plan row 87, part 87d; ruling R12 and the coordinator's items 12-13 of 2026-11-14).
+///
+/// Three facts, all the caller's:
+///
+/// * **The platform is Windows.** The sentence exists because Windows 11 parks a new
+///   notification-area icon out of sight, so the first close of the last window looks like a quit;
+///   a Mac's Dock icon stays where the reader can see it.
+/// * **The receipt says it was never shown** on this machine (`settings.json`'s
+///   `first_hide_toast`): once ever.
+/// * **The desktop may be written to**, asked through [`interruption`] — the same gate every
+///   toast passes, so the `Notifications` row silences this one as it silences every other, with
+///   no second reading of the switch.
+#[must_use]
+pub fn first_hide_toast_owed(
+    platform: bt_platform::HostPlatform,
+    receipt: bt_persist::FirstHideToastV1,
+    desktop_messages: bool,
+) -> bool {
+    matches!(platform, bt_platform::HostPlatform::Windows)
+        && receipt == bt_persist::FirstHideToastV1::NotShown
+        && interruption(crate::attention::Reach::Toast, desktop_messages)
+            == Interruption::PutItOnTheDesktop
+}
+
 /// The name one toast wears.
 ///
 /// Three layers, and the order is a protocol fact rather than a preference. `OSC 777;notify`
@@ -325,9 +360,36 @@ pub fn toast_title(carried: Option<&str>, pane_name: Option<&str>, profile_name:
 #[cfg(test)]
 mod tests {
     use super::{
-        Interruption, NotificationRoute, WindowPlace, desktop_reach, interruption, toast_title,
+        BRING_BACK_LAUNCH, Interruption, NotificationRoute, WindowPlace, desktop_reach,
+        first_hide_toast_owed, interruption, toast_title,
     };
     use crate::attention::Reach;
+
+    /// RED (T16c; the coordinator's items 12 and 13 of 2026-11-14) — **the first put-away is owed
+    /// its notification on Windows alone, once, and only where a toast may reach the desktop**:
+    /// every platform against both receipts and both readings of the `Notifications` row. A Mac's
+    /// Dock icon stays in sight, so the sentence has nothing to say there; another Unix has no
+    /// build. And its launch names no pane.
+    ///
+    /// PLANT 87d-P33: answer `true` for the platform term of `first_hide_toast_owed` — a Mac is
+    /// told. (87d-P32, its `interruption` term dropped, is red here too, on the row's `false`.)
+    #[test]
+    fn the_first_put_away_is_owed_its_notification_on_windows_once_and_unsilenced() {
+        use bt_persist::FirstHideToastV1::{NotShown, Shown};
+        use bt_platform::HostPlatform::{MacOs, OtherUnix, Windows};
+        for platform in [Windows, MacOs, OtherUnix] {
+            for receipt in [NotShown, Shown] {
+                for desktop_messages in [true, false] {
+                    assert_eq!(
+                        first_hide_toast_owed(platform, receipt, desktop_messages),
+                        platform == Windows && receipt == NotShown && desktop_messages,
+                        "{platform:?}, {receipt:?}, desktop messages {desktop_messages}"
+                    );
+                }
+            }
+        }
+        assert_eq!(NotificationRoute::parse(BRING_BACK_LAUNCH), None);
+    }
 
     /// **A window on a screen, unfocused, with something on top of it**, on a desktop whose taskbar
     /// is where Windows puts it.

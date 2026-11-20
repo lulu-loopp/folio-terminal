@@ -3468,6 +3468,18 @@ pub enum SettingsRow {
     /// so: those two mean "a terminal standing here", which is a different
     /// sentence from "Folio".
     LaunchOpens,
+    /// **Whether closing the run's last ordinary window keeps the run** (0.4.10 plan row 87,
+    /// part 87d): `settings.json`'s `close_keeps_running`, which the close reads each time it is
+    /// asked (`FolioApp::the_close_keeps_the_run`), so a press is in force at the next close. On,
+    /// the window is put away and its shells and agents keep running; off, the close ends the run.
+    ///
+    /// **On `General`, directly under [`Self::LaunchOpens`]**: that row says what starting Folio
+    /// again gives you, this one what closing its last window does — the two ends of a run, both
+    /// about Folio itself, and so both above the two rows that reach out of this window.
+    ///
+    /// **Windows only until part 87c** ([`Capability::KeepRunningWhenClosed`], ruled 2026-11-14,
+    /// item 13): a Mac's close does not put a window away yet, so the row is not on a Mac's page.
+    CloseKeepsRunning,
     /// **Whether Folio starts when you sign in** (0.4.10 plan row 22a,
     /// T-START-AT-LOGON-SWITCH): a switch whose answer is the account's sign-in
     /// entry, `Run\Folio` — **read off the machine, not out of `settings.json`**
@@ -4061,6 +4073,7 @@ impl SettingsRow {
             | Self::OptionSendsAlt
             | Self::SearchEngine
             | Self::LaunchOpens
+            | Self::CloseKeepsRunning
             | Self::StartAtSignIn
             | Self::ContextMenu => SettingsCategory::General,
             // Version owns the updater, with its automatic-check switch
@@ -4135,18 +4148,19 @@ impl SettingsRow {
     ///
     /// `None` is the ordinary answer and it means what it says: the row is about
     /// Folio, or about a file, or about a shell that exists everywhere, and it
-    /// is on every machine's page. The five that answer `Some` are about a
+    /// is on every machine's page. The six that answer `Some` are about a
     /// mechanism one platform has and another has not — Explorer's folder menu,
-    /// the `$PROFILE` of a shell with no other door, the readline module that
-    /// one edition of PowerShell ships, the blurred backdrop this build can ask
-    /// a window for, and a key called Option.
+    /// a start at sign-in, a run kept in the notification area when the last
+    /// window closes (0.4.10 plan row 87, part 87d), the blurred backdrop this
+    /// build can ask a window for, a key called Option, and the agents' resume.
     ///
     /// **The same [`Capability`] the first-run card reads, and deliberately so.**
-    /// Two of these five are mechanisms that card already asks about, and a
-    /// second table would be a second place to remember which platforms have
-    /// them. The other three joined the table for this page and the card has no
-    /// row for any of them. What each surface owns is what it *does* with the
-    /// answer: the card drops the question, and this page drops the row.
+    /// One of these six, Explorer's folder menu, is a mechanism that card also
+    /// asks about (`first_run::RowKind::needs`), and a second table would be a
+    /// second place to remember which platforms have it. The other five joined
+    /// the table for this page and the card has no row for any of them. What
+    /// each surface owns is what it *does* with the answer: the card drops the
+    /// question, and this page drops the row.
     ///
     /// **A row the machine cannot honour is a different thing and is not here.**
     /// A Windows too old to know what a backdrop is, and a built-in profile's
@@ -4169,6 +4183,7 @@ impl SettingsRow {
         match self {
             Self::ContextMenu => Some(Capability::ExplorerMenu),
             Self::StartAtSignIn => Some(Capability::SignInStart),
+            Self::CloseKeepsRunning => Some(Capability::KeepRunningWhenClosed),
             Self::ShellIntegration => None,
             Self::PowerShellProfileLine => None,
             Self::LegacyPsReadLine => None,
@@ -4218,6 +4233,7 @@ impl SettingsRow {
             Self::SplitDirection => Text::RowSplitDirection.text(),
             Self::SearchEngine => Text::RowSearchEngine.text(),
             Self::LaunchOpens => Text::RowLaunchOpens.text(),
+            Self::CloseKeepsRunning => Text::RowCloseKeepsRunning.text(),
             Self::MinimumContrast => Text::RowMinimumContrast.text(),
             Self::WebPages => Text::RowWebPages.text(),
             // Mock-up 2467.
@@ -4473,6 +4489,7 @@ impl SettingsRow {
             Self::SplitDirection => Text::DescSplitDirection.text(),
             Self::SearchEngine => Text::DescSearchEngine.text(),
             Self::LaunchOpens => Text::DescLaunchOpens.text(),
+            Self::CloseKeepsRunning => Text::DescCloseKeepsRunning.text(),
             Self::MinimumContrast => Text::DescMinimumContrast.text(),
             Self::WebPages => Text::DescWebPages.text(),
             // Mock-up 2468, word for word. It is also the *scope* of the setting
@@ -4746,6 +4763,9 @@ impl SettingsRow {
             // this program, and a reader who wants the other answer has no way
             // of guessing that the question is behind a triangle.
             | Self::LaunchOpens
+            // Not advanced, on the row above's measure: what it decides is what happens to every
+            // shell and agent of the run at the next close of its last window.
+            | Self::CloseKeepsRunning
             | Self::TabLayout
             | Self::FocusMode
             | Self::FocusCardHeight
@@ -4952,6 +4972,7 @@ impl SettingsRow {
             // item nobody could press.
             | Self::ContextMenu
             | Self::StartAtSignIn
+            | Self::CloseKeepsRunning
             | Self::ProfileLogin
             | Self::UninstallData
             | Self::LineWrapping => FORMULA_OPTIONS.len(),
@@ -5054,6 +5075,7 @@ impl SettingsRow {
             | Self::AutoCheck
             | Self::ContextMenu
             | Self::StartAtSignIn
+            | Self::CloseKeepsRunning
             | Self::ProfileLogin
             | Self::UninstallData
             | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
@@ -5547,6 +5569,9 @@ impl SettingsRow {
             Self::StartAtSignIn => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.start_at_sign_in.switch_on()),
+            Self::CloseKeepsRunning => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.close_keeps_running),
             Self::TabLayout => TAB_LAYOUT_OPTIONS
                 .iter()
                 .position(|it| *it == values.tab_layout),
@@ -6045,12 +6070,10 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
 /// the order impossible to read. [`SettingsRow::needs`] is where each row says
 /// what it is about; this is where the page acts on it.
 ///
-/// **Nothing here can empty a page.** Every category the five conditional rows
-/// belong to keeps unconditional rows under the same heading — General keeps
-/// six, Terminal keeps four, and Appearance keeps the whole of its everyday
-/// group and seven of its eight advanced rows — so the heading derivation that
-/// walks this list never meets a run of nothing, and the disclosure above the
-/// advanced group is untouched.
+/// **Nothing here can empty a page.** Every category the six conditional rows
+/// ([`SettingsRow::needs`]) belong to keeps unconditional rows under the same
+/// heading, so the heading derivation that walks this list never meets a run
+/// of nothing, and the disclosure above the advanced group is untouched.
 /// `no_page_is_left_with_a_heading_and_no_rows` is that claim.
 #[must_use]
 pub fn visible_rows_for(
@@ -6215,6 +6238,10 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // screen. Above the two rows that reach out of this window, which is where
     // the page's own order already puts everything about Folio itself.
     rows.push(SettingsRow::LaunchOpens);
+    // **Directly under it** (0.4.10 plan row 87, part 87d): the row above says what starting
+    // Folio again gives you, this one what closing its last window does. Windows only until part
+    // 87c, through `visible_rows_for`'s one filter.
+    rows.push(SettingsRow::CloseKeepsRunning);
     // **Directly above the Explorer row** (0.4.10 plan row 22a): the rows that
     // reach out of this window end the page, and this one reaches the account's
     // sign-in where the next reaches another program's menu. Windows only until
@@ -6702,6 +6729,8 @@ pub struct SettingsValues {
     pub turn_end_notification: bool,
     /// Whether a restart resumes the agents that were running in panes (row 195).
     pub resume_agents: bool,
+    /// Whether closing the run's last ordinary window keeps the run (0.4.10 plan row 87).
+    pub close_keeps_running: bool,
     /// Whether a PowerShell pane with no integration is offered one — the row
     /// the notice strip's `Don't show again` writes (§7.1.6j).
     pub shell_integration: bool,
@@ -6987,6 +7016,7 @@ impl SettingsValues {
             terminal_notifications: true,
             turn_end_notification: true,
             resume_agents: true,
+            close_keeps_running: true,
             shell_integration: true,
             powershell_profile_line_present: false,
             git_panel: true,
@@ -11097,6 +11127,18 @@ pub fn turn_end_notification_requested(target: SettingsTarget) -> Option<bool> {
 pub fn resume_agents_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::ResumeAgents, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Whether closing the run's last ordinary window keeps the run, as a press on its picker (0.4.10
+/// plan row 87, part 87d).
+#[must_use]
+pub fn close_keeps_running_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::CloseKeepsRunning, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -20322,8 +20364,11 @@ mod tests {
         use crate::i18n::{Lang, Text};
         use bt_platform::HostPlatform::MacOs;
 
-        const ON_A_MAC: [(SettingsRow, Text); 4] = [
+        const ON_A_MAC: [(SettingsRow, Text); 5] = [
             (SettingsRow::LaunchOpens, Text::DescLaunchOpens),
+            // Written for part 87c and measured now, so the sentence a Mac will read is held
+            // to its column before the row reaches the Mac's page (0.4.10 plan row 87).
+            (SettingsRow::CloseKeepsRunning, Text::DescCloseKeepsRunning),
             (
                 SettingsRow::TurnEndNotifications,
                 Text::DescTurnEndNotifications,
@@ -20488,7 +20533,7 @@ mod tests {
     /// string read off this machine, so its length is a fact about the machine
     /// rather than about the copy. What is held here instead is the entry it
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 34] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 35] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -20591,6 +20636,12 @@ mod tests {
             ),
             (SettingsRow::QuakeHotkey, Text::DescQuakeHotkey, MacOs),
             (SettingsRow::OptionSendsAlt, Text::DescOptionSendsAlt, MacOs),
+            // `Keep running when closed`'s Mac column, written for part 87c (0.4.10 plan row 87).
+            (
+                SettingsRow::CloseKeepsRunning,
+                Text::DescCloseKeepsRunning,
+                MacOs,
+            ),
             // The folder a reader's own schemes go in, which is a different
             // folder on each machine (0.4.4 ticket 07).
             (SettingsRow::DarkScheme, Text::DescDarkScheme, MacOs),
@@ -29062,10 +29113,15 @@ mod tests {
 
         // `StartAtSignIn` is on it until its macOS half (0.4.10 plan row 22b): the Mac's login
         // item is not built, and a row whose switch reached nothing would be a lie on the page.
-        const NOT_ON_A_MAC: [SettingsRow; 3] = [
+        // `CloseKeepsRunning` is on it for the same reason until part 87c (0.4.10 plan row 87,
+        // T17 of T-TRAY-87D; PLANT 87d-P19: answer `true` for `KeepRunningWhenClosed` in
+        // `Capability::on` and the first assertion names the row): a Mac's close does not put
+        // a window away yet.
+        const NOT_ON_A_MAC: [SettingsRow; 4] = [
             SettingsRow::ContextMenu,
             SettingsRow::Acrylic,
             SettingsRow::StartAtSignIn,
+            SettingsRow::CloseKeepsRunning,
         ];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let mac = visible_rows_for(MacOs, layout);
@@ -29097,7 +29153,7 @@ mod tests {
                 "{layout:?}: a Windows keyboard has no Option key"
             );
             // Everything else is on both pages, in the same order, which is what
-            // says the filter took the three rows and nothing else.
+            // says the filter took the four rows and nothing else.
             let expected: Vec<SettingsRow> = windows
                 .iter()
                 .copied()
@@ -29110,7 +29166,7 @@ mod tests {
             sorted_expected.sort_by_key(|row| format!("{row:?}"));
             assert_eq!(
                 sorted_mac, sorted_expected,
-                "{layout:?}: the two pages differ by more than the three rows \
+                "{layout:?}: the two pages differ by more than the four rows \
                  that declare a facility"
             );
         }
@@ -29358,12 +29414,14 @@ mod tests {
                     .all(|row| *row != SettingsRow::AutoCheck)
             );
             // `Opening Folio again` stands between them since 2026-09-11
-            // (§7.59): the last row about Folio itself, above the rows that
+            // (§7.59), with `Keep running when closed` under it since 0.4.10
+            // plan row 87: the last rows about Folio itself, above the rows that
             // reach out of this window — the sign-in switch first since 0.4.10
             // plan row 22a.
             assert_eq!(rows[at - 1], SettingsRow::StartAtSignIn);
-            assert_eq!(rows[at - 2], SettingsRow::LaunchOpens);
-            assert_eq!(rows[at - 3], SettingsRow::DefaultProfile);
+            assert_eq!(rows[at - 2], SettingsRow::CloseKeepsRunning);
+            assert_eq!(rows[at - 3], SettingsRow::LaunchOpens);
+            assert_eq!(rows[at - 4], SettingsRow::DefaultProfile);
             assert_eq!(
                 SettingsRow::ContextMenu.category(),
                 SettingsCategory::General
@@ -29780,6 +29838,9 @@ mod tests {
                 SettingsRow::DefaultProfile,
                 // What a second start of Folio opens, since 2026-09-11 (§7.59).
                 SettingsRow::LaunchOpens,
+                // What closing its last window does, since 0.4.10 plan row 87 (part
+                // 87d): directly under the row above, Windows only until part 87c.
+                SettingsRow::CloseKeepsRunning,
                 // Whether Folio starts at sign-in, since 0.4.10 plan row 22a:
                 // directly above Explorer's row, Windows only until row 22b.
                 SettingsRow::StartAtSignIn,
@@ -29858,6 +29919,9 @@ mod tests {
                 SettingsRow::DefaultProfile,
                 // What a second start of Folio opens, since 2026-09-11 (§7.59).
                 SettingsRow::LaunchOpens,
+                // What closing its last window does, since 0.4.10 plan row 87 (part
+                // 87d): directly under the row above, Windows only until part 87c.
+                SettingsRow::CloseKeepsRunning,
                 // Whether Folio starts at sign-in, since 0.4.10 plan row 22a:
                 // directly above Explorer's row, Windows only until row 22b.
                 SettingsRow::StartAtSignIn,
@@ -30937,8 +31001,9 @@ mod tests {
         lacking.default_profile = Some(profiles::fallback_profile());
 
         let mut panel = keyboarded_in(windows, SettingsRow::DefaultProfile.category());
-        // `End` and then three steps back: `Explorer context menu` closes this
+        // `End` and then four steps back: `Explorer context menu` closes this
         // page (§7.4), `Start at sign-in` stands above it (0.4.10 plan row 22a),
+        // `Keep running when closed` above that (0.4.10 plan row 87),
         // `Opening Folio again` above that, and `Default profile` above that.
         // The summoned terminal's rows used to stand between them and moved to
         // a page of their own on 2026-09-05 (§7.54e ⑤), which
@@ -30946,11 +31011,12 @@ mod tests {
         // row arrived the same day and gave one of them back, and 2026-09-07
         // folded it into the row above it and took that press away again (§7.4b).
         // `Opening Folio again` arrived between them on 2026-09-11 (§7.59) and
-        // put one back, and `Start at sign-in` another on 2026-11-11. The
+        // put one back, `Start at sign-in` another on 2026-11-11, and `Keep
+        // running when closed` another on 2026-11-19. The
         // assertion below is what keeps the presses honest — a page reordered
         // under this test lands the ring somewhere else and says so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        for _ in 0..3 {
+        for _ in 0..4 {
             panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         }
         assert_eq!(

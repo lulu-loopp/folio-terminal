@@ -865,7 +865,7 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 41,
+        SETTINGS_SCHEMA_VERSION, 42,
         "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
          the default profile the v3→v4, the Git panel's master switch the v4→v5, \
          the direction-less split's direction the v5→v6, the interface \
@@ -950,7 +950,11 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          — and the v40-to-v41, one key on its own day: whether closing the run's last ordinary \
          window puts it away and keeps its shells and agents running, written `true` into every \
          document the step walks, because that is the owner's ruling (2026-11-14) for a close no \
-         earlier build kept running"
+         earlier build kept running \
+         — and the v41-to-v42, one key on its own day and a receipt rather than a preference: \
+         whether this machine has been told that Folio is still running after its first put-away, \
+         written `NotShown` into every document the step walks, because the put-away is new to \
+         every reader of one"
     );
     // RED — **the repair ships on, because it is the screen every reader of a v35 document
     // already had.** MUTATION: ship `false` and a matrix an agent printed comes back as one row

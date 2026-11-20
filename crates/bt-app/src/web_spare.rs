@@ -1917,10 +1917,11 @@ mod spare_wiring_tests {
         assert_eq!(owners, vec![String::from("seat_a_web_page")]);
     }
 
-    /// PIN (60) — **the spare parent is the one window product code creates outside winit**
-    /// (`docs/ARCHITECTURE.md` §6).
+    /// PIN (60; 0.4.10 plan row 87, part 87b) — **the spare parent and the notification-area
+    /// icon's host are the two windows product code creates outside winit**
+    /// (`docs/ARCHITECTURE.md` §6): neither is ever shown.
     #[test]
-    fn the_spare_parent_is_the_one_window_product_code_creates() {
+    fn the_spare_parent_and_the_tray_host_are_the_windows_product_code_creates() {
         let platform = Index::of_package("bt-platform");
         let created = platform
             .search(&Search::new(
@@ -1936,7 +1937,7 @@ mod spare_wiring_tests {
             .collect();
         assert_eq!(
             owners,
-            vec![String::from("spare_parent")],
+            vec![String::from("put_up"), String::from("spare_parent")],
             "{}",
             created.report(platform)
         );

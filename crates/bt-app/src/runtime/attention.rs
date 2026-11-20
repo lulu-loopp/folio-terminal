@@ -820,6 +820,56 @@ impl<B: Backend> Runtime<'_, B> {
         }
     }
 
+    /// **The first put-away on this machine says so, once** (0.4.10 plan row 87, part 87d; ruling
+    /// R12): "Folio is still running. Its icon in the notification area brings the window back."
+    /// Windows 11 parks a new notification-area icon out of sight, so without it the first close
+    /// would look like a quit.
+    ///
+    /// Asked at the put-away and nowhere else, after the hide was admitted: a refused hide, a close
+    /// that reaches a window already away, the summoned terminal's hide and a close that ends the
+    /// run never reach it. [`notify::first_hide_toast_owed`] decides — Windows, the receipt not yet
+    /// spent, and the `Notifications` row letting a toast through, asked through the gate every
+    /// toast passes. Silenced, the receipt stays owed.
+    ///
+    /// **The receipt is spent when the notification is handed to the desk**, whatever the desk
+    /// answers (R5 of T-TRAY-87D). A refusal raises no card for this message: nobody asked for it,
+    /// and the window it would sit in is hidden. But the desk has latched it and answers `Ok`
+    /// from now on, so the refusal is kept (`App::toast_refusal_unsaid`) and
+    /// [`Self::raise_attention`] raises the session's one card on the first delivery that would
+    /// have reached the desktop (review P1-1). Its click is [`notify::BRING_BACK_LAUNCH`], which
+    /// the door back answers.
+    ///
+    /// **Not while the run's icon was refused** (review P2-3, at the merge of 87b): the body names
+    /// the icon as the way back, and a run whose host for it could not be made
+    /// (`tray_fold::TrayStand::icon_was_refused`) has none to point at. The receipt then stays
+    /// owed and nothing is said, so the first put-away of a run whose icon stands says it.
+    ///
+    /// **Here, beside [`Self::raise_attention`]**: this module is the one writer of the desk
+    /// (`App::notifications`); the put-away (`Runtime::put_the_window_away`) asks.
+    pub(super) fn tell_the_first_put_away(&mut self) {
+        if self.app.tray.icon_was_refused() {
+            return;
+        }
+        let settings = self.app.settings_store.loaded();
+        if !notify::first_hide_toast_owed(
+            bt_platform::host_platform(),
+            settings.first_hide_toast,
+            settings.terminal_notifications,
+        ) {
+            return;
+        }
+        let mut settings = settings.clone();
+        settings.first_hide_toast = bt_persist::FirstHideToastV1::Shown;
+        self.app.settings_store.store(settings);
+        if let Err(error) = self.app.notifications.show(
+            i18n::Text::ToastStillRunningTitle.text(),
+            i18n::Text::ToastStillRunningBody.text(),
+            notify::BRING_BACK_LAUNCH,
+        ) {
+            self.app.toast_refusal_unsaid = Some(error);
+        }
+    }
+
     pub(crate) fn raise_attention(&mut self, raised: Vec<AttentionDelivery>) -> Result<()> {
         if raised.is_empty() {
             return Ok(());
@@ -828,12 +878,14 @@ impl<B: Backend> Runtime<'_, B> {
         let window = u64::from(self.window.window.id());
         let mut flashes = Vec::new();
         let mut refusal = None;
+        let mut handed_to_the_desk = false;
         for delivery in raised {
             match notify::interruption(delivery.reach, enabled) {
                 notify::Interruption::Nothing => {}
                 // Collected and flashed once below: the button is the window's.
                 notify::Interruption::FlashTheTaskbarButton => flashes.push(delivery),
                 notify::Interruption::PutItOnTheDesktop => {
+                    handed_to_the_desk = true;
                     let route = notify::NotificationRoute {
                         window,
                         tab: delivery.tab.0,
@@ -867,6 +919,14 @@ impl<B: Backend> Runtime<'_, B> {
                 flashes,
             );
         }
+        // **The first put-away's kept refusal** (review P1-1): the desk answered this round `Ok`
+        // because it latched that refusal, so the message just handed over was lost and its card
+        // is this one.
+        let refusal = refusal.or_else(|| {
+            self.app
+                .toast_refusal_unsaid
+                .take_if(|_| handed_to_the_desk)
+        });
         match refusal {
             Some(error) => self.raise_notification_refusal(&error),
             None => Ok(()),

@@ -88,7 +88,7 @@ impl From<EventLoopProxy<AppEvent>> for LoopProxy {
 pub(crate) mod prelude {
     pub(crate) use super::{
         Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
-        ImeCaretDoor, LoopDoor, MathMenuDoor, SavePickerDoor, TaskbarDoor, WindowHost,
+        ImeCaretDoor, LoopDoor, MathMenuDoor, SavePickerDoor, TaskbarDoor, ToastDoor, WindowHost,
     };
 }
 
@@ -120,6 +120,11 @@ pub(crate) trait Backend: Sized + 'static {
     type ImeCaret: ImeCaretDoor;
     /// The loop a turn runs in: how the application stops it and paces it.
     type Loop: LoopDoor;
+    /// The process's desk in the notification centre: the toasts it raises and the clicks on
+    /// them (0.4.10 plan row 87, part 87d).
+    type Toasts: ToastDoor;
+    /// The run's icon in the notification area (0.4.10 plan row 87, part 87b).
+    type Tray: TrayDoor;
 
     /// **Every window's surface, built again on the device layer** — what a device the driver
     /// took away, and the debug build's surface self-test, ask of every window at once.
@@ -153,6 +158,21 @@ pub(crate) trait Backend: Sized + 'static {
     /// (plan row 191) — `bt_platform::session_end::ask_to_be_ended_first`, once per process, by
     /// the launch's first window (`FolioApp::ask_to_be_ended_before_the_shells`).
     fn ask_to_be_ended_first(event_loop: &Self::Loop, level: u32) -> Result<(), String>;
+
+    /// **Whether this platform has a notification area for the run's icon** (0.4.10 plan row 87,
+    /// part 87b) — `bt_platform::HostPlatform::has_a_notification_area` for the product.
+    fn has_a_notification_area(event_loop: &Self::Loop) -> bool;
+
+    /// **The run's icon in the notification area, put up showing `picture`** (part 87b) —
+    /// `bt_platform::tray::TrayIcon::put_up`: `wake` is all its host may do after parking a
+    /// gesture, `note` its door to `diagnostics.log`. An `Err` is a host that could not be made.
+    fn put_up_tray(
+        event_loop: &Self::Loop,
+        labels: bt_platform::tray::TrayLabels,
+        picture: bt_platform::tray::TrayPicture,
+        wake: Box<dyn Fn()>,
+        note: Box<dyn Fn(&str)>,
+    ) -> Result<Self::Tray, String>;
 }
 
 /// **The product's backend**: winit's window, `bt-render`'s renderer over the shared device,
@@ -171,6 +191,8 @@ impl Backend for Native {
     type SavePicker = bt_platform::SaveFilePicker;
     type ImeCaret = bt_platform::ImeSystemCaret;
     type Loop = ActiveEventLoop;
+    type Toasts = crate::NotificationDesk;
+    type Tray = bt_platform::tray::TrayIcon;
 
     fn rebuild_every_surface(
         gpu: &mut Self::Device,
@@ -201,6 +223,20 @@ impl Backend for Native {
 
     fn ask_to_be_ended_first(_event_loop: &ActiveEventLoop, level: u32) -> Result<(), String> {
         bt_platform::session_end::ask_to_be_ended_first(level)
+    }
+
+    fn has_a_notification_area(_event_loop: &ActiveEventLoop) -> bool {
+        bt_platform::host_platform().has_a_notification_area()
+    }
+
+    fn put_up_tray(
+        _event_loop: &ActiveEventLoop,
+        labels: bt_platform::tray::TrayLabels,
+        picture: bt_platform::tray::TrayPicture,
+        wake: Box<dyn Fn()>,
+        note: Box<dyn Fn(&str)>,
+    ) -> Result<bt_platform::tray::TrayIcon, String> {
+        bt_platform::tray::TrayIcon::put_up(labels, picture, wake, note)
     }
 }
 
@@ -673,6 +709,37 @@ pub(crate) trait TaskbarDoor {
 impl TaskbarDoor for bt_platform::Taskbar {
     fn set_progress(&self, progress: bt_platform::TaskbarProgress) -> Result<(), String> {
         bt_platform::Taskbar::set_progress(self, progress)
+    }
+}
+
+/// **The run's icon in the notification area, as the application tells it** (0.4.10 plan row 87,
+/// part 87b) — `bt_platform::tray::TrayIcon`'s methods; the icon goes when the value does
+/// ([`Self::remove_the_icon`]).
+pub(crate) trait TrayDoor {
+    /// Show `picture`.
+    fn change(&self, picture: &bt_platform::tray::TrayPicture);
+    /// The menu's words, for the next time it opens.
+    fn relabel(&self, labels: &bt_platform::tray::TrayLabels);
+    /// What a person asked of the icon since this was last asked, in their order.
+    fn take_gestures(&self) -> Vec<bt_platform::tray::TrayGesture>;
+    /// **The icon taken out of the notification area**, and its host with it.
+    fn remove_the_icon(self);
+}
+
+impl TrayDoor for bt_platform::tray::TrayIcon {
+    fn change(&self, picture: &bt_platform::tray::TrayPicture) {
+        bt_platform::tray::TrayIcon::change(self, picture);
+    }
+    fn relabel(&self, labels: &bt_platform::tray::TrayLabels) {
+        bt_platform::tray::TrayIcon::relabel(self, labels);
+    }
+    fn take_gestures(&self) -> Vec<bt_platform::tray::TrayGesture> {
+        bt_platform::tray::TrayIcon::take_gestures(self)
+    }
+    fn remove_the_icon(self) {
+        // The value is consumed here and goes out of scope at the end of this body: on Windows
+        // the icon, its host and its drawn image go with it (`TrayIcon`'s `Drop`); the portable
+        // twin holds nothing.
     }
 }
 
@@ -1449,6 +1516,81 @@ impl SavePickerDoor for bt_platform::SaveFilePicker {
 pub(crate) trait ImeCaretDoor {
     fn update(&mut self, x: i32, y: i32) -> Result<(), String>;
     fn destroy(&mut self);
+}
+
+/// **The desk a run's notifications go out through** (§7.6; 0.4.10 plan row 87, part 87d, R7 of
+/// T-TRAY-87D): one toast raised, or the platform's refusal; and the launch strings of the toasts
+/// clicked since the last ask. The product's is `NotificationDesk`, built lazily on the first toast
+/// that passes the gate; the test suite's records what it is handed and reaches nothing.
+pub(crate) trait ToastDoor {
+    /// Raise one toast; `Err` is the platform's refusal, said once.
+    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String>;
+    /// Every clicked toast's launch string since the last call.
+    fn take_activations(&self) -> Vec<String>;
+}
+
+/// **The product's toast door is the desk** (0.4.10 plan row 87, part 87d; R7 of T-TRAY-87D),
+/// implemented here with every other door of the seam.
+impl ToastDoor for crate::NotificationDesk {
+    /// Raise one toast, building the platform side if this is the first, or say why not.
+    ///
+    /// **The refusal is answered rather than only logged** (user ruling 2026-08-25). A desk that
+    /// swallowed a platform error into `stderr` left the one failure mode nobody can detect: the
+    /// reader is not notified, and is not notified that they were not notified. The `Err` is what
+    /// the caller turns into a card in the window — see [`crate::Runtime::raise_attention`].
+    ///
+    /// `Ok(())` on an already-refused desk, and it is not a lie: the sentence being reported is
+    /// "this machine cannot raise notifications", it has been said once, and saying it again on
+    /// every later message would be the flood the one-card rule exists to prevent.
+    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
+        if self.refused {
+            return Ok(());
+        }
+        if self.voice.is_none() {
+            let proxy = self.proxy.clone();
+            let wake: Box<dyn Fn() + Send> = Box::new(move || {
+                // Nothing is done here beyond waking the loop, for
+                // `AppEvent::GitChanged`'s reason and one of its own: this runs on
+                // a platform thread with no access to any window, and the launch
+                // string is already in the notifier's own queue.
+                let _ = proxy.send_event(AppEvent::NotificationClicked);
+            });
+            // **An update's trial writes no identity** (`update_trial`, F-7):
+            // the toast goes out under the one the old build registered, and
+            // the commit writes this build's.
+            let opened = if crate::update_trial::defer(crate::update_trial::Writer::ToastIdentity) {
+                bt_platform::Notifier::without_registration(wake)
+            } else {
+                bt_platform::Notifier::new(crate::APP_NAME, wake)
+            };
+            match opened {
+                Ok(voice) => self.voice = Some(voice),
+                Err(error) => {
+                    crate::diagnostics::stderr_line(format!(
+                        "desktop notifications unavailable: {error}"
+                    ));
+                    self.refused = true;
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(voice) = self.voice.as_mut()
+            && let Err(error) = voice.show(title, body, launch)
+        {
+            crate::diagnostics::stderr_line(format!("desktop notification refused: {error}"));
+            self.refused = true;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Every clicked toast's launch string since the last call.
+    fn take_activations(&self) -> Vec<String> {
+        self.voice
+            .as_ref()
+            .map(bt_platform::Notifier::take_activations)
+            .unwrap_or_default()
+    }
 }
 
 impl ImeCaretDoor for bt_platform::ImeSystemCaret {

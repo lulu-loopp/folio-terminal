@@ -786,7 +786,25 @@ impl<B: Backend> Runtime<'_, B> {
         crate::exit_diagnostics::say_window_put_away(how, facts, |line| {
             self.window.window.note(line);
         });
+        self.tell_the_first_put_away();
         Ok(())
+    }
+
+    /// **Store the reader's answer about `Keep running when closed`** (0.4.10 plan row 87, part
+    /// 87d): the row's press, an import and a hand edit of `settings.json` all come here.
+    ///
+    /// Nothing waits for a restart: the close reads the loaded settings each time it is asked
+    /// (`FolioApp::the_close_keeps_the_run`), so the next close already answers the new way.
+    ///
+    /// **Off brings every put-away window back** (R8 of T-TRAY-87D) on the loop's next turn, and
+    /// nothing here asks for it: the notification-area icon's look at the switch
+    /// (`FolioApp::settle_tray`, part 87b) reads the stored Off, brings a put-away window back
+    /// through the one door and then takes the icon down (one road, ruled 2026-11-19). Off is the
+    /// old behaviour exactly, and no window is left hidden with its icon gone.
+    pub(crate) fn apply_close_keeps_running(&mut self, enabled: bool) {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.close_keeps_running = enabled;
+        self.app.settings_store.store(settings);
     }
 
     /// **A close that reached this window while it is put away, ignored**
