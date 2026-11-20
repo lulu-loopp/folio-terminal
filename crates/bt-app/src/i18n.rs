@@ -6384,7 +6384,7 @@ impl Text {
             Self::ToastStillRunningBody => pick(
                 lang,
                 "Its icon in the notification area brings the window back.",
-                "通过通知区域中的 Folio 图标可重新显示窗口。",
+                "通知区域的 Folio 图标可重新显示窗口。",
             ),
             // Names what the key does and not what the window is called: a
             // reader scanning the shortcut list is looking for the verb.
@@ -6759,9 +6759,11 @@ impl Text {
             Self::UpdateFailedIdentity => {
                 pick(lang, "The update is not verified.", "更新未通过验证。")
             }
-            Self::UpdateFailedUnvouched => {
-                pick(lang, "The update is not vouched for.", "更新未经担保。")
-            }
+            Self::UpdateFailedUnvouched => pick(
+                lang,
+                "The update is not vouched for.",
+                "更新未获发布声明担保。",
+            ),
             Self::UpdateFailedCopy => {
                 pick(lang, "The update could not be copied.", "更新无法复制。")
             }
@@ -6855,7 +6857,7 @@ impl Text {
             Self::AgentHooksUnreadable => pick(
                 lang,
                 "This file is in a form Folio cannot read. Folio does not change the file.",
-                "此文件的格式 Folio 无法读取。Folio 不改动此文件。",
+                "Folio 无法识别此文件的格式。Folio 不改动此文件。",
             ),
             Self::AgentConfigNoBackup => pick(
                 lang,
@@ -6953,7 +6955,7 @@ impl Text {
             Self::CodexConfigUnreadable => pick(
                 lang,
                 "Codex's config.toml is in a form Folio cannot read. Folio does not change the file.",
-                "Codex 的 config.toml 格式无法识别。Folio 不改动此文件。",
+                "Folio 无法识别 Codex 的 config.toml 格式。Folio 不改动此文件。",
             ),
             Self::CodexHookAddedToast => pick(
                 lang,
@@ -7214,7 +7216,7 @@ impl Text {
 pub fn could_not_resume_text(title: &str, id: &str) -> String {
     match current() {
         Lang::English => format!("{title} session {id} could not be resumed."),
-        Lang::Chinese => format!("{title} 会话 {id} 无法恢复。"),
+        Lang::Chinese => format!("{title} 会话 {id} 未能恢复。"),
     }
 }
 
