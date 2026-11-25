@@ -3595,13 +3595,10 @@ mod detached_command_tests {
         let mut detached = detached_command(&exe);
         detached.args(["--exact", HELPER]).env_remove(SLOT);
         let value = match slot.as_str() {
-            "closed" => Some(a_closed_value()),
-            "unduplicable" => an_unduplicable_value(),
+            "closed" => a_closed_value(),
+            "unduplicable" => an_unduplicable_value()
+                .expect("a handle of this process that DuplicateHandle refuses (an ETW registration)"),
             other => panic!("no such slot: {other}"),
-        };
-        let Some(value) = value else {
-            println!("OUTCOME {slot} none: no handle of this process refuses DuplicateHandle");
-            return;
         };
         // SAFETY: reads and sets this process's own standard input slot; it is put back below.
         let original = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.expect("the input slot");
