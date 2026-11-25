@@ -206,12 +206,29 @@ jobs:
   # Gatekeeper assertion below, which demands a *refusal* of the ad-hoc build as
   # firmly as it demands an acceptance of the notarized one.
   #
-  # **`macos-14` and not `macos-15`.** `packaging/macos/README.md` fixes the
-  # deployment target at macOS 14.0, and the runner whose SDK and libraries are
-  # that version is the one that cannot quietly link a symbol introduced after
-  # it. Both labels are arm64, which is the other half of what this job needs
-  # and the only architecture this preview ships, so the choice between them is
-  # entirely the deployment target's.
+  # **`macos-15`, because GitHub no longer has a `macos-14`.** The deployment
+  # target is macOS 14.0, stated once as `LSMinimumSystemVersion` in
+  # `packaging/macos/Info.plist.in`. This job ran on `macos-14` until
+  # 2026-11-25, because a runner whose SDK and libraries are that version is
+  # one that cannot quietly link a symbol introduced after it. GitHub has since
+  # retired every macOS 14 image from Actions (the runner-images README dates
+  # it 2026-11-02), and on 2026-11-25 the release run had this job cancelled
+  # within a second on both attempts with the annotation "The configuration
+  # 'macos-14-arm64-us-default' is not supported". The oldest image left is
+  # macOS 15, and building on it against a 14.0 deployment target is what every
+  # project does once the matching image is gone.
+  #
+  # It costs one thing, and it is said here rather than left to be found: the
+  # runner label no longer witnesses the deployment target. The Xcode on that
+  # image carries only macOS 15 SDKs, and nothing in a Rust build checks a
+  # framework symbol against the deployment target, so a symbol that first
+  # shipped in macOS 15 would now link in this job and be found by a user on 14
+  # instead. The label is `macos-15` and not `macos-latest` so that it is still
+  # stated rather than inherited, which is the reason
+  # `docs/plans/port/macos-plan-2026-09-12.md` gives under Q4 for stating the
+  # deployment target at all: `macos-latest` is macOS 26 today, and it moves
+  # when GitHub moves it. Both labels are arm64, which is the other half of
+  # what this job needs and the only architecture this preview ships.
   #
   # The four scripts are M5-1's and this job does not restate a line of what
   # they do; `docs/RELEASING.md` ▸ macOS and `packaging/macos/README.md` are
@@ -221,7 +238,7 @@ jobs:
     # Not after a publication either; `macos-artifact` needs this job, so it
     # is skipped with it.
     if: github.event_name != 'release' && !inputs.verify_published
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 90
     # **What the job after this one is allowed to know.** `VERSION` and
     # `FOLIO_SIGNED` are written into this job's environment while it runs, and
@@ -238,7 +255,9 @@ jobs:
       # `LSMinimumSystemVersion` in `packaging/macos/Info.plist.in`, stated
       # once; a `MACOSX_DEPLOYMENT_TARGET` in this file would be a second
       # literal 14.0, agreeing with the first right up until one of them moved.
-      # What this job contributes to the same claim is the runner label above.
+      # The runner label above was this job's witness to the same claim until
+      # GitHub retired the macOS 14 images; on `macos-15` it is not one, and
+      # the block before `macos:` says what that leaves uncovered.
       #
       # Where the pieces go, and the one distinction that matters among them:
       # `macos-package` is the release page's shape — every file in it is hashed
@@ -673,10 +692,13 @@ jobs:
   # *Clean-machine coverage* is where the two halves are put on one page.
   #
   # `needs: macos` and nothing else: if the lane did not produce an artifact,
-  # there is nothing here to ask.
+  # there is nothing here to ask. `macos-15` for the reason the build job
+  # gives: it is the oldest macOS image GitHub still has. What the change costs
+  # the build job it does not cost here, because the questions below are put to
+  # a signature and a ticket rather than to an SDK.
   macos-artifact:
     needs: macos
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
     env:
       FOLIO_DMG: ${{ needs.macos.outputs.dmg }}

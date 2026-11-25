@@ -83,7 +83,14 @@ Q6 of the plan, where they are also recorded.
   (`security find-identity -v -p codesigning`) and is deliberately **not**
   written anywhere in this repository.
 - **Minimum macOS 14.0**, stated as the deployment target rather than inherited
-  from whatever the build machine is running.
+  from whatever the build machine is running. It is `LSMinimumSystemVersion` in
+  `Info.plist.in`, and that is the one place it is written. Until 2026-11-25
+  the release lane also built on GitHub's `macos-14` runner, so the build
+  machine was the deployment target too; GitHub has retired the macOS 14
+  images, and the lane now builds on `macos-15`, the oldest it has. The build
+  machine is therefore newer than the deployment target, and no step of the
+  build checks a framework symbol against 14.0 (`.github/workflows/release.yml`
+  says what that leaves uncovered).
 - **arm64 only** for the preview.
 - **Not sandboxed**: Developer ID distribution, hardened runtime, and the
   minimal entitlements in `entitlements.plist` — no exceptions.

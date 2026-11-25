@@ -10626,7 +10626,9 @@ io.github.lulu-loopp.folio 0.3.0
 
 **① 这个 job 是什么,以及它唯一不是的那样东西。** `release.yml` 长出第二个 job。它在一台 macOS 跑器上建 `bt-app`、装出应用包、签它、能公证的时候公证它、写出磁盘映像、留下调试信息、给做出来的东西算哈希,然后启动它建出来的那样东西、问它是什么。它**不**做的是把这里面任何一样挂到一个 release 上,而那个文件顶上那一段就是全部理由:一个 release 是在签得了的那台机器上签的,所以那台机器是唯一做得出 release 的地方。这件事的票要求上传「到 Windows job 建的那同一个 release」——没有那么一个 release,这是 0.2.1 发完、它离发出一份未签名草稿只差一个按钮之后作出的决定。所以 macOS 这条车道跟 Windows 那条一样,留下的是 workflow 产物,而一个 release 怎么做,仍然全写在 `docs/RELEASING.md` 里。
 
-**② `macos-14`,而部署目标就是全部理由。** `packaging/macos/README.md` 把最低版本定在 macOS 14.0,是写明的而不是继承的。两个跑器标签都是 arm64——这个 job 要的另一半,也是这个预览版唯一发的架构——所以分开它们的是 SDK 和构建所链的那些库。在产品声称跑得动的最老那个系统上构建,挡住的是一个它之后才引入的符号被悄悄链进来、然后被一个 14 上的用户而不是被这个 job 发现。
+**② 原是 `macos-14`,理由全在部署目标;2026-11-25 起是 `macos-15`。** `packaging/macos/README.md` 把最低版本定在 macOS 14.0,是写明的而不是继承的,写在 `packaging/macos/Info.plist.in` 的 `LSMinimumSystemVersion` 里,只写这一处。两个跑器标签都是 arm64——这个 job 要的另一半,也是这个预览版唯一发的架构——所以当初分开它们的是 SDK 和构建所链的那些库。在产品声称跑得动的最老那个系统上构建,挡住的是一个它之后才引入的符号被悄悄链进来、然后被一个 14 上的用户而不是被这个 job 发现。
+
+2026-11-25 GitHub 已停用 macos-14 镜像(runner-images 的说明记为 2026-11-02 起全部下线)。当天 `release.yml` 在 `release/0.4.10` 上的运行里,这个 job 两次都在一秒内被取消,注解是 "The configuration 'macos-14-arm64-us-default' is not supported"。跑器因此改为 `macos-15`,即 GitHub 现存最老的 macOS 镜像;第二个 job `macos-artifact` 同样改了。部署目标仍是 Info.plist 里的 14.0,但跑器标签不再是它的见证:这台镜像上的 Xcode 只带 macOS 15 的 SDK,Rust 的构建也不拿框架符号去对部署目标,所以一个 macOS 15 才有的符号现在会在这里链进去,发现它的是一个 14 上的用户。匹配的镜像没了,就在新一版系统上对着旧的部署目标构建,各个项目都是这样做的。标签写 `macos-15` 而不写 `macos-latest`,是为了它仍是写明的而不是继承的,理由与 `docs/plans/port/macos-plan-2026-09-12.md` Q4 写明部署目标的理由相同:`macos-latest` 现在指向 macOS 26,而且会随 GitHub 移动。
 
 **③ 凭据的三种状态,没有第四种。** 那四个 secret 和两个变量只点名一次,在 `docs/RELEASING.md` ▸ macOS 里,而这个 job 读的恰好是那几个名字。一个都没设时它签 ad-hoc——`codesign` 自己那个 `-`,一个对着真实字节、背后没有人的真签名——而产物叫 `folio-macos-<version>-unsigned`。全设了时它把那个 `.p12` 导进一个在 `RUNNER_TEMP` 里、只活这个 job 那么长的钥匙串,用 Developer ID 身份签名,给应用和映像都公证并钉票,而产物去掉那个后缀。设了**一部分**时它停在那里,并说出缺的是哪几个:一份有证书没有公证钥匙的构建,世界上每一台 Mac 都会拒,而十分钟之后在 `spctl` 上才发现这件事,点的是错的那样东西。
 
@@ -10794,7 +10796,7 @@ macOS 26.6.2,Apple M4,背衬缩放 2;本分支的 debug 构建装在一个一次
 
 然后是那条程序性的意见,即使上面每个数字都宽裕它也成立:**一个访客的屏幕只存在于一个 AppKit 视图里,在一个窗口应用里,在一个登录着的图形会话里。** 这个框架没有远程控制台。M6 要**看到**的每一样东西——已识别开发者面板、拖到 `/Applications` 的操作、通知和辅助功能弹窗、Services 菜单——都由窗口服务器绘制。所以访客仍然需要一个人坐在 Mac 前驱动,而这正是第二个账户已经花掉的代价,拿一天工作量换不来任何无人值守的验收。
 
-**③ 人做不了的那一半,在一台真正干净的机器上。** `release.yml` 长出 `macos-artifact`:`needs: macos`,第二台 `macos-14` 跑器,`actions/download-artifact` 取构建 job 上传的产物,然后 `shasum -a 256 -c SHA256SUMS.txt`——release 页面邀请读者用来校验下载的那个文件——然后把映像挂上、问一份下载被问的问题:对映像 `spctl -t open --context context:primary-signature`,对里面的应用 `codesign --verify --deep --strict` 和 `spctl`,对两者 `xcrun stapler validate`。跟构建 job 一样两个方向都断言:一次 ad-hoc 运行在这里也必须**被拒**,否则这个 job 会放过一次什么都没签的 release。
+**③ 人做不了的那一半,在一台真正干净的机器上。** `release.yml` 长出 `macos-artifact`:`needs: macos`,第二台 `macos-14` 跑器(2026-11-25 起是 `macos-15`,原因见 §13.43 ②),`actions/download-artifact` 取构建 job 上传的产物,然后 `shasum -a 256 -c SHA256SUMS.txt`——release 页面邀请读者用来校验下载的那个文件——然后把映像挂上、问一份下载被问的问题:对映像 `spctl -t open --context context:primary-signature`,对里面的应用 `codesign --verify --deep --strict` 和 `spctl`,对两者 `xcrun stapler validate`。跟构建 job 一样两个方向都断言:一次 ad-hoc 运行在这里也必须**被拒**,否则这个 job 会放过一次什么都没签的 release。
 
 用第二台跑器而不是在第一台上加四行的原因:构建 job 验证的是造它的那台机器上的一个目录,在造出来几分钟之后,签名钥匙串还在搜索表里、公证的回答还热着。那是对的检查,也是不同的检查。这里验证的是从组装 release 的那个存储里取回来的字节,在一台没有构建过它们、跟它们没有任何历史的机器上。大约两分钟。
 
