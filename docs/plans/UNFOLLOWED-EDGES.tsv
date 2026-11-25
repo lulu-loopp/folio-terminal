@@ -4,7 +4,7 @@
 # name) with the number of calls behind it. Held equal to the tree by bt-source's call_graph test;
 # shrink-only against the merge base by scripts/ci/check-unfollowed-edges.ps1 - a key added or grown
 # carries a reason 'YYYY-MM-DD: <why>'. Never edit a key or a count by hand.
-# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1845. A call whose name is renamed to one only one item declares leaves the list and is counted here.
+# Ambiguous calls with exactly one candidate, not listed by site above or below (bt_source::call_graph::Unresolved::sole_candidate; a guard naming a callee's callers counts each as a call of its one candidate): 1846. A call whose name is renamed to one only one item declares leaves the list and is counted here.
 file	item	kind	name	sites	reason
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_deref	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
 crates/bt-app/src/agent_hooks_step.rs	bt-app crate::agent_hooks_step::AgentHooksStep::say_changed	Ambiguous	as_str	1	2026-11-08: T-UPDATE-CARRIES-EVERYTHING-FOLIO-WROTE (0.4.10 plan row 68a, R-D); a family's line compared with the last one said for it in this process, under the memory's lock (Option::as_deref, String::as_str, clone, iter_mut, zip, the lock's unwrap_or_else for a poisoned lock); in-memory, no wait
@@ -2668,7 +2668,7 @@ crates/bt-app/src/main.rs	bt-app crate::measure_markdown_local	Dynamic	measure	1
 crates/bt-app/src/main.rs	bt-app crate::native_window_of	Ambiguous	as_raw	1	
 crates/bt-app/src/main.rs	bt-app crate::native_window_of	Ambiguous	context	1	
 crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	is_ok	1	2026-11-03: T-SHUTDOWN-SAVE-LANDS-BEFORE-THE-END (plan row 201, re-ruling (A)+(C)); Result::is_ok on what EventLoopProxy::send_event returned for the question's wake, handed to session_end::posted; a value read, no door
-crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	send_event	2	
+crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	send_event	3	2026-10-27: T-UIA-SKELETON: the UI Automation wake sends AppEvent::UiAutomationAsked through the loop proxy, as the window's other wakes do: never waits
 crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	text	1	
 crates/bt-app/src/main.rs	bt-app crate::new_window_runtime	Ambiguous	to_owned	1	
 crates/bt-app/src/main.rs	bt-app crate::note_text_site	Ambiguous	len	1	
@@ -5229,6 +5229,10 @@ crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::ab
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::answer_restore	Ambiguous	is_empty	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::answer_restore	Ambiguous	saturating_sub	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::close_as_it_stands	Ambiguous	map	1	
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::flush_uia	Ambiguous	publish	1	2026-10-27: T-UIA-SKELETON: the window's UiaDoor (UiaHook or the headless recorder) through its associated type: a lock held to swap one Arc, an atomic load, an atomic swap; no other door
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::flush_uia	Ambiguous	take_focus_request	1	2026-10-27: T-UIA-SKELETON: the window's UiaDoor (UiaHook or the headless recorder) through its associated type: a lock held to swap one Arc, an atomic load, an atomic swap; no other door
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::flush_uia	Ambiguous	threads	1	2026-10-28: T-UIA-SKELETON (review fold): the window's UiaDoor (UiaHook or the headless recorder) through its associated type: an atomic load of the first client call's thread, no wait
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::flush_uia	Ambiguous	wanted	1	2026-10-27: T-UIA-SKELETON: the window's UiaDoor (UiaHook or the headless recorder) through its associated type: a lock held to swap one Arc, an atomic load, an atomic swap; no other door
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::hand_over_across_windows	Ambiguous	unwrap_or_default	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::open_window	Ambiguous	and_then	3	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::open_window	Ambiguous	clone	2	
@@ -5263,6 +5267,8 @@ crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::re
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::settle_close_wait	Ambiguous	collect	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::settle_close_wait	Ambiguous	map	1	
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::settle_close_wait	Dynamic	finds	1	
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uia_keys	Ambiguous	collect	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uia_keys	Ambiguous	filter_map	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uncommitted_edit_name	Ambiguous	into_owned	2	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `uncommitted_edit_name` from main.rs into runtime/windows.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uncommitted_edit_name	Ambiguous	is_empty	4	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `uncommitted_edit_name` from main.rs into runtime/windows.rs: K2 moves the item, not the call
 crates/bt-app/src/runtime/windows.rs	bt-app crate::runtime::windows::Runtime::uncommitted_edit_name	Ambiguous	map	2	2026-10-25: T-SPLIT-2B batch 12; the same site, moved by K2 batch 12 with `uncommitted_edit_name` from main.rs into runtime/windows.rs: K2 moves the item, not the call
@@ -6568,6 +6574,16 @@ crates/bt-app/src/tray_fold.rs	bt-app crate::tray_fold::TrayStand::stand_the_ico
 crates/bt-app/src/tray_fold.rs	bt-app crate::tray_fold::tray_labels	Ambiguous	text	3	2026-11-19: T-TRAY-87B-WINDOWS-ICON (0.4.10 plan row 87, part 87b); the three menu rows and the tip read from the i18n table (Text::text, str::to_owned); in-memory, no wait
 crates/bt-app/src/tray_fold.rs	bt-app crate::tray_fold::tray_labels	Ambiguous	to_owned	3	2026-11-19: T-TRAY-87B-WINDOWS-ICON (0.4.10 plan row 87, part 87b); the three menu rows and the tip read from the i18n table (Text::text, str::to_owned); in-memory, no wait
 crates/bt-app/src/tray_fold.rs	bt-app crate::tray_fold::tray_state_of	Dynamic	any	4	2026-11-19: T-TRAY-87B-WINDOWS-ICON (0.4.10 plan row 87, part 87b); the fold's priority read through a closure over the sights (any of a claim): a local closure, no wait
+crates/bt-app/src/uia_events.rs	bt-app crate::uia_events::UiaEventsLane::request	Ambiguous	is_ok	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/uia_events.rs	bt-app crate::uia_events::run	Ambiguous	raise	1	2026-10-27: T-UIA-SKELETON: UiaEvents::raise on the bt-uia-events worker (its WorkerCtx): UiaRaiseAutomationEvent off the window thread (R6)
+crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::UiaReport::due	Ambiguous	all	1	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::pane_text	Ambiguous	as_str	2	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::pane_text	Ambiguous	map	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::pane_text	Ambiguous	map_or	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::pane_text	Ambiguous	unwrap_or	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::pane_text	Ambiguous	zip	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::says_the_same	Ambiguous	all	1	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
+crates/bt-app/src/uia_report.rs	bt-app crate::uia_report::says_the_same	Ambiguous	as_str	2	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	in_lang	8	2026-11-05: T-CODEX-NOTIFY-ALREADY-TAKEN-FOLIO-CHAINS-TO-IT (0.4.10 plan row 69, review fold); Fate::LeftUnread rendered as removed or not present with its reason (Text::in_lang, format!); an in-memory computation over values the call already holds, no wait
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	join	1	
 crates/bt-app/src/uninstall.rs	bt-app crate::uninstall::Entry::line	Ambiguous	to_owned	4	
@@ -7560,6 +7576,7 @@ crates/bt-app/src/window_news.rs	bt-app crate::window_news::WindowSeats::take	Am
 crates/bt-app/src/window_news.rs	bt-app crate::window_news::WindowSeats::tell	Dynamic	clone	1	
 crates/bt-app/src/window_news.rs	bt-app crate::window_news::WindowSeats::tell_all	Dynamic	clone	1	
 crates/bt-app/src/window_news.rs	bt-app crate::window_news::WindowSeats::want	Ambiguous	contains	1	
+crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::answer_ui_automation	Ambiguous	ok	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::client_origin	Ambiguous	map	1	
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::client_origin	Ambiguous	ok	1	
 crates/bt-app/src/window_seam.rs	bt-app crate::window_seam::<Arc as WindowHost>::ime_facts	Ambiguous	unwrap_or_default	1	
@@ -10717,6 +10734,27 @@ crates/bt-platform/src/trust_windows.rs	bt-platform crate::trust::arm::signature
 crates/bt-platform/src/trust_windows.rs	bt-platform crate::trust::arm::wide	Ambiguous	collect	1	
 crates/bt-platform/src/trust_windows.rs	bt-platform crate::trust::arm::wide	Ambiguous	encode_wide	1	
 crates/bt-platform/src/trust_windows.rs	bt-platform crate::trust::arm::win_verify_trust	Ambiguous	cast	2	
+crates/bt-platform/src/uia.rs	bt-platform crate::uia::PaneText::new	Ambiguous	saturating_sub	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia.rs	bt-platform crate::uia::PaneText::new	Ambiguous	unwrap_or	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia.rs	bt-platform crate::uia::PaneText::offset_of	Ambiguous	unwrap_or	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia.rs	bt-platform crate::uia::RowText::from_cells	Ambiguous	all	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia.rs	bt-platform crate::uia::RowText::from_cells	Ambiguous	chars	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia.rs	bt-platform crate::uia::RowText::from_cells	Ambiguous	unwrap_or	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia.rs	bt-platform crate::uia::RowText::index_at_column	Ambiguous	unwrap_or	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::HookData::publish	Ambiguous	clone	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::HookData::publish	Ambiguous	unwrap_or_else	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::UiaEvents::raise	Ambiguous	as_bool	1	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::UiaEvents::raise	Ambiguous	is_ok	1	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::UiaEvents::raise	Ambiguous	is_some	1	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::UiaEvents::raise	Ambiguous	load	1	2026-10-28: T-UIA-SKELETON (review fold): a standard-library method (Option, Result, Iterator, str, bool, atomic) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::UiaEvents::raise	Ambiguous	pane	1	2026-10-28: T-UIA-SKELETON (review fold): the publication's own lookups (WindowText::pane; Shared::snapshot, one lock held to copy an Arc), on the bt-uia-events worker
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::UiaEvents::raise	Ambiguous	snapshot	1	2026-10-28: T-UIA-SKELETON (review fold): the publication's own lookups (WindowText::pane; Shared::snapshot, one lock held to copy an Arc), on the bt-uia-events worker
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::UiaHook::install	Ambiguous	as_bool	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::uia_subclass	Ambiguous	get	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::uia_subclass	Ambiguous	is_null	1	2026-10-27: T-UIA-SKELETON: a standard-library method (Option, Result, Iterator, str, bool, pointer, Cell) on a receiver the grammar does not type, which reaches no door
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::uia_subclass	Ambiguous	release	1	2026-10-27: T-UIA-SKELETON: HookData's own root and release, on the window thread in the subclass: the root made once, or handed back at WM_DESTROY
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::uia_subclass	Ambiguous	root	1	2026-10-27: T-UIA-SKELETON: HookData's own root and release, on the window thread in the subclass: the root made once, or handed back at WM_DESTROY
+crates/bt-platform/src/uia_windows.rs	bt-platform crate::uia::imp::uia_subclass	Ambiguous	to_interface	1	2026-10-27: T-UIA-SKELETON: a windows-core ComObject cast to the provider interface UiaReturnRawElementProvider is given: no door
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::frame	Ambiguous	clone	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::frame	Ambiguous	into_inner	1	
 crates/bt-platform/src/video/engine.rs	bt-platform crate::video::engine::Engine::frame	Ambiguous	load	1	
