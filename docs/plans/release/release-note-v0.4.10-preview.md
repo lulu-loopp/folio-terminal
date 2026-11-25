@@ -44,7 +44,7 @@ two Known issues say how.
 - On Windows, pasting a file copied inside a program saves it to Folio's
   clipboard folder and pastes its path, as a pasted screenshot is.
 - On Windows, each terminal pane is a text control that Narrator and other
-  accessibility tools can find, read and follow. <!-- RELEASE-CUT: keep only if row 56 (88a) has landed at M2 -->
+  accessibility tools can find, read and follow.
 - Clicking a video plays or pauses it, double-clicking zooms its pane, the
   wheel changes its volume, the progress bar shows the time under the pointer,
   `Home` and `End` go to the start and end, `,` and `.` step one frame while
@@ -259,4 +259,4 @@ daily check; pressing Check there still asks.
 
 </details>
 
-Full changelog: [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.10-preview/CHANGELOG.md#0410-preview--<DATE>) · [v0.4.8-preview…v0.4.10-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.8-preview...v0.4.10-preview)
+Full changelog: [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.10-preview/CHANGELOG.md#0410-preview--2026-11-25) · [v0.4.8-preview…v0.4.10-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.8-preview...v0.4.10-preview)

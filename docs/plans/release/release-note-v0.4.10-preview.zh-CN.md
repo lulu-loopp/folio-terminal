@@ -26,7 +26,7 @@
 - **关闭最后一个窗口后，Folio 继续运行**：Windows 上留在通知区域，图标显示 agent 正在工作、已完成或正在等你；macOS 上留在程序坞中。设置 ▸ 常规 ▸「关闭后继续运行」可将其关闭。
 - **Windows 上，设置 ▸ 常规 ▸「登录时启动」**会在登录 Windows 时启动 Folio，默认关闭。
 - **Windows 上，粘贴从程序内部复制的文件**时，Folio 把它保存到自己的剪贴板文件夹并粘贴它的路径，与粘贴截图时一样。
-- **Windows 上，每个终端窗格都是一个文本区域**，讲述人等辅助功能工具可以找到它、读取其中的文字并跟随光标。 <!-- RELEASE-CUT: keep only if row 56 (88a) has landed at M2 -->
+- **Windows 上，每个终端窗格都是一个文本区域**，讲述人等辅助功能工具可以找到它、读取其中的文字并跟随光标。
 - **视频**：单击画面播放或暂停，双击放大所在窗格，滚轮调节音量，进度条显示指针处的时间，`Home` 和 `End` 跳到开头和结尾，暂停时 `,` 和 `.` 逐帧后退或前进，播完的视频再次播放时从头开始。
 - **方向键可在放大的图片上移动**；在文件列中用鼠标中键单击文件，会在当前窗格旁新开一个窗格显示它。
 - **设置 ▸ Agent** 会说明某个 agent 的 hook 为什么不属于这个 Folio，以及恢复会话还需要哪些 agent 的 hook。
@@ -148,4 +148,4 @@ shasum -c SHA256SUMS-macos.txt
 
 </details>
 
-完整列表见 [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.10-preview/CHANGELOG.md#0410-preview--<DATE>) · [v0.4.8-preview…v0.4.10-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.8-preview...v0.4.10-preview)
+完整列表见 [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.10-preview/CHANGELOG.md#0410-preview--2026-11-25) · [v0.4.8-preview…v0.4.10-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.8-preview...v0.4.10-preview)

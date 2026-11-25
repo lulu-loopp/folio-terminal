@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "bt-app"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "anyhow",
  "base64",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "bt-compose"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-detect",
  "bt-doc",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "bt-corpus"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "anyhow",
  "bt-compose",
@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "bt-detect"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-doc",
  "bt-transcript",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "bt-doc"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-transcript",
  "thiserror 2.0.18",
@@ -360,21 +360,21 @@ dependencies = [
 
 [[package]]
 name = "bt-effects"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "web-time",
 ]
 
 [[package]]
 name = "bt-layout"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-source",
 ]
 
 [[package]]
 name = "bt-lint-probe"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-platform",
  "bt-pty",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "bt-math"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-doc",
  "bt-effects",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "bt-persist"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-platform",
  "bt-source",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "bt-platform"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "block2 0.6.2",
  "bt-effects",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "bt-pty"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-platform",
  "bt-pty",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "bt-render"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-detect",
  "bt-doc",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "bt-render-probe"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-doc",
  "bt-effects",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "bt-source"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-testpath",
  "proc-macro2",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "bt-term"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -547,11 +547,11 @@ dependencies = [
 
 [[package]]
 name = "bt-testpath"
-version = "0.4.8"
+version = "0.4.10"
 
 [[package]]
 name = "bt-transcript"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bitflags 2.13.0",
  "bt-testpath",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "bt-unicode"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "ttf-parser",
  "unicode-segmentation",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "bt-viewport"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-doc",
  "bt-transcript",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "bt-winres"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "ed25519-compact",
  "miniz_oxide",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "bt-workbench"
-version = "0.4.8"
+version = "0.4.10"
 dependencies = [
  "bt-layout",
 ]
