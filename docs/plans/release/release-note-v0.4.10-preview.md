@@ -22,8 +22,8 @@ two Known issues say how.
 - On Windows, Folio can start when you sign in, comes back with its windows
   after Windows restarts for an update, and restores your tabs after a
   shutdown.
-- Pasting a file copied inside a program, such as a mail attachment or a file
-  in a zip folder, saves it and pastes its path.
+- On Windows, pasting a file copied inside a program, such as a mail attachment
+  or a file in a zip folder, saves it and pastes its path.
 - From this version on, Folio checks an update with its own release key, so a
   revoked certificate or a missing signature no longer stops an update.
 
@@ -93,8 +93,9 @@ two Known issues say how.
 - Clicking in a name, the find bar, a search, a Settings field, the palette or
   a branch prompt puts the cursor where you clicked; Shift-click and dragging
   select, and the selection is shown.
-- A picture or video that another program is holding open, or a video player
-  that is slow to start, is no longer treated as a file Folio cannot show.
+- A picture or video that another program is holding open is no longer treated
+  as a file Folio cannot show, and neither is a video whose player is slow to
+  start.
 - A PDF from an address that does not end in `.pdf` is no longer stretched on a
   scaled display.
 - On Windows 10 without a graphics driver, Folio no longer closes at its first
