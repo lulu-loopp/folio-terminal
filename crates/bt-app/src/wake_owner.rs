@@ -247,7 +247,8 @@ impl WakeOwner {
     ///
     /// The others are state: a shell's resize and its burst, a synchronized update's timeout, a
     /// standing credential, a paste owed, a page's teardown, a document's save, a watch, the update
-    /// check, the title (read off the window by the taskbar's own list as well as drawn), and every
+    /// check, the title (read off the window by the taskbar's own list as well as drawn), a change
+    /// UI Automation is owed (what an accessibility client reads, not a picture), and every
     /// application clock — kept, so that a put-away run keeps doing its work.
     pub(crate) const fn draws_a_picture(self) -> bool {
         match self {
@@ -305,6 +306,7 @@ impl WakeOwner {
             | Self::PreviewWatch
             | Self::FilesWatch
             | Self::WindowTitle
+            | Self::UiAutomation
             | Self::SearchWalk
             | Self::WebEngineWarmUp
             | Self::SpareWebController
