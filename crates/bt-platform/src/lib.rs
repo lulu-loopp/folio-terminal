@@ -3469,6 +3469,290 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
     command
 }
 
+/// **The door for a child this process starts and lets go of** (0.4.10 clean-machine rehearsal,
+/// G3 F1 and F2): [`quiet_command`], with the null device for all three standard streams.
+///
+/// Every start of Folio's own image or of its applier comes from here: the hand-over's start of
+/// the applier and the exit guard's start of a Folio (the panic hook's included), the applier's
+/// start of the new copy and of its trial, the rescue copy, the recovery a trial hands back to,
+/// Explorer's launch of a Folio in a folder, and macOS's `open` of the bundle. A probe whose
+/// output is read names its streams ([`spawn_probe`]'s [`ProbeStdio`]), and a child that must
+/// outlive this process's job is [`quiet_breakaway_command`]'s, which is this door with the
+/// breakaway flag.
+///
+/// **Why not inherit.** On Windows `std`'s `Stdio::inherit` reads each of this process's three
+/// standard slots (`GetStdHandle`) and duplicates the handle it finds there for the child
+/// (`DuplicateHandle`, inheritable) before `CreateProcessW` is called, and a duplication that
+/// fails is the start's error. An empty slot (null or `INVALID_HANDLE_VALUE`) passes nothing, but
+/// a slot naming a handle this process no longer holds is duplicated as whatever has that value
+/// now. A Folio started from a console has such a slot: the front door's `AttachConsole` fills
+/// the empty standard input with a console handle, the resident run points output and error at
+/// `diagnostics.log`, and `FreeConsole` closes the console handle and leaves its value in the
+/// input slot. With nothing at that value the start fails with `ERROR_INVALID_HANDLE` (6); with
+/// an ETW registration there, which cannot be duplicated, with `ERROR_NOT_SUPPORTED` (50); any
+/// other object is handed to the child as its input. Both refusals stopped an update's restart
+/// on the clean machine. A child this process lets go of reads no input and writes its lines into
+/// its log by name, so it is given nothing of this process's: the null device, opened afresh for
+/// each stream.
+///
+/// **No other creation flag.** `CREATE_NO_WINDOW` stays, [`quiet_command`]'s rule: a console
+/// program started here gets a console of its own with no window, never this process's.
+/// `DETACHED_PROCESS` does not combine with it (Windows ignores `CREATE_NO_WINDOW` beside it) and
+/// would leave a console program with no console at all; `folio.exe` is a windows-subsystem
+/// image and is given no console either way. `CREATE_NEW_PROCESS_GROUP` decides who hears a
+/// console's Ctrl+C, and the child shares no console with this process; it would also start the
+/// child with Ctrl+C ignored. Neither changes what the child is handed, so neither is set.
+///
+/// Off Windows the streams are descriptors 0–2, passed by position, and a dangling one refuses
+/// no start; the rule is the same there: a child let go of holds none of this process's streams,
+/// which in a resident run are its `diagnostics.log`.
+#[must_use]
+pub fn detached_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = quiet_command(program);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+#[cfg(all(test, windows))]
+mod detached_command_tests {
+    use super::*;
+    use std::os::windows::io::IntoRawHandle as _;
+    use windows::Win32::Foundation::{
+        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_HANDLE,
+        ERROR_NOT_SUPPORTED, HANDLE,
+    };
+    use windows::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE, SetStdHandle};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    /// What the helper makes its standard input slot name: `closed` or `unduplicable`.
+    const SLOT: &str = "DETACHED_COMMAND_TESTS_SLOT";
+    const HELPER: &str = "detached_command_tests::helper_starts_a_child_over_a_dangling_input_slot";
+
+    /// A value that named a handle of this process and names nothing now: a file opened and
+    /// closed, as the front door's `FreeConsole` closes the console handle `AttachConsole` put in
+    /// the slot.
+    fn a_closed_value() -> HANDLE {
+        let file = std::fs::File::open(std::env::current_exe().expect("this test binary"))
+            .expect("open this test binary");
+        let value = HANDLE(file.into_raw_handle());
+        // SAFETY: the handle is this function's own and is closed once; only its value is kept.
+        unsafe { CloseHandle(value) }.expect("close it");
+        value
+    }
+
+    /// A value naming a handle of this process that `DuplicateHandle` refuses with
+    /// `ERROR_NOT_SUPPORTED` — an ETW registration, of which every process holds a few — or
+    /// `None` when there is none.
+    fn an_unduplicable_value() -> Option<HANDLE> {
+        // SAFETY: the pseudo-handle of this process; nothing is opened.
+        let me = unsafe { GetCurrentProcess() };
+        (4..0x4_0000_usize).step_by(4).find_map(|value| {
+            let value = HANDLE(value as *mut std::ffi::c_void);
+            let mut copy = HANDLE::default();
+            // SAFETY: asks this process to copy one of its own handle values into itself; a value
+            // naming nothing is refused, and a copy made is closed at once.
+            match unsafe {
+                DuplicateHandle(me, value, me, &raw mut copy, 0, true, DUPLICATE_SAME_ACCESS)
+            } {
+                Ok(()) => {
+                    // SAFETY: the copy is this function's own.
+                    let _ = unsafe { CloseHandle(copy) };
+                    None
+                }
+                Err(error) => (error.code() == ERROR_NOT_SUPPORTED.to_hresult()).then_some(value),
+            }
+        })
+    }
+
+    /// How a start went: `started` (and waited for), or `refused <system code>`.
+    fn outcome(started: std::io::Result<std::process::Child>) -> String {
+        match started {
+            Ok(mut child) => {
+                let _ = child.wait();
+                "started".to_owned()
+            }
+            Err(error) => format!("refused {}", error.raw_os_error().unwrap_or(-1)),
+        }
+    }
+
+    /// The helper, in a process of its own: its standard input slot is made to name what
+    /// [`SLOT`] says, a child (this test binary, asked for this helper with no [`SLOT`], which
+    /// does nothing) is started once with `std`'s inherited streams and once through
+    /// [`detached_command`], and one `OUTCOME` line says how each went.
+    #[test]
+    fn helper_starts_a_child_over_a_dangling_input_slot() {
+        let Ok(slot) = std::env::var(SLOT) else {
+            return;
+        };
+        let exe = std::env::current_exe().expect("this test binary");
+        // Both built before the slot dangles: nothing opens a handle between the slot's change
+        // and the inherited start's read of it (a freed value is the next one handed out).
+        let mut inherited = quiet_command(&exe);
+        inherited.args(["--exact", HELPER]).env_remove(SLOT);
+        let mut detached = detached_command(&exe);
+        detached.args(["--exact", HELPER]).env_remove(SLOT);
+        let value = match slot.as_str() {
+            "closed" => Some(a_closed_value()),
+            "unduplicable" => an_unduplicable_value(),
+            other => panic!("no such slot: {other}"),
+        };
+        let Some(value) = value else {
+            println!("OUTCOME {slot} none: no handle of this process refuses DuplicateHandle");
+            return;
+        };
+        // SAFETY: reads and sets this process's own standard input slot; it is put back below.
+        let original = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.expect("the input slot");
+        // SAFETY: as above.
+        unsafe { SetStdHandle(STD_INPUT_HANDLE, value) }.expect("point the input slot");
+        let inherited = outcome(inherited.spawn());
+        let detached = outcome(detached.spawn());
+        // SAFETY: as above.
+        let _ = unsafe { SetStdHandle(STD_INPUT_HANDLE, original) };
+        println!(
+            "OUTCOME {slot} value {:#x}: inherited {inherited}, detached {detached}",
+            value.0 as usize
+        );
+    }
+
+    /// RED (0.4.10 clean-machine rehearsal, G3 F1 and F2) — **a child started through
+    /// [`detached_command`] starts whatever this process's standard input slot names**.
+    ///
+    /// The clean machine's Folio held a slot naming a closed console handle (its front door's
+    /// `AttachConsole`, then `FreeConsole`), and `std`'s inherited streams duplicate what a slot
+    /// names before `CreateProcessW` is called: with nothing at that value the update's start was
+    /// refused with `os error 6`, with an ETW registration there with `os error 50`, and no Folio
+    /// window came back. Here a helper process makes its slot name each of the two, and the start
+    /// `quiet_command` builds — streams inherited — is refused with exactly that code (the helper
+    /// holds the machine's state), while the door's start, which hands the child the null device
+    /// for every stream, starts.
+    ///
+    /// PLANT `plant-handoff-P1`: take the three null streams out of `detached_command` — the
+    /// door's start is refused with the inherited one's code.
+    #[test]
+    fn a_detached_start_is_not_refused_by_a_dangling_standard_slot() {
+        for (slot, code) in [
+            ("closed", ERROR_INVALID_HANDLE.0),
+            ("unduplicable", ERROR_NOT_SUPPORTED.0),
+        ] {
+            let ran = quiet_command(std::env::current_exe().expect("this test binary"))
+                .args(["--exact", HELPER, "--nocapture", "--test-threads=1"])
+                .env(SLOT, slot)
+                .output()
+                .expect("start the helper");
+            let said = String::from_utf8_lossy(&ran.stdout);
+            // Where libtest's own words leave it: after the test's name, on the same line.
+            let line = said
+                .lines()
+                .find_map(|line| line.find("OUTCOME ").map(|at| &line[at..]))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the helper ({slot}) said no outcome: {said}{}",
+                        String::from_utf8_lossy(&ran.stderr)
+                    )
+                });
+            assert!(
+                line.contains(&format!("inherited refused {code}")),
+                "with its input slot {slot}, the helper's inherited start is refused with \
+                 os error {code}, as on the clean machine: {line}"
+            );
+            assert!(
+                line.contains("detached started"),
+                "the detached door starts its child whatever the slot names: {line}"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod detached_command_unix_tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    use std::os::unix::io::FromRawFd as _;
+
+    /// `middle` or `leaf`: which of the helper's two roles this process plays.
+    const ROLE: &str = "DETACHED_COMMAND_UNIX_TESTS_ROLE";
+    /// The file the leaf writes its report into.
+    const REPORT: &str = "DETACHED_COMMAND_UNIX_TESTS_REPORT";
+    const HELPER: &str = "detached_command_unix_tests::helper_reports_its_streams";
+
+    /// The helper. As `middle` — started with a pipe on each of its three streams, so that none
+    /// of them is the null device — it starts the leaf through [`detached_command`] and waits for
+    /// it. As `leaf` it writes into [`REPORT`], for each of its descriptors 0–2, whether it is
+    /// `/dev/null`.
+    #[test]
+    fn helper_reports_its_streams() {
+        match std::env::var(ROLE).as_deref() {
+            Ok("middle") => {
+                let status = detached_command(std::env::current_exe().expect("this test binary"))
+                    .args(["--exact", HELPER])
+                    .env(ROLE, "leaf")
+                    .status()
+                    .expect("start the leaf");
+                assert!(status.success(), "{status:?}");
+            }
+            Ok("leaf") => {
+                let null = std::fs::metadata("/dev/null").expect("/dev/null").rdev();
+                let mut report =
+                    std::fs::File::create(std::env::var_os(REPORT).expect("a report path"))
+                        .expect("the report");
+                for descriptor in 0..3 {
+                    // SAFETY: descriptors 0–2 are this process's standard streams; `ManuallyDrop`
+                    // keeps them open, and the file is only `fstat`ed.
+                    let stream = std::mem::ManuallyDrop::new(unsafe {
+                        std::fs::File::from_raw_fd(descriptor)
+                    });
+                    let said = match stream.metadata() {
+                        Ok(meta) if meta.file_type().is_char_device() && meta.rdev() == null => {
+                            "null"
+                        }
+                        Ok(_) => "other",
+                        Err(_) => "closed",
+                    };
+                    writeln!(report, "{descriptor} {said}").expect("write the report");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// RED (0.4.10 clean-machine rehearsal, G3 F1 and F2; the macOS half) — **a child started
+    /// through [`detached_command`] is given the null device for all three streams**, whatever
+    /// its starter holds: here a starter whose three streams are pipes. On Windows an inherited
+    /// stream refused the update's starts (`detached_command_tests`); here it would hand a
+    /// resident Folio's `diagnostics.log` to a child that outlives it.
+    ///
+    /// PLANT `plant-handoff-P1`: take the three null streams out of `detached_command` — the leaf
+    /// holds the starter's pipes.
+    #[test]
+    fn a_detached_child_is_given_the_null_device_for_every_stream() {
+        let report = bt_testpath::temp_path("detached-command-streams");
+        let _ = std::fs::remove_file(&report);
+        let middle = quiet_command(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", HELPER, "--nocapture", "--test-threads=1"])
+            .env(ROLE, "middle")
+            .env(REPORT, &report)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("start the middle helper")
+            .wait_with_output()
+            .expect("the middle helper ends");
+        assert!(
+            middle.status.success(),
+            "{}",
+            String::from_utf8_lossy(&middle.stderr)
+        );
+        let said = std::fs::read_to_string(&report).expect("the leaf's report");
+        let _ = std::fs::remove_file(&report);
+        assert_eq!(said, "0 null\n1 null\n2 null\n", "the leaf's streams");
+    }
+}
+
 /// A child process whose lifetime is the lifetime of one machine probe.
 ///
 /// The immediate child and everything it starts are one unit: Windows keeps
@@ -8594,10 +8878,11 @@ mod probe_child_unix_tests {
     }
 }
 
-/// **What a start through [`quiet_command`] carries from this process** (0.4.7
+/// **What a start through [`quiet_command`] meets in this process** (0.4.7
 /// ticket U-39): the facts a refused start is read against — whether a console
-/// is attached, what the three standard handles the child inherits are, the
-/// working directory, and the creation flags the door sets. Asked only after
+/// is attached, what this process's three standard slots hold (a child of
+/// [`detached_command`] is given none of them), the working directory, and the
+/// creation flags the door sets. Asked only after
 /// a start was refused, so that a refusal the clean machine could not explain
 /// (`ERROR_NOT_SUPPORTED` from every start of one process, 0.4.6's D-5) is
 /// diagnosable from its one line.
@@ -8606,7 +8891,7 @@ pub struct StartConditions {
     /// Whether a console is attached to this process; `None` where the
     /// platform has no such question.
     pub console: Option<bool>,
-    /// What the standard input, output and error a child inherits are, as the
+    /// What this process's standard input, output and error slots hold, as the
     /// platform names their kind; `None` where they are not asked.
     pub standard: Option<[String; 3]>,
     /// This process's working directory, or why it could not be read.
@@ -8625,10 +8910,10 @@ impl std::fmt::Display for StartConditions {
         if let Some([input, output, error]) = &self.standard {
             write!(
                 f,
-                ", standard handles inherited (in {input}, out {output}, err {error})"
+                ", standard slots (in {input}, out {output}, err {error})"
             )?;
         } else {
-            write!(f, ", standard handles inherited")?;
+            write!(f, ", standard slots not asked")?;
         }
         write!(
             f,
@@ -8806,28 +9091,29 @@ pub fn attributes_of(metadata: &std::fs::Metadata) -> String {
 /// the job will kill with its parent. Off Windows there is no inherited job
 /// object and this is the ordinary quiet child door.
 ///
-/// **The child holds none of this process's standard streams**: all three are
-/// the null device unless the caller names others. A child built to outlive
-/// its parent would otherwise keep a duplicate of each, and a resident Folio's
-/// `stdout` and `stderr` are its `diagnostics.log`, inside the data folder; the
-/// uninstaller this door starts removes that folder, and on Windows its probe
-/// is refused by any handle there, its own included.
+/// **The child holds none of this process's standard streams**: it is
+/// [`detached_command`]'s child, all three streams the null device unless the
+/// caller names others. A child built to outlive its parent would otherwise
+/// keep a duplicate of each, and a resident Folio's `stdout` and `stderr` are
+/// its `diagnostics.log`, inside the data folder; the uninstaller this door
+/// starts removes that folder, and on Windows its probe is refused by any
+/// handle there, its own included.
 #[must_use]
 pub fn quiet_breakaway_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[cfg_attr(
+        not(windows),
+        expect(
+            unused_mut,
+            reason = "the breakaway is a Windows flag; elsewhere this is the detached door itself"
+        )
+    )]
+    let mut command = detached_command(program);
     #[cfg(windows)]
-    let mut command = {
+    {
         use std::os::windows::process::CommandExt;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-        let mut command = quiet_command(program);
         command.creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
-        command
-    };
-    #[cfg(not(windows))]
-    let mut command = quiet_command(program);
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    }
     command
 }
 

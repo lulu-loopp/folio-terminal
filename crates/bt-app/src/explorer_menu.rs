@@ -397,17 +397,18 @@ pub fn serve() -> i32 {
             // travel as an argument. This is the same launch the classic verb's
             // `command` value spells.
             //
-            // Through `quiet_command` because that is the one door (§7.40 ①):
-            // this process has no console, and a child Windows had to find a
-            // console for is a Windows Terminal window opening in front of the
-            // window somebody actually asked for.
+            // Through `detached_command`, the quiet door (§7.40 ①) for a child
+            // this process lets go of: this process has no console, and a child
+            // Windows had to find a console for is a Windows Terminal window
+            // opening in front of the window somebody actually asked for; and
+            // the Folio started holds none of this process's standard streams.
             //
             // **And `--from-explorer` beside it** (§7.59, user ruling 2026-09-11): this launch
             // means "a terminal standing in that folder", which is a different sentence from
             // "Folio", and the Folio that is already running answers it with a tab whatever
             // `Settings ▸ General ▸ Opening Folio again` says. The word carries *who asked* and
             // not what to do about it — see `crate::cli::LaunchOrigin`.
-            let _ = bt_platform::quiet_command(&exe)
+            let _ = bt_platform::detached_command(&exe)
                 .arg(crate::cli::EXPLORER_ORIGIN_FLAG)
                 .arg("--cwd")
                 .arg(folder)

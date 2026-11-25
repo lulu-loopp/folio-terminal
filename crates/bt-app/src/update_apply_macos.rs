@@ -2292,12 +2292,13 @@ pub(crate) fn verify_restored_here(bundle: &Path) -> Result<(), String> {
         .map_err(|refusal| refusal.to_string())
 }
 
-/// `open -n -a <bundle> [--args <args>]`, detached, through the one door for
-/// a child: `open` returns once LaunchServices has the launch, and is not
+/// `open -n -a <bundle> [--args <args>]`, detached, through the door for a
+/// child this process lets go of (`detached_command`: none of its standard
+/// streams): `open` returns once LaunchServices has the launch, and is not
 /// waited on. Uncontained on purpose ([`OPEN`]): the build it relaunches
 /// outlives this process.
 pub(crate) fn open_bundle(bundle: &Path, args: &[OsString]) -> io::Result<()> {
-    let mut open = bt_platform::quiet_command(OPEN);
+    let mut open = bt_platform::detached_command(OPEN);
     open.arg("-n").arg("-a").arg(bundle);
     if !args.is_empty() {
         open.arg("--args").args(args);
@@ -2306,7 +2307,8 @@ pub(crate) fn open_bundle(bundle: &Path, args: &[OsString]) -> io::Result<()> {
 }
 
 /// **The trial's launch** (U-38): `open -n -W -a <bundle> --args <args>`,
-/// through the one door for a child, held ([`Launch`]) — `open -W` returns when
+/// through the door for a child this process lets go of (`detached_command`),
+/// held ([`Launch`]) — `open -W` returns when
 /// the application it opened ends. Uncontained on purpose ([`OPEN`]): the
 /// trial must outlive the applier, so the helper is ended only by its own
 /// handle when the watch lets it go.
@@ -2314,7 +2316,7 @@ pub(crate) fn open_bundle(bundle: &Path, args: &[OsString]) -> io::Result<()> {
 /// # Errors
 /// `open` could not be started.
 pub(crate) fn open_trial(bundle: &Path, args: &[OsString]) -> io::Result<Launch> {
-    let mut open = bt_platform::quiet_command(OPEN);
+    let mut open = bt_platform::detached_command(OPEN);
     open.arg("-n").arg("-W").arg("-a").arg(bundle);
     if !args.is_empty() {
         open.arg("--args").args(args);

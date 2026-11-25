@@ -111,14 +111,16 @@ pub(crate) trait Spawner: Send {
     fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool;
 }
 
-/// **The product's spawner**: `bt_platform::quiet_command` — the door for a
-/// program named by an absolute path (`quiet_command_named` is for a bare name
-/// looked up on `PATH`, which this is not) — and the child dropped at once.
+/// **The product's spawner**: `bt_platform::detached_command` — the door for a
+/// child this process lets go of, named by an absolute path, which hands it none
+/// of this process's standard streams (a slot naming a closed console handle
+/// refused the applier's start with `os error 50` or `6`) — and the child
+/// dropped at once.
 pub(crate) struct Detached;
 
 impl Spawner for Detached {
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
-        let child = bt_platform::quiet_command(program).args(args).spawn()?;
+        let child = bt_platform::detached_command(program).args(args).spawn()?;
         let pid = child.id();
         Ok(Running {
             pid,
@@ -207,8 +209,8 @@ static STARTS: Mutex<StartCount> = Mutex::new(StartCount::new());
 /// error with its raw code, the image's state on the disk (whether it is
 /// there, its size and attributes, what its signature says), and this
 /// process's own state a start depends on
-/// ([`bt_platform::start_conditions`]: console, the inherited standard
-/// handles, working directory, creation flags). Once a start was refused,
+/// ([`bt_platform::start_conditions`]: console, the standard slots, working
+/// directory, creation flags). Once a start was refused,
 /// every later start says one line too, whatever its outcome, so "every later
 /// start failed" reads off the log. A start before any refusal says nothing.
 /// Nothing is changed about the start itself.
@@ -1573,7 +1575,7 @@ mod tests {
             "the image: a file, 23 bytes,",
             "signature ",
             "this process: ",
-            "standard handles inherited",
+            "standard slots",
             "working directory ",
             "creation flags ",
         ] {

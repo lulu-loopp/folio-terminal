@@ -837,9 +837,10 @@ impl Hands for Machine {
 
 impl World for Machine {
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
-        // `quiet_command` is the one door for a child; the child is dropped at
-        // once, never waited on or ended.
-        bt_platform::quiet_command(program)
+        // `detached_command` is the door for a child this process lets go of
+        // (none of its standard streams); the child is dropped at once, never
+        // waited on or ended.
+        bt_platform::detached_command(program)
             .args(args)
             .spawn()
             .map(drop)

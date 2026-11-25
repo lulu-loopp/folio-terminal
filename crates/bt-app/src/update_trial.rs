@@ -1704,7 +1704,7 @@ pub(crate) fn receipt_due() -> Option<ReceiptJob> {
 pub(crate) const FROM_TRIAL_SINCE: (u16, u16, u16) = (0, 4, 7);
 
 /// **How a hand-back starts the recovery build** — the product's starts it
-/// detached through `quiet_command`; a test's records the line.
+/// detached through `detached_command`; a test's records the line.
 pub(crate) trait Starter {
     /// Start `program` with `line`, detached: the started process's pid.
     ///
@@ -1713,13 +1713,13 @@ pub(crate) trait Starter {
     fn start(&mut self, program: &Path, line: &[std::ffi::OsString]) -> io::Result<u32>;
 }
 
-/// The product's [`Starter`]: `quiet_command`, the child dropped at once —
-/// never waited on or ended.
+/// The product's [`Starter`]: `detached_command` (none of this process's
+/// standard streams), the child dropped at once — never waited on or ended.
 pub(crate) struct Detached;
 
 impl Starter for Detached {
     fn start(&mut self, program: &Path, line: &[std::ffi::OsString]) -> io::Result<u32> {
-        bt_platform::quiet_command(program)
+        bt_platform::detached_command(program)
             .args(line)
             .spawn()
             .map(|child| child.id())

@@ -2049,7 +2049,9 @@ inside an admitted item is not a new row, and the lane each counting adapter
 charges is checked beside it. **Child
 processes** are constructed only by `bt_platform::quiet_command` /
 `quiet_command_named`: silent, an absolute program path resolved beforehand, an
-explicit working directory. **Hand-offs to the operating system** — the seven
+explicit working directory; a child this process lets go of (its own image, the
+applier, macOS's `open`) through `bt_platform::detached_command`, which hands it
+none of this process's standard streams. **Hand-offs to the operating system** — the seven
 verbs that leave the window — live only in `bt_platform::handoff`, which holds
 the workspace's only `ShellExecuteW` and its only platform hand-off sites; the
 verbs are private to it, reached only through `ShellThread::hand_over`, and a

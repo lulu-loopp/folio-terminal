@@ -2346,9 +2346,10 @@ impl World for Machine {
     }
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
-        // `quiet_command` is the one door for a child; it is dropped at once,
+        // `detached_command` is the door for a child this process lets go of:
+        // none of this process's standard streams; it is dropped at once,
         // never waited on or ended.
-        bt_platform::quiet_command(program)
+        bt_platform::detached_command(program)
             .args(args)
             .spawn()
             .map(drop)
@@ -2390,9 +2391,10 @@ impl World for Machine {
     }
 
     fn launch_trial(&mut self, program: &Path, args: &[OsString]) -> io::Result<u32> {
-        // Detached: the child's handle is dropped, never waited on; the pid
+        // Detached (`detached_command`: none of this process's standard
+        // streams): the child's handle is dropped, never waited on; the pid
         // and its start time are what the journal keeps.
-        bt_platform::quiet_command(program)
+        bt_platform::detached_command(program)
             .args(args)
             .spawn()
             .map(|child| child.id())

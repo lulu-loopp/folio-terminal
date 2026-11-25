@@ -132,11 +132,12 @@ struct MethodDoor {
 const PRODUCT_RETRIES: [&str; 2] = ["request_shell", "ThePersons"];
 
 /// The calls that start a process off a pseudoconsole: the standard library's,
-/// and `bt_platform`'s three doors in front of it.
-const PROCESS_STARTS: [&str; 4] = [
+/// and `bt_platform`'s four doors in front of it.
+const PROCESS_STARTS: [&str; 5] = [
     "Command::new",
     "quiet_command",
     "quiet_command_named",
+    "detached_command",
     "quiet_breakaway_command",
 ];
 
