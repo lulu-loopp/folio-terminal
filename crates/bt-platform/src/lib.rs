@@ -3596,8 +3596,9 @@ mod detached_command_tests {
         detached.args(["--exact", HELPER]).env_remove(SLOT);
         let value = match slot.as_str() {
             "closed" => a_closed_value(),
-            "unduplicable" => an_unduplicable_value()
-                .expect("a handle of this process that DuplicateHandle refuses (an ETW registration)"),
+            "unduplicable" => an_unduplicable_value().expect(
+                "a handle of this process that DuplicateHandle refuses (an ETW registration)",
+            ),
             other => panic!("no such slot: {other}"),
         };
         // SAFETY: reads and sets this process's own standard input slot; it is put back below.
