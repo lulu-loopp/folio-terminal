@@ -121,8 +121,9 @@
 
     **What it empties is what this lane writes**, by name: the archive and the
     copy of it under the stable name, `SHA256SUMS.txt`, a bill of materials, the
-    three macOS assets that are fetched in after this script has run, and the two
-    directories this script works in. Anything else there is refused with its own
+    three macOS assets that are fetched in after this script has run, the release
+    statement and its signature that `release-statement.ps1` writes after that,
+    and the two directories this script works in. Anything else there is refused with its own
     name rather than deleted — a `-Output` pointed somewhere unexpected is the
     one way this script could take a file that is not a previous release's.
 
@@ -140,8 +141,8 @@
 
 .PARAMETER Sign
     Sign `folio.exe` and `folio.msix` with the Artifact Signing certificate
-    profile before they go into the archive, and check that the two ConPTY files
-    still carry Microsoft's own signature.
+    profile before they go into the archive. (The two ConPTY files are checked
+    for Microsoft's own signature either way; see below.)
 
     The package needs the signature more than the executable does. An unsigned
     `folio.exe` is a program Windows warns about and runs; an unsigned
@@ -161,6 +162,22 @@
     Everything downstream sees the signed bytes: `folio.exe` is signed where the
     build left it, so the archive, `SHA256SUMS.txt` and whatever `smoke.ps1` is
     pointed at afterwards are all the same file. See `sign.ps1`.
+
+    **Without it the versioned archive says so in its name**:
+    `folio-<version>-windows-x64-unsigned.zip` (0.4.10 plan row 102, ruling R6).
+    Everyone who reads that name is someone installing by hand, which is exactly
+    who should know that Windows will warn about the program and that the
+    Explorer menu row cannot register. The copy under the stable name keeps its
+    name, `folio-windows-x64.zip`, because its one purpose is a URL that never
+    changes. What vouches for a release to the updater is the release statement
+    (`release-statement.ps1`), signed or not; scripts that need the archive's
+    name read it from that statement rather than composing it.
+
+    **The two ConPTY files are checked with or without it** (ruling R9): they
+    are Microsoft's and arrive signed by Microsoft, and the updater no longer
+    asks about their signatures, so this is where an unsigned or altered
+    sidecar is caught. `sign.ps1 -VerifyOnly` needs `signtool.exe` from the
+    Windows SDK and nothing signed in.
 #>
 
 [CmdletBinding()]
@@ -316,9 +333,10 @@ if (-not $Version) { $Version = Get-WorkspaceVersion }
 # and the day a second one is passed the difference between "empty the previous
 # release" and "empty that folder" is somebody's afternoon. So the names are
 # written down as shapes — the four assets the Windows lane writes, the three the
-# macOS half is fetched into it as, and the two directories this script works in
-# — and a name that is none of them stops the run with its own name in the
-# message. The version in a shape is left open on purpose: what makes a file the
+# macOS half is fetched into it as, the release statement and its signature that
+# `release-statement.ps1` writes after both (0.4.10 plan row 102), and the two
+# directories this script works in — and a name that is none of them stops the
+# run with its own name in the message. The version in a shape is left open on purpose: what makes a file the
 # previous release's is that this lane wrote it, and the previous release is
 # exactly the version that is not this one.
 function Test-ReleasePageName {
@@ -328,8 +346,10 @@ function Test-ReleasePageName {
     # build suffix for the archives of a channel that ever spells one out.
     $v = '\d+\.\d+\.\d+([-+][0-9A-Za-z.]+)?'
     foreach ($shape in @(
-            "^folio-$v-windows-x64\.zip$",   # the archive
+            "^folio-$v-windows-x64(-unsigned)?\.zip$", # the archive; `-unsigned` without -Sign
             '^folio-windows-x64\.zip$',      # the copy under the stable name
+            '^RELEASE-STATEMENT\.txt$',      # release-statement.ps1's statement, after this runs
+            '^RELEASE-STATEMENT\.txt\.sig$', # and its signature
             "^folio-$v\.cdx\.json$",         # sbom.ps1's bill of materials
             '^SHA256SUMS\.txt$',
             '^SHA256SUMS-macos\.txt$',
@@ -353,8 +373,8 @@ if ($strangers.Count -gt 0) {
     Write-Host "$Output holds $($strangers.Count) file(s) this release lane did not write:"
     $strangers | ForEach-Object { Write-Host "  $_" }
     throw ('this directory is emptied before the archive is written, and it is not emptied ' +
-           'while it holds something that was not put there by sbom.ps1, by this script or by ' +
-           'the macOS fetch. Move those out, or point -Output at a directory of this lane''s own.')
+           'while it holds something that was not put there by sbom.ps1, by this script, by ' +
+           'the macOS fetch or by release-statement.ps1. Move those out, or point -Output at a directory of this lane''s own.')
 }
 foreach ($previous in (Get-ChildItem -LiteralPath $Output -Force)) {
     if ($previous.Name -eq $sbomName) { continue }
@@ -629,16 +649,23 @@ Write-Host "folio.msix: a sparse package, identity version $packageVersion"
 # valid and still time stamped — an unsigned ConPTY in the archive means the
 # build pulled it from somewhere other than the package it is supposed to come
 # from.
+#
+# **The ConPTY check is made with or without `-Sign`** (0.4.10 plan row 102,
+# ruling R9). Until 0.4.10 the updater asked a downloaded release's sidecars for
+# Microsoft's signature itself, with a revocation lookup that could fail
+# offline; it no longer does — the release statement binds them by digest, as
+# `folio.exe`'s manifest already did — so this is the one place their signature
+# is read, and an unsigned release is a release they are still checked for.
+$signScript = Join-Path $PSScriptRoot 'sign.ps1'
 if ($Sign) {
-    $signScript = Join-Path $PSScriptRoot 'sign.ps1'
     & $signScript -Files @((Join-Path $Binaries 'folio.exe'), $msix)
     Write-Host ''
-    Write-Host 'the two ConPTY files, which are Microsoft-signed and not re-signed here:'
-    & $signScript -VerifyOnly -Files @(
-        (Join-Path $Binaries 'conpty.dll'),
-        (Join-Path $Binaries 'OpenConsole.exe'))
-    Write-Host ''
 }
+Write-Host 'the two ConPTY files, which are Microsoft-signed and not re-signed here:'
+& $signScript -VerifyOnly -Files @(
+    (Join-Path $Binaries 'conpty.dll'),
+    (Join-Path $Binaries 'OpenConsole.exe'))
+Write-Host ''
 
 foreach ($item in $members) {
     $item.Length = (Get-Item -LiteralPath $item.Path).Length
@@ -652,7 +679,10 @@ foreach ($item in $members) {
     Copy-Item -LiteralPath $item.Path -Destination (Join-Path $staging $item.Name) -Force
 }
 
-$archive = Join-Path $Output "$folder-windows-x64.zip"
+# **`-unsigned` in the name when nothing was signed** (ruling R6; see `-Sign`).
+# The stable copy below keeps its name either way.
+$archiveName = if ($Sign) { "$folder-windows-x64.zip" } else { "$folder-windows-x64-unsigned.zip" }
+$archive = Join-Path $Output $archiveName
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::CreateFromDirectory(

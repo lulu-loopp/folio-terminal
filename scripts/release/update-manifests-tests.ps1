@@ -48,6 +48,20 @@
     one, `-Apply` again writes only the bucket, keeps the tap's file from before
     out of the earlier record, and `-Revert` then puts both back to it.
     MUTATION: in `New-Entry`, drop the assignment of `$kept.Before`.
+
+    **an_unsigned_release_is_named_as_its_statement_names_it** (0.4.10 plan
+    row 102, part 2, ruling R6) — a release whose statement names
+    `folio-9.8.7-windows-x64-unsigned.zip` renders a bucket file whose URL is
+    that name under the tag, whose hash is that line's, and whose `autoupdate`
+    template is left spelling the signed name.
+    MUTATION: compose `$archiveName` from the version again: the checksum file
+    has no line for the composed name and nothing is rendered.
+
+    **a_statement_the_checksum_file_disagrees_with_is_refused** — the
+    statement's hash for the archive differs from `SHA256SUMS.txt`'s; and a
+    package directory with no statement at all. Both refused, nothing
+    rendered.
+    MUTATION: drop the hash comparison after `Read-StatementAssets`.
 #>
 [CmdletBinding()]
 param()
@@ -170,8 +184,20 @@ $before = @{
 $beforeBlob = @{}
 foreach ($t in @($tap, $bucket)) { $beforeBlob[$t] = Get-BlobId ([Convert]::FromBase64String($before[$t])) }
 
-# The package directory a release would have: the two checksum files, for a
-# version no release has.
+# The release statement `release-statement.ps1` writes into the package
+# directory, in its grammar, for a version no release has: what
+# `update-manifests.ps1` reads the assets' names from (ruling R6).
+function Write-Statement([string] $Package, [string] $Archive, [string] $Hash) {
+    $text = (@(
+            'folio-release-statement 1', 'product folio', 'version 9.8.7', 'tag v9.8.7-preview',
+            'date 2026-11-18', 'key 0123456789abcdef', 'min_from 0.4.6', 'authenticode false', 'retires 0',
+            'assets 2', "$Hash 10 windows-x64 $Archive", "$('cd' * 32) 10 macos-arm64 Folio-9.8.7-macos-arm64.dmg",
+            'members windows-x64 1', "$('ef' * 32) 3 folio.exe") -join "`n") + "`n"
+    [IO.File]::WriteAllText((Join-Path $Package 'RELEASE-STATEMENT.txt'), $text)
+}
+
+# The package directory a release would have: the two checksum files and the
+# statement, for a version no release has.
 function New-Case([string] $name, [object[]] $faults) {
     $case = Join-Path $scratch $name
     $bin = Join-Path $case 'bin'
@@ -196,6 +222,7 @@ function New-Case([string] $name, [object[]] $faults) {
     [IO.File]::WriteAllText((Join-Path $state 'calls.log'), '')
     [IO.File]::WriteAllText((Join-Path $package 'SHA256SUMS.txt'), ('ab' * 32) + "  folio-9.8.7-windows-x64.zip`n")
     [IO.File]::WriteAllText((Join-Path $package 'SHA256SUMS-macos.txt'), ('cd' * 32) + "  Folio-9.8.7-macos-arm64.dmg`n")
+    Write-Statement -Package $package -Archive 'folio-9.8.7-windows-x64.zip' -Hash ('ab' * 32)
     return [pscustomobject]@{ Bin = $bin; State = $state; Package = $package; Record = (Join-Path $package 'manifests-before.json') }
 }
 
@@ -356,6 +383,43 @@ try {
     $run = Invoke-Script $case @('-Revert', $case.Record)
     Check ($run.Exit -eq 0) "one applied: -Revert exits 0 ($($run.Exit))"
     Check-BothBack $case 'one applied, reverted'
+
+    # ── an_unsigned_release_is_named_as_its_statement_names_it ────────────────
+    # Rendered from this repository's two sources, so nothing is read from a
+    # repository and nothing is written.
+    $case = New-Case 'unsigned' @()
+    $unsignedHash = '12' * 32
+    [IO.File]::WriteAllText((Join-Path $case.Package 'SHA256SUMS.txt'),
+        "$unsignedHash  folio-9.8.7-windows-x64-unsigned.zip`n$unsignedHash  folio-windows-x64.zip`n")
+    Write-Statement -Package $case.Package -Archive 'folio-9.8.7-windows-x64-unsigned.zip' -Hash $unsignedHash
+    $rendered = Join-Path $case.Package 'rendered'
+    $render = @('-Version', '9.8.7', '-PackageDirectory', $case.Package, '-OutDirectory', $rendered,
+        '-CaskFile', (Join-Path $root 'packaging\homebrew\folio.rb'), '-ScoopFile', (Join-Path $root 'packaging\scoop\folio.json'))
+    $run = Invoke-Script $case $render
+    Check ($run.Exit -eq 0) "unsigned: renders ($($run.Exit)) $($run.Text)"
+    if ($run.Exit -eq 0) {
+        $bucketFile = Get-Content -Raw -LiteralPath (Join-Path $rendered 'folio.json') | ConvertFrom-Json
+        $source = Get-Content -Raw -LiteralPath (Join-Path $root 'packaging\scoop\folio.json') | ConvertFrom-Json
+        Check ($bucketFile.architecture.'64bit'.url -ceq 'https://github.com/lulu-loopp/folio-terminal/releases/download/v9.8.7-preview/folio-9.8.7-windows-x64-unsigned.zip') `
+            "unsigned: the bucket's URL is the statement's name under the tag ($($bucketFile.architecture.'64bit'.url))"
+        Check ($bucketFile.architecture.'64bit'.hash -ceq $unsignedHash) 'unsigned: the bucket carries that line''s hash'
+        Check ($bucketFile.architecture.'64bit'.extract_dir -ceq 'folio-9.8.7') 'unsigned: the folder inside is folio-9.8.7'
+        Check ($bucketFile.autoupdate.architecture.'64bit'.url -ceq $source.autoupdate.architecture.'64bit'.url) `
+            'unsigned: the autoupdate template is left as it is'
+    }
+
+    # ── a_statement_the_checksum_file_disagrees_with_is_refused ───────────────
+    $case = New-Case 'disagrees' @()
+    Write-Statement -Package $case.Package -Archive 'folio-9.8.7-windows-x64.zip' -Hash ('34' * 32)
+    $run = Invoke-Script $case @('-Version', '9.8.7', '-PackageDirectory', $case.Package,
+        '-CaskFile', (Join-Path $root 'packaging\homebrew\folio.rb'), '-ScoopFile', (Join-Path $root 'packaging\scoop\folio.json'))
+    Check ($run.Exit -ne 0) "disagrees: refused ($($run.Exit))"
+    Check ($run.Text -match 'two different files') "disagrees: says the statement and the checksum file disagree"
+    Check (@(Get-Calls $case | Where-Object { $_ -like 'PUT *' }).Count -eq 0) 'disagrees: nothing is written'
+    Remove-Item -LiteralPath (Join-Path $case.Package 'RELEASE-STATEMENT.txt')
+    $run = Invoke-Script $case @('-Version', '9.8.7', '-PackageDirectory', $case.Package,
+        '-CaskFile', (Join-Path $root 'packaging\homebrew\folio.rb'), '-ScoopFile', (Join-Path $root 'packaging\scoop\folio.json'))
+    Check ($run.Exit -ne 0 -and $run.Text -match 'RELEASE-STATEMENT\.txt') "no statement: refused, naming it ($($run.Exit))"
 }
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

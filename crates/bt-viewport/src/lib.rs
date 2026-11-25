@@ -13,10 +13,11 @@ pub mod horizontal;
 pub mod trace;
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     error::Error,
     fmt,
     num::{NonZeroI64, NonZeroU32},
+    ops::Bound,
     path::PathBuf,
     sync::Arc,
 };
@@ -1912,16 +1913,32 @@ impl Error for FrameProjectionError {}
 pub struct ViewportProjection {
     layout_key: LayoutKey,
     detection_rev: DetectionRevision,
-    cache: HashMap<LayoutCacheKey, MeasuredLayout>,
+    /// **One measurement per history line, under the key it was measured with** (0.4.10 plan row
+    /// 105). A lookup is a hit only when the stored key is the asked one, and a miss overwrites.
+    ///
+    /// It used to be keyed by the whole [`LayoutCacheKey`], so every width a pane had ever been
+    /// laid out at kept a measurement of every line, and nothing removed the measurements of a
+    /// line that left history: a full pane gained one slot for every line it printed, forever.
+    /// Keyed by the line, it holds at most one slot per line the document holds — a slot leaves
+    /// with its line, in [`Self::project`] — and the price is that a width the pane comes back to
+    /// is measured again, which is the cheap half of a resize.
+    cache: BTreeMap<TranscriptId, (LayoutCacheKey, MeasuredLayout)>,
     artifact_heights: HashMap<TranscriptId, i64>,
     math_artifacts: HashMap<TranscriptId, ProjectedMathArtifact>,
     inline_path_artifacts: HashMap<TranscriptId, Vec<ProjectedMathArtifact>>,
     live_math_artifacts: Vec<ProjectedLiveMathArtifact>,
     live_row_prefix: Vec<i64>,
-    ordered_ids: Vec<TranscriptId>,
-    visual_rows: Vec<usize>,
+    /// The projected history lines, oldest first. A deque because a full pane drops its oldest
+    /// line every time it gains one (0.4.10 plan row 105); `visual_rows` and the two trees beside
+    /// it drop theirs in the same step.
+    ordered_ids: VecDeque<TranscriptId>,
+    visual_rows: VecDeque<usize>,
     visual_row_heights: HeightTree,
     heights: HeightTree,
+    /// The document's [`HistoryDocument::interior_edits`] when this projection last followed it.
+    /// Unchanged means every line that came or went since did so at one of the two ends, which is
+    /// what lets [`Self::project`] drop the front and append the new end instead of rebuilding.
+    seen_interior_edits: u64,
     scroll_state: ViewportScrollState,
     selection: Option<ViewSelection>,
     /// What the search capsule has found in **this** pane (§7.1.5d, S3).
@@ -2026,7 +2043,8 @@ pub struct ViewportProjection {
     /// so that the widest of them can be **withdrawn** (plan §5.3).
     ///
     /// Maintained in `project`, in lock-step with `ordered_ids` and `visual_rows` and by the same
-    /// two roads they take: a line appended is a width admitted, and a rebuild is a rebuild. That
+    /// three roads they take: a line appended is a width admitted, a line dropped from the front
+    /// is its width withdrawn, and a rebuild is a rebuild. That
     /// is the pairing plan §5.3 clause 3 asks for, and it is structural rather than remembered —
     /// there is no road that adds a line here without adding its width, because it is the same
     /// `push`.
@@ -2155,7 +2173,7 @@ impl ViewportProjection {
         Self {
             layout_key,
             detection_rev,
-            cache: HashMap::new(),
+            cache: BTreeMap::new(),
             artifact_heights: HashMap::new(),
             math_artifacts: HashMap::new(),
             inline_path_artifacts: HashMap::new(),
@@ -2163,10 +2181,11 @@ impl ViewportProjection {
             live_row_prefix: (0..=live_rows.get())
                 .map(|row| i64::from(row).saturating_mul(cell_height_subpixels.get()))
                 .collect(),
-            ordered_ids: Vec::new(),
-            visual_rows: Vec::new(),
+            ordered_ids: VecDeque::new(),
+            visual_rows: VecDeque::new(),
             visual_row_heights: HeightTree::default(),
             heights: HeightTree::default(),
+            seen_interior_edits: 0,
             scroll_state: ViewportScrollState::Bottom,
             selection: None,
             search: None,
@@ -3138,7 +3157,7 @@ impl ViewportProjection {
                 .index_at_offset(window_start as i64)
                 .unwrap_or(0);
             let mut row_base = self.visual_row_heights.prefix_sum(first_index) as usize;
-            for (index, id) in self.ordered_ids.iter().enumerate().skip(first_index) {
+            for (index, id) in (first_index..).zip(self.ordered_ids.range(first_index..)) {
                 let line_rows = self.visual_rows[index];
                 let line_end = row_base + line_rows;
                 if line_end > window_start
@@ -4186,7 +4205,7 @@ impl ViewportProjection {
     }
     pub fn set_artifact_height(&mut self, id: TranscriptId, height_subpixels: i64) {
         if self.artifact_heights.insert(id, height_subpixels) != Some(height_subpixels) {
-            self.cache.retain(|key, _| key.span.start != id);
+            self.cache.remove(&id);
             self.projection_dirty = true;
         }
     }
@@ -4203,8 +4222,9 @@ impl ViewportProjection {
             .filter(|id| self.artifact_heights.get(id) != next.get(id))
             .collect::<HashSet<_>>();
         if !changed.is_empty() {
-            self.cache
-                .retain(|key, _| !changed.contains(&key.span.start));
+            for id in &changed {
+                self.cache.remove(id);
+            }
             self.projection_dirty = true;
         }
         self.artifact_heights = next;
@@ -4222,8 +4242,9 @@ impl ViewportProjection {
             .filter(|id| self.math_artifacts.get(id) != next.get(id))
             .collect::<HashSet<_>>();
         if !changed.is_empty() && !self.move_artifact_bands(&changed, &next) {
-            self.cache
-                .retain(|key, _| !changed.contains(&key.span.start));
+            for id in &changed {
+                self.cache.remove(id);
+            }
             self.projection_dirty = true;
         }
         self.artifact_heights = next
@@ -4319,8 +4340,9 @@ impl ViewportProjection {
             .filter(|id| self.inline_path_artifacts.get(id) != next.get(id))
             .collect::<HashSet<_>>();
         if !changed.is_empty() {
-            self.cache
-                .retain(|key, _| !changed.contains(&key.span.start));
+            for id in &changed {
+                self.cache.remove(id);
+            }
             self.projection_dirty = true;
         }
         self.inline_path_artifacts = next;
@@ -4349,7 +4371,12 @@ impl ViewportProjection {
     fn bridge_frozen_prefix_rows(&self, live_math: &ProjectedLiveMathArtifact) -> Option<u32> {
         let prefix = live_math.frozen_prefix.len();
         let ordered = self.ordered_ids.len();
-        if prefix > ordered || self.ordered_ids[ordered - prefix..] != live_math.frozen_prefix[..] {
+        if prefix > ordered
+            || !self
+                .ordered_ids
+                .range(ordered - prefix..)
+                .eq(live_math.frozen_prefix.iter())
+        {
             return None;
         }
         let cell = self.cell_height_subpixels.get();
@@ -4818,7 +4845,112 @@ impl ViewportProjection {
             .saturating_mul(self.cell_height_subpixels.get())
     }
 
+    /// Bring the projection up to date with `document`.
+    ///
+    /// **A pane that only gained lines at its end and lost them at its front is followed, not
+    /// rebuilt** (0.4.10 plan row 105): see [`Self::follow_the_ends`]. Everything else — a layout,
+    /// a detection revision, an artifact that changed which lines are projected, a line gone
+    /// from the middle — is the rebuild in [`Self::rebuild_projection`].
     pub fn project(&mut self, document: &HistoryDocument) {
+        let followed = !self.projection_dirty
+            && document.interior_edits() == self.seen_interior_edits
+            && self.follow_the_ends(document);
+        if !followed {
+            self.rebuild_projection(document);
+        }
+        self.seen_interior_edits = document.interior_edits();
+        self.projection_dirty = false;
+    }
+
+    /// **Drop the lines that left the front of history and append the ones after the last
+    /// projected line** — the whole of a full pane's change between two publishes, in work
+    /// proportional to that change (0.4.10 plan row 105).
+    ///
+    /// The rebuild this replaces walked every line of history on every publish of a full pane,
+    /// because an eviction makes the old id list stop being a prefix of the new one. Its caller has
+    /// proved that nothing is owed (`projection_dirty`) and that no line came or went anywhere but
+    /// at the ends ([`HistoryDocument::interior_edits`]). What is left to prove is here: a block
+    /// whose opener leaves while the lines it swallowed stay hands those lines back to the
+    /// projection, which only a walk from the front finds — so that answers `false`, before
+    /// anything is changed, and the caller rebuilds.
+    fn follow_the_ends(&mut self, document: &HistoryDocument) -> bool {
+        let first = document.entries().first_key_value().map(|(id, _)| *id);
+        let departed = |id: TranscriptId| first.is_none_or(|first| id < first);
+        let leaving = self
+            .ordered_ids
+            .iter()
+            .take_while(|id| departed(**id))
+            .count();
+        let returns_swallowed_lines = self.ordered_ids.range(..leaving).any(|id| {
+            self.math_artifacts
+                .get(id)
+                .is_some_and(|artifact| !departed(artifact.end))
+        });
+        // No document line is older than `first`, so none can swallow it: the first projected
+        // line to stay must be the document's first. Anything else is a projection that does not
+        // follow this document, and the walk from the front is the answer (review N2).
+        let follows_this_document = self
+            .ordered_ids
+            .get(leaving)
+            .is_none_or(|id| Some(*id) == first);
+        if returns_swallowed_lines || !follows_this_document {
+            return false;
+        }
+
+        if self
+            .cache
+            .first_key_value()
+            .is_some_and(|(id, _)| departed(*id))
+        {
+            let departed_slots = match first {
+                Some(first) => {
+                    let living = self.cache.split_off(&first);
+                    std::mem::replace(&mut self.cache, living)
+                }
+                None => std::mem::take(&mut self.cache),
+            };
+            // A projected line's slot holds the columns the line was pushed with (a block changing
+            // face moves the trees' heights, not the slot's columns): a slot is only removed
+            // together with `projection_dirty`, and only rebuilt lines are pushed then.
+            for id in self.ordered_ids.range(..leaving) {
+                if let Some((_, measured)) = departed_slots.get(id) {
+                    self.extent.remove(measured.columns);
+                }
+            }
+        }
+        if leaving > 0 {
+            self.ordered_ids.drain(..leaving);
+            self.visual_rows.drain(..leaving);
+            self.visual_row_heights.drop_front(leaving);
+            self.heights.drop_front(leaving);
+            self.horizontal_index.release_history_before(first);
+            self.inference
+                .retain(|key, _| !matches!(key, LineKey::History(line, _) if departed(*line)));
+        }
+
+        let last = self.ordered_ids.back().copied();
+        let mut suppressed_through = last
+            .and_then(|id| self.math_artifacts.get(&id))
+            .map(|artifact| artifact.end);
+        let after_last = last.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut appended = false;
+        for (id, entry) in document.entries().range((after_last, Bound::Unbounded)) {
+            if suppressed_through.is_some_and(|end| *id <= end) {
+                continue;
+            }
+            self.push_projected(id, entry);
+            suppressed_through = self.math_artifacts.get(id).map(|artifact| artifact.end);
+            appended = true;
+        }
+        if leaving > 0 || appended {
+            self.view_generation.0 += 1;
+        }
+        true
+    }
+
+    /// Project every line of `document` again, keeping what is still true: the measurements of
+    /// the lines that stayed, and the indexes of the lines still on screen.
+    fn rebuild_projection(&mut self, document: &HistoryDocument) {
         // **One ordered walk of history, carrying each line with its id.** The loop at the foot
         // needs the entry itself — its generation keys the measurement — and asking the map for it
         // again by id is a second descent of a `BTreeMap` this walk has already passed the pointer
@@ -4835,137 +4967,141 @@ impl ViewportProjection {
             next_entries.push(entry);
             suppressed_through = self.math_artifacts.get(&id).map(|artifact| artifact.end);
         }
-        let append_only = !self.projection_dirty
-            && self.ordered_ids.len() <= next_ids.len()
-            && self.ordered_ids == next_ids[..self.ordered_ids.len()];
-        let start = if append_only {
-            self.ordered_ids.len()
-        } else {
-            0
-        };
-        if !append_only {
-            self.rebuilds = self.rebuilds.saturating_add(1);
-            // Plan §5.2's lifetime rule, and the reason it is a diff rather than a `clear`: a
-            // rebuild is not always a deletion — a settings change or a formula swallowing its
-            // source rows takes this road too — and an index about a line still on screen is worth
-            // more than the microsecond it costs to keep. Both lists are in ascending id order, so
-            // one merge finds everything that left.
-            let mut surviving = next_ids.iter().copied().peekable();
-            let mut departed = HashSet::new();
-            for id in &self.ordered_ids {
-                while surviving.peek().is_some_and(|next| next < id) {
-                    surviving.next();
-                }
-                if surviving.peek() == Some(id) {
-                    surviving.next();
-                } else {
-                    self.horizontal_index.release_history(*id);
-                    departed.insert(*id);
-                }
+        self.rebuilds = self.rebuilds.saturating_add(1);
+        // Plan §5.2's lifetime rule, and the reason it is a diff rather than a `clear`: a
+        // rebuild is not always a deletion — a settings change or a formula swallowing its
+        // source rows takes this road too — and an index about a line still on screen is worth
+        // more than the microsecond it costs to keep. Both lists are in ascending id order, so
+        // one merge finds everything that left.
+        let mut surviving = next_ids.iter().copied().peekable();
+        let mut departed = HashSet::new();
+        for id in &self.ordered_ids {
+            while surviving.peek().is_some_and(|next| next < id) {
+                surviving.next();
             }
-            // **One sweep of the inference map for the whole diff, and none at all when nothing
-            // left** (T-MATH-TOGGLE-STUTTER). `retain` reads every entry it is asked about, so
-            // calling it inside the loop above charged one walk of every inferred line *per
-            // departing id* — and a formula going back to its picture retires exactly the handful
-            // of source lines it swallows, which is the shape that multiplied worst.
-            if !departed.is_empty() {
-                self.inference.retain(
-                    |key, _| !matches!(key, LineKey::History(line, _) if departed.contains(line)),
-                );
-            }
-            // The extent is cleared with the row counts it stands beside and refilled by the same
-            // loop below, so admitting a width and withdrawing one are the one `push` rather than
-            // two rules that have to be kept in step (plan §5.3 clause 3). A line evicted or
-            // tombstoned is a line missing from `next_ids`, which is a rebuild — this road.
-            self.ordered_ids.clear();
-            self.visual_rows.clear();
-            self.visual_row_heights.rebuild([]);
-            self.heights.rebuild([]);
-            self.extent.clear();
-        }
-        for (id, entry) in next_ids.iter().zip(&next_entries).skip(start) {
-            self.ordered_ids.push(*id);
-            let cache_key = LayoutCacheKey {
-                span: TranscriptSpan {
-                    start: *id,
-                    end: self
-                        .math_artifacts
-                        .get(id)
-                        .map_or(*id, |artifact| artifact.end),
-                },
-                source_gen: entry.line.source_generation,
-                detection_rev: self.detection_rev,
-                layout: self.layout_key,
-                artifact_height: self.artifact_heights.get(id).copied(),
-            };
-            let measured = if let Some(measured) = self.cache.get(&cache_key).copied() {
-                measured
+            if surviving.peek() == Some(id) {
+                surviving.next();
             } else {
-                self.cache_misses += 1;
-                // The line's own text is walked here and nowhere else in this loop: both the
-                // width and the wrapped row count are facts about this line under this key, so a
-                // line the key still fits is never segmented twice.
-                self.line_text_measurements = self.line_text_measurements.saturating_add(1);
-                let columns = presentable_end_column(&entry.line.text);
-                let measured = {
-                    if let Some(height) = self.artifact_heights.get(id).copied() {
-                        let visual_lines = height
-                            .max(1)
-                            .saturating_add(self.cell_height_subpixels.get() - 1)
-                            / self.cell_height_subpixels.get();
-                        MeasuredLayout {
-                            visual_lines: u32::try_from(visual_lines).unwrap_or(u32::MAX),
-                            height,
-                            columns,
-                        }
-                    } else {
-                        let source_visual_lines = frozen_visual_line_count(
-                            &entry.line.text,
-                            self.layout_key.width_cells.get() as usize,
-                            self.layout_key.line_wrapping,
-                        ) as u32;
-                        let (image_visual_lines, image_height) = self
-                            .inline_path_artifacts
-                            .get(id)
-                            .into_iter()
-                            .flatten()
-                            .fold((0_u32, 0_i64), |(rows, height), artifact| {
-                                let artifact_rows = u32::try_from(
-                                    artifact
-                                        .height_subpixels
-                                        .max(1)
-                                        .saturating_add(self.cell_height_subpixels.get() - 1)
-                                        .div_euclid(self.cell_height_subpixels.get()),
-                                )
-                                .unwrap_or(u32::MAX);
-                                (
-                                    rows.saturating_add(artifact_rows),
-                                    height.saturating_add(artifact.height_subpixels),
-                                )
-                            });
-                        let visual_lines = source_visual_lines.saturating_add(image_visual_lines);
-                        MeasuredLayout {
-                            visual_lines,
-                            height: i64::from(source_visual_lines)
-                                .saturating_mul(self.cell_height_subpixels.get())
-                                .saturating_add(image_height),
-                            columns,
-                        }
+                self.horizontal_index.release_history(*id);
+                departed.insert(*id);
+            }
+        }
+        // **One sweep of the inference map for the whole diff, and none at all when nothing
+        // left** (T-MATH-TOGGLE-STUTTER). `retain` reads every entry it is asked about, so
+        // calling it inside the loop above charged one walk of every inferred line *per
+        // departing id* — and a formula going back to its picture retires exactly the handful
+        // of source lines it swallows, which is the shape that multiplied worst.
+        if !departed.is_empty() {
+            self.inference.retain(
+                |key, _| !matches!(key, LineKey::History(line, _) if departed.contains(line)),
+            );
+        }
+        // The extent is cleared with the row counts it stands beside and refilled by the same
+        // loop below, so admitting a width and withdrawing one are the one `push` rather than
+        // two rules that have to be kept in step (plan §5.3 clause 3). A line evicted or
+        // deleted from the middle is a line missing from `next_ids`, which is a rebuild — this
+        // road; a line evicted from the front takes `follow_the_ends` instead.
+        //
+        // A measurement is kept for every line the document still holds, projected or swallowed by
+        // a block (a block going back to its source measures only its opener again), and for no
+        // other: the cache is bounded by history.
+        self.cache
+            .retain(|id, _| document.entries().contains_key(id));
+        self.ordered_ids.clear();
+        self.visual_rows.clear();
+        self.visual_row_heights.rebuild([]);
+        self.heights.rebuild([]);
+        self.extent.clear();
+        for (id, entry) in next_ids.iter().zip(&next_entries) {
+            self.push_projected(id, entry);
+        }
+        self.view_generation.0 += 1;
+    }
+
+    /// Measure one line — from its cache slot when the slot's key is this layout's — and push it
+    /// onto the projection's end, in every structure that is kept in lock-step with the id list.
+    fn push_projected(&mut self, id: &TranscriptId, entry: &HistoryEntry) {
+        self.ordered_ids.push_back(*id);
+        let cache_key = LayoutCacheKey {
+            span: TranscriptSpan {
+                start: *id,
+                end: self
+                    .math_artifacts
+                    .get(id)
+                    .map_or(*id, |artifact| artifact.end),
+            },
+            source_gen: entry.line.source_generation,
+            detection_rev: self.detection_rev,
+            layout: self.layout_key,
+            artifact_height: self.artifact_heights.get(id).copied(),
+        };
+        let measured = if let Some((_, measured)) = self
+            .cache
+            .get(id)
+            .filter(|(stored, _)| *stored == cache_key)
+        {
+            *measured
+        } else {
+            self.cache_misses += 1;
+            // The line's own text is walked here and nowhere else in this loop: both the
+            // width and the wrapped row count are facts about this line under this key, so a
+            // line the key still fits is never segmented twice.
+            self.line_text_measurements = self.line_text_measurements.saturating_add(1);
+            let columns = presentable_end_column(&entry.line.text);
+            let measured = {
+                if let Some(height) = self.artifact_heights.get(id).copied() {
+                    let visual_lines = height
+                        .max(1)
+                        .saturating_add(self.cell_height_subpixels.get() - 1)
+                        / self.cell_height_subpixels.get();
+                    MeasuredLayout {
+                        visual_lines: u32::try_from(visual_lines).unwrap_or(u32::MAX),
+                        height,
+                        columns,
                     }
-                };
-                self.cache.insert(cache_key, measured);
-                measured
+                } else {
+                    let source_visual_lines = frozen_visual_line_count(
+                        &entry.line.text,
+                        self.layout_key.width_cells.get() as usize,
+                        self.layout_key.line_wrapping,
+                    ) as u32;
+                    let (image_visual_lines, image_height) = self
+                        .inline_path_artifacts
+                        .get(id)
+                        .into_iter()
+                        .flatten()
+                        .fold((0_u32, 0_i64), |(rows, height), artifact| {
+                            let artifact_rows = u32::try_from(
+                                artifact
+                                    .height_subpixels
+                                    .max(1)
+                                    .saturating_add(self.cell_height_subpixels.get() - 1)
+                                    .div_euclid(self.cell_height_subpixels.get()),
+                            )
+                            .unwrap_or(u32::MAX);
+                            (
+                                rows.saturating_add(artifact_rows),
+                                height.saturating_add(artifact.height_subpixels),
+                            )
+                        });
+                    let visual_lines = source_visual_lines.saturating_add(image_visual_lines);
+                    MeasuredLayout {
+                        visual_lines,
+                        height: i64::from(source_visual_lines)
+                            .saturating_mul(self.cell_height_subpixels.get())
+                            .saturating_add(image_height),
+                        columns,
+                    }
+                }
             };
-            self.extent.insert(measured.columns);
-            self.visual_rows.push(measured.visual_lines as usize);
-            self.visual_row_heights
-                .push(i64::from(measured.visual_lines));
-            self.heights.push(measured.height);
-        }
-        if start != next_ids.len() || !append_only {
-            self.view_generation.0 += 1;
-        }
-        self.projection_dirty = false;
+            self.cache.insert(*id, (cache_key, measured));
+            measured
+        };
+        self.extent.insert(measured.columns);
+        self.visual_rows.push_back(measured.visual_lines as usize);
+        self.visual_row_heights
+            .push(i64::from(measured.visual_lines));
+        self.heights.push(measured.height);
     }
 
     /// Project a semantic anchor through this viewport's independent width/height tree.
@@ -5028,17 +5164,21 @@ impl ViewportProjection {
     }
 
     fn projected_history_index(&self, id: TranscriptId) -> Option<(usize, TranscriptId)> {
-        self.ordered_ids
-            .iter()
-            .copied()
-            .enumerate()
-            .find(|(_, start)| {
-                *start == id
-                    || self
-                        .math_artifacts
-                        .get(start)
-                        .is_some_and(|artifact| *start <= id && id <= artifact.end)
-            })
+        // The projected ids ascend and a block's suppressed lines stand between its opener and
+        // the next projected id, so the one projected line that can hold `id` is the last one
+        // at or before it: a binary search, where this used to walk every projected line per
+        // anchor asked (0.4.10 plan row 105).
+        let index = self
+            .ordered_ids
+            .partition_point(|start| *start <= id)
+            .checked_sub(1)?;
+        let start = self.ordered_ids[index];
+        (start == id
+            || self
+                .math_artifacts
+                .get(&start)
+                .is_some_and(|artifact| id <= artifact.end))
+        .then_some((index, start))
     }
 
     pub fn scroll_y(&self, document: &HistoryDocument) -> Result<Option<i64>, AnchorError> {
@@ -10818,7 +10958,11 @@ mod tests {
         narrow.relayout(key(8), &document);
         let misses_after_new_width = narrow.cache_misses();
         narrow.relayout(key(4), &document);
-        assert_eq!(narrow.cache_misses(), misses_after_new_width);
+        // One slot per line (0.4.10 plan row 105, ruling R4): a width the pane comes back to is
+        // measured again, and the cache never holds two widths of one line.
+        let lines = document.entries().len();
+        assert_eq!(narrow.cache_misses(), misses_after_new_width + lines as u64);
+        assert_eq!(narrow.cache_len(), lines);
     }
 
     /// PIN — **a jump to a command mark is a position, not an act** (S1-UI,
@@ -14413,5 +14557,191 @@ mod tests {
         assert!(6.0 * 9.0 >= math_tool_cluster_width_px(1.0));
         assert!(5.0 * 9.0 < math_tool_cluster_width_px(1.0));
         assert_eq!(math_tool_cluster_width_px(2.0), 92.0);
+    }
+
+    /// A full pane's history: `capacity` lines, each a different width so that some wrap.
+    fn full_history(capacity: usize) -> (TranscriptStore, HistoryDocument) {
+        let mut store = TranscriptStore::with_quotas(
+            bt_transcript::DEFAULT_STAGING_QUOTA,
+            NonZeroUsize::new(capacity).unwrap(),
+        );
+        let mut document = HistoryDocument::default();
+        print_and_evict(&mut store, &mut document, capacity);
+        assert_eq!(document.entries().len(), capacity);
+        (store, document)
+    }
+
+    /// Print `lines` lines into a store, each frozen into the document and each eviction it
+    /// causes deleted from it — the session's order (`ingest_finalized`, then `delete_history`).
+    fn print_and_evict(store: &mut TranscriptStore, document: &mut HistoryDocument, lines: usize) {
+        for _ in 0..lines {
+            let index = store.frozen().back().map_or(0, |line| line.id.0 + 1);
+            let text = "w".repeat(usize::try_from(index % 29).unwrap() + 1);
+            for finalized in store.capture(fixture_row(&text, false)).finalized {
+                document.finalize_transaction(finalized);
+            }
+            document.delete_transaction(&store.take_evictions(), false, GridGeneration(1));
+        }
+    }
+
+    /// The claims a projection makes about a document, read off two projections that must agree:
+    /// which lines, how tall each stands and how many rows it takes, the widest line, which line an
+    /// offset lands in, and where an anchor stands.
+    fn assert_same_projection(
+        followed: &ViewportProjection,
+        fresh: &ViewportProjection,
+        document: &HistoryDocument,
+    ) {
+        assert_eq!(followed.ordered_ids, fresh.ordered_ids);
+        assert_eq!(followed.visual_rows, fresh.visual_rows);
+        let lines = fresh.projected_line_count();
+        for index in 0..=lines {
+            assert_eq!(
+                followed.heights().prefix_sum(index),
+                fresh.heights().prefix_sum(index)
+            );
+            assert_eq!(
+                followed.visual_row_heights.prefix_sum(index),
+                fresh.visual_row_heights.prefix_sum(index)
+            );
+        }
+        assert_eq!(followed.extent.widest(), fresh.extent.widest());
+        assert_eq!(followed.extent.lines(), fresh.extent.lines());
+        let total = fresh.heights().total();
+        for offset in (0..total).step_by(usize::try_from(cell_height().get() / 3).unwrap()) {
+            assert_eq!(
+                followed.heights().index_at_offset(offset),
+                fresh.heights().index_at_offset(offset)
+            );
+        }
+        for (id, entry) in document.entries().iter().step_by(37) {
+            let anchor = ContentAnchor::History {
+                id: *id,
+                offset: GraphemeOffset(0),
+                bias: Bias::After,
+                generation: entry.line.source_generation,
+            };
+            assert_eq!(
+                followed.anchor_y(document, &anchor),
+                fresh.anchor_y(document, &anchor)
+            );
+        }
+    }
+
+    fn eviction_projection(store: &TranscriptStore) -> ViewportProjection {
+        ViewportProjection::new(
+            key(12),
+            DetectionRevision(1),
+            nz32(6),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        )
+    }
+
+    /// **A publish after the oldest lines were evicted drops them and appends the new ones; it
+    /// does not project history again** (0.4.10 plan row 105, T4).
+    ///
+    /// Every publish of a full pane is that shape — the lines the drain printed in, as many of
+    /// the oldest out — and the projection's append-only test stopped holding at the first
+    /// eviction, so each one rebuilt every line of history. With that test back as the only
+    /// road, `rebuilds` reads 101 here instead of 1.
+    #[test]
+    fn a_front_eviction_is_not_a_rebuild() {
+        let (mut store, mut document) = full_history(400);
+        let mut projection = eviction_projection(&store);
+        projection.project(&document);
+        assert_eq!(projection.rebuilds(), 1, "the first projection builds");
+
+        for _ in 0..100 {
+            print_and_evict(&mut store, &mut document, 40);
+            assert_eq!(document.entries().len(), 400, "history stays full");
+            projection.project(&document);
+        }
+        assert_eq!(
+            projection.rebuilds(),
+            1,
+            "a hundred publishes of 40 lines in and 40 out"
+        );
+
+        let mut fresh = eviction_projection(&store);
+        fresh.project(&document);
+        assert_same_projection(&projection, &fresh, &document);
+    }
+
+    /// **The trees a front eviction shortens keep their storage under twice what they hold**: the
+    /// dropped heights are compacted away, not kept at zero forever (0.4.10 plan row 105, T4's
+    /// sibling). With compaction off the trees keep every line ever projected: 840 heights stored
+    /// for 400 lines the first time this asks past twice.
+    #[test]
+    fn a_front_eviction_keeps_the_trees_within_twice_the_history() {
+        let (mut store, mut document) = full_history(400);
+        let mut projection = eviction_projection(&store);
+        projection.project(&document);
+        for _ in 0..100 {
+            print_and_evict(&mut store, &mut document, 40);
+            projection.project(&document);
+            let lines = projection.projected_line_count();
+            assert!(
+                projection.heights().stored_len() <= 2 * lines + 1
+                    && projection.visual_row_heights.stored_len() <= 2 * lines + 1,
+                "{} and {} heights stored for {lines} projected lines",
+                projection.heights().stored_len(),
+                projection.visual_row_heights.stored_len()
+            );
+        }
+    }
+
+    /// **A block whose opener is evicted hands back the lines it swallowed**, which only a walk
+    /// from the front can find — so that publish is a rebuild, and it is the projection a fresh
+    /// one is (0.4.10 plan row 105).
+    #[test]
+    fn a_block_leaving_by_its_opener_hands_its_lines_back() {
+        let (mut store, mut document) = full_history(400);
+        let ids = document.entries().keys().copied().collect::<Vec<_>>();
+        let mut projection = eviction_projection(&store);
+        let block = || [(ids[3], toggle_block(ids[60]))];
+        projection.sync_math_artifacts(block());
+        projection.project(&document);
+        let rebuilds = projection.rebuilds();
+
+        // Lines 0..=3 leave: the opener goes, and 4..=60 stay with nothing swallowing them.
+        print_and_evict(&mut store, &mut document, 4);
+        projection.project(&document);
+        assert_eq!(
+            projection.rebuilds(),
+            rebuilds + 1,
+            "the departure is a rebuild"
+        );
+
+        let mut fresh = eviction_projection(&store);
+        fresh.sync_math_artifacts(block());
+        fresh.project(&document);
+        assert_same_projection(&projection, &fresh, &document);
+    }
+
+    /// **A line gone from the middle of history is a rebuild**, and the projection it leaves is
+    /// the one a fresh projection is (0.4.10 plan row 105, review P2-2): following the two ends
+    /// would keep projecting the deleted line, which is what the document's `interior_edits`
+    /// guard is there to refuse.
+    #[test]
+    fn a_line_gone_from_the_middle_is_a_rebuild() {
+        let (store, mut document) = full_history(400);
+        let ids = document.entries().keys().copied().collect::<Vec<_>>();
+        let mut projection = eviction_projection(&store);
+        projection.project(&document);
+        let rebuilds = projection.rebuilds();
+
+        document.delete_transaction(&[ids[200]], false, GridGeneration(1));
+        projection.project(&document);
+        assert_eq!(
+            projection.rebuilds(),
+            rebuilds + 1,
+            "a deletion from the middle is a rebuild"
+        );
+
+        let mut fresh = eviction_projection(&store);
+        fresh.project(&document);
+        assert_same_projection(&projection, &fresh, &document);
     }
 }

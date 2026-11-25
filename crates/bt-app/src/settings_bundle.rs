@@ -32,13 +32,15 @@
 //!
 //! # What an import leaves alone
 //!
-//! Three keys of `settings.json` are receipts about *this machine* and not
+//! Four keys of `settings.json` are receipts about *this machine* and not
 //! preferences: whether the first-run card has been put up here
 //! (`first_run_card`), whether the cards' gesture hint has been
 //! shown here (`cards_gesture_hint_offer`, which has one spender and one
 //! restorer and no third opinion — `the_cards_offer_is_spent_in_one_place_and_given_back_in_one`),
-//! and whether a web page has ever committed here (`web_pages_used`, 0.4.5
-//! ticket 60, which decides whether this profile is given a spare controller).
+//! whether a web page has ever committed here (`web_pages_used`, 0.4.5
+//! ticket 60, which decides whether this profile is given a spare controller),
+//! and whether the first put-away has been told here (`first_hide_toast`, 0.4.10
+//! plan row 87, part 87d).
 //! Another machine's answer to any of them is not a fact about this one, so they
 //! are kept as they stand. A row this platform
 //! does not have — `Acrylic` on a Mac, `Option key sends Alt` on Windows — is
@@ -120,13 +122,15 @@ pub(crate) enum SettingChange {
     OptionSendsAlt(bool),
     MultilinePaste(bool),
     ResumeAgents(bool),
+    /// Whether closing the run's last ordinary window puts it away (v41, 0.4.10 plan row 87).
+    CloseKeepsRunning(bool),
     /// Which colour scheme a web pane asks its page for (0.4.4 ticket 09).
     WebPages(WebColorSchemeV1),
 }
 
 impl SettingChange {
     /// The Settings row this value is chosen on, for the platform question and
-    /// for the name a report gives it. `None` for the two values no row shows.
+    /// for the name a report gives it. `None` for the one value no row shows.
     pub(crate) const fn row(&self) -> Option<SettingsRow> {
         Some(match self {
             Self::Theme(_) => SettingsRow::Theme,
@@ -172,8 +176,8 @@ impl SettingChange {
             Self::MultilinePaste(_) => SettingsRow::MultilinePaste,
             Self::ResumeAgents(_) => SettingsRow::ResumeAgents,
             Self::WebPages(_) => SettingsRow::WebPages,
-            // The one with no row: which pages' Advanced groups are open. It is read where it is
-            // used.
+            Self::CloseKeepsRunning(_) => SettingsRow::CloseKeepsRunning,
+            // The one with no row: which pages' Advanced groups are open, read where it is used.
             Self::AdvancedOpen(_) => {
                 return None;
             }
@@ -236,6 +240,7 @@ impl SettingChange {
             Self::OptionSendsAlt(value) => settings.option_sends_alt = value,
             Self::MultilinePaste(value) => settings.multiline_paste_ask = value,
             Self::ResumeAgents(value) => settings.resume_agents = value,
+            Self::CloseKeepsRunning(value) => settings.close_keeps_running = value,
             Self::WebPages(value) => settings.web_color_scheme = value,
         }
     }
@@ -313,10 +318,12 @@ pub(crate) fn plan_settings(
         // one above.
         first_run_card: _,
         web_pages_used: _,
+        first_hide_toast: _,
         launch_opens,
         option_sends_alt,
         multiline_paste_ask,
         resume_agents,
+        close_keeps_running,
         web_color_scheme,
     } = imported.clone();
     let mut changes = Vec::new();
@@ -496,6 +503,10 @@ pub(crate) fn plan_settings(
     offer(
         current.resume_agents != resume_agents,
         SettingChange::ResumeAgents(resume_agents),
+    );
+    offer(
+        current.close_keeps_running != close_keeps_running,
+        SettingChange::CloseKeepsRunning(close_keeps_running),
     );
     offer(
         current.web_color_scheme != web_color_scheme,
@@ -785,6 +796,7 @@ mod tests {
             option_sends_alt: !base.option_sends_alt,
             multiline_paste_ask: !base.multiline_paste_ask,
             resume_agents: !base.resume_agents,
+            close_keeps_running: !base.close_keeps_running,
             web_color_scheme: WebColorSchemeV1::Dark,
             web_pages_used: bt_persist::WebPagesUsedV1::Used,
             ..base
@@ -888,6 +900,39 @@ mod tests {
                 change.write_into(&mut folded);
             }
             assert_eq!(folded.web_pages_used, here, "this machine's receipt stands");
+        }
+    }
+
+    /// RED (0.4.10 plan row 87, part 87d, review N5) — **the first put-away's receipt is no row
+    /// and no import moves it**: it says whether this machine was told, not a preference, so a
+    /// file from another machine neither tells this one again nor silences it.
+    #[test]
+    fn the_first_put_away_receipt_is_no_row_and_no_import_moves_it() {
+        use bt_persist::FirstHideToastV1::{NotShown, Shown};
+        for (here, there) in [(NotShown, Shown), (Shown, NotShown)] {
+            let current = SettingsV1 {
+                first_hide_toast: here,
+                ..SettingsV1::default()
+            };
+            let imported = SettingsV1 {
+                first_hide_toast: there,
+                ..SettingsV1::default()
+            };
+            let plan = plan_settings(&current, &imported, bt_platform::HostPlatform::Windows);
+            assert!(
+                plan.apply.is_empty() && plan.elsewhere.is_empty(),
+                "nothing to put in force: {:?} {:?}",
+                plan.apply,
+                plan.elsewhere
+            );
+            let mut folded = current.clone();
+            for change in plan.apply.iter().chain(&plan.elsewhere) {
+                change.write_into(&mut folded);
+            }
+            assert_eq!(
+                folded.first_hide_toast, here,
+                "this machine's receipt stands"
+            );
         }
     }
 

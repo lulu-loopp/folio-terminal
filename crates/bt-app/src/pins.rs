@@ -195,7 +195,13 @@ impl PinsStore {
     pub(crate) fn open(lane: StorageLane) -> Self {
         let dir = crate::persist::storage_dir();
         crate::persist::make_data_folder(&dir);
-        Self::at_on(dir.join(PINS_FILE_NAME), lane)
+        let store = Self::at_on(dir.join(PINS_FILE_NAME), lane);
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Pins,
+            store.document.revision().bytes.clone(),
+        );
+        store
     }
 
     /// The same store over a named file, which is what makes every rule below
@@ -206,14 +212,18 @@ impl PinsStore {
         // §5.4 case 1 — no file — is the ordinary state of a machine where
         // nobody has pinned anything, and must not alert. Everything else must,
         // naming the file (§5.3).
-        let fault =
-            crate::persist::read_fault(&report, PINS_FILE_NAME, crate::i18n::pins_file_unreadable);
         // **The directory this file is in, and no other** — see
         // `crate::persist::is_writer_of`. Asking `is_storage_writer` here made
         // the answer a fact about `%APPDATA%\Folio` whatever path this store was
         // handed, which is a question about a directory a store opened anywhere
         // else never touches.
         let writer_of_record = crate::persist::is_writer_of_document(&path);
+        let fault = crate::persist::read_fault(
+            &report,
+            PINS_FILE_NAME,
+            writer_of_record,
+            crate::i18n::pins_file_unreadable,
+        );
         Self {
             document: DocumentState::opened(
                 PINS_FILE_NAME,
@@ -300,6 +310,22 @@ impl PinsStore {
     /// typed a comma wrong is the one outcome a hand-editable file must not have.
     pub(crate) fn ask_reread(&mut self) {
         self.document.ask_read();
+    }
+
+    /// **Bring back a newer build's copy of this document** (0.4.10 plan row 68d, R7) —
+    /// [`crate::document_request::DocumentState::bring_back`].
+    pub(crate) fn bring_back(&mut self, bytes: std::sync::Arc<[u8]>) {
+        self.document.bring_back(bytes);
+    }
+
+    /// What the last Bring back came to, once.
+    pub(crate) fn take_copy_back(&mut self) -> Option<crate::copy_back::CopyBackDone> {
+        self.document.take_copy_back()
+    }
+
+    /// **Keep current** (row 68d, R8): the document written once at this build's version.
+    pub(crate) fn write_at_this_version(&mut self) {
+        self.document.write_at_this_version();
     }
 
     /// Whether a re-read of `pins.json` is still to be answered.

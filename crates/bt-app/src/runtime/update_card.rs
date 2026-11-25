@@ -8,6 +8,11 @@
 //! update card's chassis with two verbs of its own, raised over the Settings
 //! dialog by `Uninstall…` (T-UNINSTALL-UX); its facts are the dialog's own
 //! (`SettingsPanel::uninstall_card`, `SettingsPanel::uninstall_remove_data`).
+//!
+//! And of the **copy-back card** (0.4.10 plan row 68d, R6): the same chassis, raised by the
+//! carry pass's offer in one window (`App::copy_back`), and what its verbs do — the four stores'
+//! Bring back and the layout's, and Keep current ([`crate::copy_back`]) — with the cards that say
+//! a newer document kept or not brought back, each with the verb that reveals its copy.
 
 use crate::window_seam::prelude::*;
 use crate::{Runtime, restore, update, update_card, update_job};
@@ -338,6 +343,283 @@ impl<B: Backend> Runtime<'_, B> {
         Ok(())
     }
 
+    /// The copy-back card, or what it stood over, drawn again.
+    fn repaint_copy_back_card(&mut self) -> Result<()> {
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// **Whether the copy-back card is up in this window** (0.4.10 plan row 68d, R6): raised by
+    /// the carry pass's offer (`FolioApp::adopt_carry_snapshot`) in the window it names. It holds
+    /// the keyboard and the pointer while it is up, as the update card does.
+    pub(crate) fn copy_back_card_is_up(&self) -> bool {
+        self.app
+            .copy_back
+            .as_ref()
+            .is_some_and(|up| up.window == self.window.window.id())
+    }
+
+    /// The copy-back card, measured against a real font, or nothing while it is not up here.
+    pub(in crate::runtime) fn copy_back_card_layout(
+        &mut self,
+    ) -> Option<restore::UpdateCardLayout<update_card::CopyBackVerb>> {
+        if !self.copy_back_card_is_up() {
+            return None;
+        }
+        let paint = self.app.copy_back.as_ref()?.paint();
+        let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        let scale = self.window.renderer.scale_factor() as f32;
+        let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
+        let content =
+            restore::update_card_content(&paint, width, scale, &mut |text, size, weight| {
+                renderer.measure_chrome_label(gpu, text, size, weight, 0.0, false)
+            });
+        Some(restore::update_card_layout(&content, width, height, scale))
+    }
+
+    /// The copy-back card as one overlay layer, with its hover and ring.
+    pub(in crate::runtime) fn copy_back_card_build(
+        &self,
+        layout: &restore::UpdateCardLayout<update_card::CopyBackVerb>,
+    ) -> Vec<crate::marks::OverlayLayer> {
+        let Some(up) = self.app.copy_back.as_ref() else {
+            return Vec::new();
+        };
+        let verbs = up.paint().verbs;
+        restore::update_card_build(layout, up.card.hover(), up.card.ring(&verbs))
+    }
+
+    /// **A key on the copy-back card**: the update card's keys — `Escape` is Not now, `Tab` and
+    /// `Shift+Tab` move the ring, `Enter` and `Space` press the verb the ring stands on and
+    /// nothing until a key has lit it. Every other key is swallowed.
+    pub(in crate::runtime) fn press_copy_back_card_key(&mut self, key: &Key) -> Result<()> {
+        let key = match key {
+            Key::Named(NamedKey::Escape) => update_card::Key::Later,
+            Key::Named(NamedKey::Tab) => update_card::Key::Step {
+                forward: !self.window.modifiers.shift_key(),
+            },
+            Key::Named(NamedKey::Enter | NamedKey::Space) => update_card::Key::Press,
+            _ => return Ok(()),
+        };
+        let answered = self.app.copy_back.as_mut().and_then(|up| {
+            let verbs = up.paint().verbs;
+            update_card::key(&mut up.card, &verbs, key)
+        });
+        match answered {
+            Some(verb) => self.answer_copy_back_card(verb),
+            None => self.repaint_copy_back_card(),
+        }
+    }
+
+    /// **The pointer over the copy-back card**; answers whether it was the card's — which, while
+    /// it is up, is always.
+    pub(in crate::runtime) fn hover_copy_back_card(&mut self, x: f64, y: f64) -> Result<bool> {
+        let Some(layout) = self.copy_back_card_layout() else {
+            return Ok(false);
+        };
+        let over = Some(restore::update_card_hit(&layout, x, y));
+        let moved = self
+            .app
+            .copy_back
+            .as_mut()
+            .is_some_and(|up| up.card.set_hover(over));
+        if moved {
+            self.repaint_copy_back_card()?;
+        }
+        Ok(true)
+    }
+
+    /// **The first confirmation card up in this window, as it is drawn**: the uninstaller's,
+    /// then the copy-back card — the card a press beside or on goes to.
+    pub(in crate::runtime) fn confirm_card_up(&mut self) -> Option<ConfirmCardUp> {
+        if let Some(layout) = self.uninstall_card_layout() {
+            return Some(ConfirmCardUp::Uninstall(layout));
+        }
+        self.copy_back_card_layout().map(ConfirmCardUp::CopyBack)
+    }
+
+    /// **A left press at `x`, `y` on the confirmation card up**, answered by what it landed on.
+    pub(in crate::runtime) fn press_confirm_card(
+        &mut self,
+        card: ConfirmCardUp,
+        x: f64,
+        y: f64,
+    ) -> Result<()> {
+        match card {
+            ConfirmCardUp::Uninstall(layout) => {
+                self.press_uninstall_card(restore::update_card_hit(&layout, x, y))
+            }
+            ConfirmCardUp::CopyBack(layout) => {
+                self.press_copy_back_card(restore::update_card_hit(&layout, x, y))
+            }
+        }
+    }
+
+    /// A press on the copy-back card, answered by what it landed on. The face and the window
+    /// beside the card answer nothing; the `×` is Not now.
+    pub(in crate::runtime) fn press_copy_back_card(
+        &mut self,
+        target: update_card::Target<update_card::CopyBackVerb>,
+    ) -> Result<()> {
+        match target.verb() {
+            Some(verb) => self.answer_copy_back_card(verb),
+            None => Ok(()),
+        }
+    }
+
+    /// **Spend a verb of the copy-back card** (0.4.10 plan row 68d, R6-R8). The card goes in
+    /// every case. *Bring back* brings every offered document back ([`Self::bring_back_copy`]);
+    /// *Keep current* writes each at this build's version ([`Self::keep_current_document`]);
+    /// *Not now* writes nothing, and the next start asks again while the case holds. One
+    /// diagnostics line per document says which.
+    fn answer_copy_back_card(&mut self, verb: update_card::CopyBackVerb) -> Result<()> {
+        let Some(up) = self.app.copy_back.take() else {
+            return Ok(());
+        };
+        let answer = match verb {
+            update_card::CopyBackVerb::BringBack => "brought back",
+            update_card::CopyBackVerb::KeepCurrent => "kept current over",
+            update_card::CopyBackVerb::NotNow => "not now for",
+        };
+        for offered in up.offer {
+            crate::diagnostics::stderr_line(format!(
+                "BT_REJECTED_COPIES {} {answer} {}",
+                offered.document.kept_file_name(),
+                offered.copy
+            ));
+            match verb {
+                update_card::CopyBackVerb::BringBack => self.bring_back_copy(offered),
+                update_card::CopyBackVerb::KeepCurrent => {
+                    self.keep_current_document(offered.document);
+                }
+                update_card::CopyBackVerb::NotNow => {}
+            }
+        }
+        self.repaint_copy_back_card()
+    }
+
+    /// **Bring one offered copy back** (R7). A store's document goes to the storage worker
+    /// through its store ([`crate::document_request::DocumentState::bring_back`]), and what it
+    /// came to is said when the worker answers ([`Self::say_copy_back_answers`]). The layout
+    /// replaces nothing: the copy's windows open beside the open ones — its summoned window only
+    /// when none is open — and its recent lists are merged into this start's, which the next
+    /// autosave writes with every window.
+    fn bring_back_copy(&mut self, offered: crate::copy_back::CopyOffered) {
+        use crate::rejected_copies::KeptDocument;
+        let bytes = std::sync::Arc::clone(&offered.bytes);
+        match offered.document {
+            KeptDocument::Session => {
+                let layout = crate::copy_back::layout_to_bring_back(
+                    &offered,
+                    self.app.quake.window().is_some(),
+                );
+                for window in layout.windows {
+                    self.app
+                        .pending_new_windows
+                        .push(crate::NewWindowPlan::saved(window));
+                }
+                self.app.recent.merge_persisted(&layout.recent);
+                self.app
+                    .recent_folders
+                    .merge_persisted(&layout.recent_folders);
+                return;
+            }
+            KeptDocument::Settings => self.app.settings_store.bring_back(bytes),
+            KeptDocument::Keybindings => self.app.keybindings_store.bring_back(bytes),
+            KeptDocument::Profiles => self.app.profiles_store.bring_back(bytes),
+            KeptDocument::Pins => self.app.pins_store.bring_back(bytes),
+            KeptDocument::UpdateCheck => return,
+        }
+        self.app.copy_back_owed.push(offered);
+    }
+
+    /// **Keep current** for one document (R8): written at this build's version — the layout at
+    /// the end of its quiet window, a store's now.
+    fn keep_current_document(&mut self, document: crate::rejected_copies::KeptDocument) {
+        use crate::rejected_copies::KeptDocument;
+        match document {
+            KeptDocument::Session => self
+                .app
+                .session_store
+                .write_at_this_version(std::time::Instant::now()),
+            KeptDocument::Settings => self.app.settings_store.write_at_this_version(),
+            KeptDocument::Keybindings => self.app.keybindings_store.write_at_this_version(),
+            KeptDocument::Profiles => self.app.profiles_store.write_at_this_version(),
+            KeptDocument::Pins => self.app.pins_store.write_at_this_version(),
+            KeptDocument::UpdateCheck => {}
+        }
+    }
+
+    /// **What each Bring back on the worker came to, said on this window** — the storage
+    /// worker's answers' turn ([`Self::take_document_answers`]). One that happened says nothing
+    /// here: the re-read it asked for names what changed, as an outside edit's does. One that did
+    /// not raises an Error card naming why, with the verb that reveals the copy, which is still
+    /// there. One not answered yet waits for a later turn.
+    pub(crate) fn say_copy_back_answers(&mut self) -> Result<()> {
+        use crate::rejected_copies::KeptDocument;
+        for offered in std::mem::take(&mut self.app.copy_back_owed) {
+            let done = match offered.document {
+                KeptDocument::Settings => self.app.settings_store.take_copy_back(),
+                KeptDocument::Keybindings => self.app.keybindings_store.take_copy_back(),
+                KeptDocument::Profiles => self.app.profiles_store.take_copy_back(),
+                KeptDocument::Pins => self.app.pins_store.take_copy_back(),
+                KeptDocument::Session | KeptDocument::UpdateCheck => continue,
+            };
+            let Some(done) = done else {
+                self.app.copy_back_owed.push(offered);
+                continue;
+            };
+            crate::diagnostics::stderr_line(format!(
+                "BT_REJECTED_COPIES {} bring back {done:?}",
+                offered.document.kept_file_name()
+            ));
+            if let Some(sentence) =
+                crate::copy_back::not_brought_sentence(offered.document, &offered.copy, &done)
+            {
+                self.raise_newer_copy_card(sentence, offered.path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// **A card about a newer document's copy** (row 68d, R4): an Error card in the rescue card's
+    /// shape — its sentence and the verb that reveals the copy ([`Self::take_newer_copy`]).
+    pub(crate) fn raise_newer_copy_card(
+        &mut self,
+        sentence: String,
+        copy: std::path::PathBuf,
+    ) -> Result<()> {
+        let card = self.toast_with_verb(
+            crate::toast::ToastKind::Error,
+            crate::toast::ToastAnchor::Window,
+            sentence,
+            crate::i18n::Text::MenuRevealInExplorer.text(),
+        )?;
+        self.window.newer_copy_cards.push((card, copy));
+        Ok(())
+    }
+
+    /// **The verb on a card about a newer document's copy, pressed**: the copy revealed. A press
+    /// on any other card's verb does nothing here.
+    pub(in crate::runtime) fn take_newer_copy(
+        &mut self,
+        card: crate::toast::ToastId,
+    ) -> Result<()> {
+        let Some(index) = self
+            .window
+            .newer_copy_cards
+            .iter()
+            .position(|(raised, _)| *raised == card)
+        else {
+            return Ok(());
+        };
+        let (_, copy) = self.window.newer_copy_cards.remove(index);
+        self.reveal_in_explorer(&copy)
+    }
+
     /// About > Version's state control ([`dispatch_version_control`]) in this
     /// window. Copy and the releases page keep their existing roads, and Check
     /// uses the shared check worker with its timestamp gate bypassed. The
@@ -393,7 +675,7 @@ mod tests {
     use crate::update_card::{VersionControl, VersionRow, version_row};
     use crate::update_job::{
         Abandon, Driver, Failure, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters,
-        Progress, Refused, SharedTransport, State, Step, Stop, Verb,
+        Progress, Refused, SharedTransport, SignatureNote, State, Step, Stop, Verb,
     };
     use crate::update_txn::TxnId;
 
@@ -452,7 +734,14 @@ mod tests {
     }
 
     fn row(job: &Job<u32>, offered: &str) -> VersionRow {
-        version_row(job, CheckView::default(), Some(offered), 0, Lang::English)
+        version_row(
+            job,
+            CheckView::default(),
+            Some(offered),
+            0,
+            Lang::English,
+            SignatureNote::Nothing,
+        )
     }
 
     /// RED (T-UPDATE-ON-ABOUT round 2, R1) — **Available → Later → About →
@@ -855,3 +1144,16 @@ mod tests {
         assert_eq!(driver.count.get(), 0);
     }
 }
+
+/// **A confirmation card up, with its layout** ([`Runtime::confirm_card_up`]): the one a press
+/// in the window goes to.
+pub(in crate::runtime) enum ConfirmCardUp {
+    /// The uninstaller's confirmation card.
+    Uninstall(restore::UpdateCardLayout<update_card::UninstallVerb>),
+    /// The copy-back card (0.4.10 plan row 68d).
+    CopyBack(restore::UpdateCardLayout<update_card::CopyBackVerb>),
+}
+
+#[cfg(test)]
+#[path = "copy_back_card_tests.rs"]
+mod copy_back_card_tests;

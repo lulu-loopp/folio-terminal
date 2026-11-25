@@ -2336,8 +2336,8 @@ impl<B: Backend> Runtime<'_, B> {
     /// `Clear scrollback` — **the whole of §3.1's ED3 pipeline**, on this pane.
     ///
     /// One escape and not a bespoke teardown, and that is the point: `ESC [ 3 J`
-    /// already runs transcript, staging, blocks, indexes, caches, anchor
-    /// degradation and tombstones through
+    /// already runs transcript, staging, blocks, indexes, caches and anchor
+    /// degradation through
     /// `LifecycleDirective::ClearHistoryAndStaging`, and the command marks go
     /// with it through the ledger (`retire_command_marks`) rather than through a
     /// second list that would have to be remembered. A menu row that emptied

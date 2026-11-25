@@ -83,7 +83,11 @@ file produces the vendored file byte for byte. Upstream formats with its own
   resizes into the single resize the PTY is told about, while keeping the
   scrollback bounded. `Term` gained `Clone` and a `fork` that drops the hook and
   the pending input-write set, which gives the transaction an unresized
-  canonical branch to reconcile against.
+  canonical branch to reconcile against. `stage_resize_transaction` closes the
+  transaction whether or not there is history to hand over; with none, it puts
+  the grid's history limit back to zero, so a transaction staged empty does not
+  leave the grid keeping every row that scrolls off afterwards (0.4.10 plan
+  row 107).
 - **A CPR pending-wrap fix.** `device_status` (`CSI 6 n`) now records the
   position and wrap flag it reported, and a `CUP` that immediately follows
   consumes it, so a line editor's CPR-then-CUP echo no longer clears

@@ -70,6 +70,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::document_request::QuitDocument;
+use crate::running_work::RunningWork;
 use crate::toast::{ToastHit, ToastId};
 use crate::update_job::{Abandon, Progress, Step};
 use crate::update_txn::TxnId;
@@ -194,13 +195,52 @@ pub(crate) const HANDOFF_DEADLINE: Duration = Duration::from_secs(15);
 /// photograph, the write — and the reason says only what else rides on it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Reason {
-    /// A person asked through Folio: the chord or the menu bar's Quit row.
+    /// A person asked through Folio: the chord, the menu bar's Quit row, the Settings card's
+    /// Uninstall.
     Asked,
-    /// The operating system's launch/application wire asked the running copy to quit.
-    LaunchWireQuit,
+    /// **AppKit asked the running copy to quit** (`applicationShouldTerminate:`), and whether a
+    /// person did, as the quit event's reason says ([`the_systems_quit_is_a_persons`]).
+    LaunchWireQuit {
+        /// The Dock's Quit, Activity Monitor's, a script's `quit` — no system reason given — and
+        /// not a log-out, a restart or a shut-down (0.4.10 plan row 87, part 87e).
+        by_a_person: bool,
+    },
     /// **Restart**, on the update's verified card: the ordinary quit run to
     /// completion, and then the applier of transaction `txn`.
     UpdateRestart { txn: TxnId },
+}
+
+impl Reason {
+    /// **Whether a quit begun for this reason asks about running work** (0.4.10 plan row 87,
+    /// part 87e; the owner's ruling R8 of 2026-11-14): every person's quit does — the chord, the
+    /// menu bar, the tray, Uninstall, Restart to update — and AppKit's only when a person asked
+    /// it. The system's end, the Restart Manager's close and the quit from outside begin no quit
+    /// at all: nobody is there to answer.
+    #[must_use]
+    pub(crate) const fn asks_about_running_work(self) -> bool {
+        match self {
+            Self::Asked | Self::UpdateRestart { .. } => true,
+            Self::LaunchWireQuit { by_a_person } => by_a_person,
+        }
+    }
+}
+
+/// **Whether AppKit's quit was a person's** (0.4.10 plan row 87, part 87e; the coordinator's item
+/// 17 and R1 of 2026-11-19): loginwindow gives a log-out, a restart and a shut-down their reason,
+/// and those are the system's — a card there would hold the session's end. The Dock's Quit,
+/// Activity Monitor's and a script's `quit` give none ([`bt_platform::QuitReason::NoneGiven`]):
+/// those are a person's, and ask. A reason this table does not know
+/// ([`bt_platform::QuitReason::Other`]) cannot be read, and counts as the system's: never block a
+/// log-out.
+#[must_use]
+pub(crate) const fn the_systems_quit_is_a_persons(reason: bt_platform::QuitReason) -> bool {
+    use bt_platform::QuitReason;
+    match reason {
+        QuitReason::NoneGiven => true,
+        QuitReason::LogOut | QuitReason::Restart | QuitReason::ShutDown | QuitReason::Other(_) => {
+            false
+        }
+    }
 }
 
 /// Where the update a quit is running for has got to.
@@ -314,6 +354,9 @@ pub(crate) struct Cancelled {
     reason: Reason,
     /// **Leave without this change** was pressed on the card.
     chosen: bool,
+    /// **The cancelled quit's card said what was running, and was answered to leave** (0.4.10
+    /// plan row 87, part 87e; R8): the quit the card's choice resumes does not ask it again.
+    running_work_answered: bool,
 }
 
 impl Cancelled {
@@ -332,6 +375,7 @@ impl Cancelled {
                 .collect(),
             reason: Reason::Asked,
             chosen: false,
+            running_work_answered: false,
         }
     }
 
@@ -371,6 +415,15 @@ impl Cancelled {
     pub(crate) fn chosen(mut self) -> Self {
         self.chosen = true;
         self
+    }
+
+    /// **Whether the quit the card's choice resumes may leave without asking about running work
+    /// again** (0.4.10 plan row 87, part 87e; R8): the choice was made, and the cancelled quit's
+    /// own card had said what was running and been answered to leave. A documents failure then
+    /// does not put the same question twice.
+    #[must_use]
+    pub(crate) fn running_work_was_answered(&self) -> bool {
+        self.chosen && self.running_work_answered
     }
 
     /// Why the quit the choice resumes begins: the cancelled quit's reason, except
@@ -441,6 +494,9 @@ impl Raised {
 /// it is drawn like: the gate's affirmative answer *is* the discard, and here
 /// there is a third thing a reader can honestly want — to keep the work and
 /// still leave.
+///
+/// **The running-work card has two** (0.4.10 plan row 87, part 87e): nothing is unsaved, so
+/// there is nothing to save or discard, and its affirmative is [`Self::Quit`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuitAnswer {
     /// Write every dirty buffer back, commit every open editor, and quit only if
@@ -453,6 +509,22 @@ pub enum QuitAnswer {
     /// standing rule: a question about losing work that took silence for consent
     /// would be the thing §7.1.3 exists to forbid.
     Cancel,
+    /// **Leave, ending what runs** — the running-work card's affirmative, offered only when
+    /// nothing is unsaved ([`QuitCard::RunningWork`]).
+    Quit,
+}
+
+/// **Which card the Ask step puts up** (0.4.10 plan row 87, part 87e; the coordinator's items 14
+/// and 16 and R5 of 2026-11-19). One card either way: the running-work sentence is the last line
+/// of the unsaved card when both ask.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuitCard {
+    /// Something is unsaved: "Save changes before quitting?", the names, Save all, Discard all,
+    /// Cancel — and the running-work line last when something runs.
+    Unsaved,
+    /// Nothing is unsaved and something runs: "Quit Folio?" (or "Restart Folio?" for an update's
+    /// Restart), the running-work line, Quit (or Restart) and Cancel.
+    RunningWork,
 }
 
 /// Something on the summary card the pointer can be over.
@@ -463,6 +535,8 @@ pub enum QuitTarget {
     Save,
     Discard,
     Cancel,
+    /// The running-work card's Quit (or Restart).
+    Quit,
 }
 
 /// The answer Enter gives, which is the one that changes nothing.
@@ -588,8 +662,8 @@ pub struct Quit {
     /// document handed over once more, before the phase's first turn hears anything.
     documents_begun: bool,
     /// **The one budget itself** (T-QUIT-FLUSH-BUDGET-PER-QUIT):
-    /// [`crate::persist::SESSION_SAVE_BUDGET`] from [`Self::begin_for`] for every quit the
-    /// product begins. The documents phase ends at half of it, the recovery phase at five
+    /// [`crate::persist::SESSION_SAVE_BUDGET`] from [`Self::begin_asking`], where every quit the
+    /// product begins starts. The documents phase ends at half of it, the recovery phase at five
     /// sixths, and the session write's wait at all of it, each from `documents_from`
     /// ([`Self::documents_by`], [`Self::recovery_by`], [`Self::session_write_until`]).
     /// Only a test changes it ([`Self::set_budget`]).
@@ -621,6 +695,13 @@ pub struct Quit {
     /// holds them all *and* a renderer. It is also the honest reading: the
     /// question was asked about what was dirty when it was asked.
     names: Vec<String>,
+    /// **What was running when the question was put** (0.4.10 plan row 87, part 87e), across
+    /// every window, counted once for [`Self::names`]' reason; [`RunningWork::NONE`] for a reason
+    /// that does not ask about it ([`Reason::asks_about_running_work`]).
+    work: RunningWork,
+    /// **The card said what was running and was answered to leave** (R8): carried into the
+    /// cancellation, so the quit its choice resumes does not ask it again.
+    running_work_answered: bool,
     hover: Option<QuitTarget>,
 }
 
@@ -660,26 +741,43 @@ impl Quit {
         Self::begin_for(names, Reason::Asked)
     }
 
-    /// Begin one. `names` is everything dirty across every window; an empty list
-    /// is a quit with nothing to ask about.
+    /// [`Self::begin_asking`] with nothing running, for the tests whose subject is not the
+    /// running-work card.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn begin_for(names: Vec<String>, reason: Reason) -> Self {
+        Self::begin_asking(names, RunningWork::NONE, reason)
+    }
+
+    /// Begin one. `names` is everything dirty across every window, and `work` what is running
+    /// in them ([`crate::running_work`]).
     ///
-    /// **No confirmation when there is nothing to lose.** "对可逆动作不加确认仪式"
-    /// is true exactly here and nowhere else in this transaction: a quit that put
-    /// up 「确定退出?」 over a clean application would be asking a question whose
-    /// only honest answer is "nothing is lost either way".
+    /// **One card, only when there is something to lose.** "对可逆动作不加确认仪式": a quit
+    /// that put up 「确定退出?」 over a clean, idle application would be asking a question whose
+    /// only honest answer is "nothing is lost either way", so it asks nothing. Something is lost
+    /// when a buffer is unsaved, and — since the owner's ruling R8 of 2026-11-14 (0.4.10 plan row
+    /// 87, part 87e) — when an agent is working or a command is running, which the quit ends: one
+    /// card at this step, [`QuitCard::Unsaved`] with the running-work line last, or
+    /// [`QuitCard::RunningWork`] alone. Running work asks only for a reason a person gave
+    /// ([`Reason::asks_about_running_work`]).
     ///
     /// **And the same quit whatever its `reason`** (0.4.6 U-21): an update's
     /// Restart begins exactly the quit a person's chord begins — the same card
     /// over the same names — and carries its transaction beside it.
     #[must_use]
-    pub(crate) fn begin_for(names: Vec<String>, reason: Reason) -> Self {
-        let phase = if names.is_empty() {
+    pub(crate) fn begin_asking(names: Vec<String>, work: RunningWork, reason: Reason) -> Self {
+        let work = if reason.asks_about_running_work() {
+            work
+        } else {
+            RunningWork::NONE
+        };
+        let phase = if names.is_empty() && !work.any() {
             Phase::Documents
         } else {
             Phase::Asking
         };
         let update = match reason {
-            Reason::Asked | Reason::LaunchWireQuit => None,
+            Reason::Asked | Reason::LaunchWireQuit { .. } => None,
             Reason::UpdateRestart { txn } => Some(Update {
                 txn,
                 leg: Leg::Live,
@@ -699,6 +797,8 @@ impl Quit {
             update,
             awaited: Vec::new(),
             names,
+            work,
+            running_work_answered: false,
             hover: None,
         }
     }
@@ -765,6 +865,32 @@ impl Quit {
             update.leg = Leg::Abandoned;
             update.owed = Some(Step::QuitAbandoned(why));
         }
+    }
+
+    /// **The system is ending the session: no applier starts** (0.4.10 plan row 87, part 87e;
+    /// the coordinator's ruling of 2026-11-19 on the review's P2-3). An update this quit carries
+    /// and has not yet handed over is given up — live, or with its session landed and its
+    /// hand-over still owed — and the job is owed [`Abandon::SystemEndingTheSession`]: its journal
+    /// stays `Prepared`, and the next start offers it again. The quit itself goes on wherever it
+    /// was. Answers whether the hand-over is already on its way (sent, or answered): that is the
+    /// applier's own, and nothing is given up.
+    pub(crate) fn give_up_the_update_for_the_systems_end(&mut self) -> bool {
+        if let Phase::Leaving {
+            handoff: Handoff::Sent { .. } | Handoff::Done,
+        } = self.phase
+        {
+            return true;
+        }
+        if let Some(update) = self.update.as_mut()
+            && matches!(update.leg, Leg::Live | Leg::Landed)
+        {
+            update.leg = Leg::Abandoned;
+            update.owed = Some(Step::QuitAbandoned(Abandon::SystemEndingTheSession));
+        }
+        if let Phase::Leaving { handoff } = &mut self.phase {
+            *handoff = Handoff::NotOwed;
+        }
+        false
     }
 
     /// What the driver owes right now.
@@ -862,6 +988,24 @@ impl Quit {
         &self.names
     }
 
+    /// **What the card says is running** (0.4.10 plan row 87, part 87e): its last line when
+    /// anything is.
+    #[must_use]
+    pub(crate) fn card_running_work(&self) -> RunningWork {
+        self.work
+    }
+
+    /// **Which card the Ask step puts up**: the unsaved card when anything is unsaved, the
+    /// running-work card otherwise.
+    #[must_use]
+    pub fn card(&self) -> QuitCard {
+        if self.names.is_empty() {
+            QuitCard::RunningWork
+        } else {
+            QuitCard::Unsaved
+        }
+    }
+
     #[must_use]
     pub fn hover(&self) -> Option<QuitTarget> {
         self.hover
@@ -882,15 +1026,24 @@ impl Quit {
         if self.phase != Phase::Asking {
             return self.step();
         }
-        self.hover = None;
-        self.phase = match answer {
-            QuitAnswer::Save => Phase::Saving { until: None },
-            QuitAnswer::Discard => Phase::Discarding,
-            QuitAnswer::Cancel => {
+        // **Each card's own answers, and no other's** (0.4.10 plan row 87, part 87e): Save and
+        // Discard are the unsaved card's, Quit the running-work card's; Cancel is both.
+        let card = self.card();
+        let phase = match (answer, card) {
+            (QuitAnswer::Save, QuitCard::Unsaved) => Phase::Saving { until: None },
+            (QuitAnswer::Discard, QuitCard::Unsaved) => Phase::Discarding,
+            // Nothing to save or discard: on to the documents, as a quit with nothing to ask.
+            (QuitAnswer::Quit, QuitCard::RunningWork) => Phase::Documents,
+            (QuitAnswer::Cancel, _) => {
                 self.give_up_the_update(Abandon::Cancelled);
                 Phase::Abandoned
             }
+            (QuitAnswer::Save | QuitAnswer::Discard, QuitCard::RunningWork)
+            | (QuitAnswer::Quit, QuitCard::Unsaved) => return self.step(),
         };
+        self.hover = None;
+        self.running_work_answered = phase != Phase::Abandoned && self.work.any();
+        self.phase = phase;
         self.step()
     }
 
@@ -1155,6 +1308,7 @@ impl Quit {
             unsaved,
             reason: self.reason,
             chosen: false,
+            running_work_answered: self.running_work_answered,
         });
         self.phase = Phase::Abandoned;
     }

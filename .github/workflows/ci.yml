@@ -153,6 +153,9 @@ jobs:
     # T-DOC-LINK-DEBT (2026-11-02) adds the doc-link debt plant, no cargo: a
     # local clone of the checkout and one pwsh run; taken as 0.3 min until runs
     # measure it. 12.85 + 0.3 = 13.15 x 1.36 = 17.88, so still 18.
+    # 0.4.10 plan row 68d (2026-11-14) adds the document-key plants, no cargo: two
+    # in-process runs of one pwsh script, 1 s for both on the 9950X; 13.15 + 0.02 =
+    # 13.17 x 1.36 = 17.91, so still 18.
     timeout-minutes: 18
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
@@ -736,6 +739,48 @@ jobs:
       - name: the test-globals gate can actually fail
         shell: pwsh
         run: ./scripts/ci/check-test-globals-tests.ps1
+
+      # The document key-set register (0.4.10 plan row 68d) is held to the merge base's row by
+      # row, so the plants are made of the merge base's own rows: one edited in place (a key added
+      # to its shape) and one removed, each required to be refused for its reason. A row of the
+      # merge base that this checkout still has is the subject. The change that brings the
+      # register has no base rows to plant against, so there the plants are held to this
+      # checkout's HEAD instead, whose register is every later change's base. No cargo.
+      - name: the document-key register can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/DOCUMENT-KEYS.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          $base = (git merge-base HEAD origin/main)
+          if (-not $base) { throw "no merge base with origin/main to size the plants against" }
+          $ref = "origin/main"
+          $then = (git show "${base}:$file" 2>$null) -join "`n"
+          if ($LASTEXITCODE -ne 0) {
+            $ref = "HEAD"
+            $then = (git show "HEAD:$file") -join "`n"
+          }
+          $held = @($then -split "`r?`n" | Where-Object { $_ -and -not $_.StartsWith("#") -and -not $_.StartsWith("document`t") })
+          $row = @($held | Where-Object { $original.Contains("`n$_`n") })[0]
+          if (-not $row) { throw "the register has no row of $ref's merge base to plant against" }
+          $cells = $row -split "`t"
+          $cells[3] = $cells[3].Substring(0, $cells[3].Length - 1) + "pubplanted:bool,}"
+          $plants = @(
+            @{ text = $original.Replace("`n$row`n", "`n" + ($cells -join "`t") + "`n"); want = "edited in place"; what = "a key added to a row in place" },
+            @{ text = $original.Replace("`n$row`n", "`n"); want = "removed: the merge base's row"; what = "a row removed" }
+          )
+          try {
+            foreach ($plant in $plants) {
+              [IO.File]::WriteAllText($file, $plant.text)
+              $said = & ./scripts/ci/check-document-keys.ps1 -MainRef $ref *>&1 | Out-String
+              if ($LASTEXITCODE -ne 1 -or $said -notmatch [regex]::Escape($plant.want)) {
+                throw "the document-key register did not refuse $($plant.what) (exit $LASTEXITCODE):`n$said"
+              }
+              Write-Host "refused, as planted: $($plant.what)"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
 
       # The PSReadLine artefact gate holds the vendored package, its README, the build script's
       # pinned table and Folio's manifest to one another (T-INTEGRATION-INJECT-2-BUILD). Its
@@ -1329,6 +1374,13 @@ jobs:
       # process, so upstream's hundred parse snapshots are how we know the bound
       # changed nothing else.
       #
+      # **winit is the one vendored crate that is not a member** (0.4.10 plan row 87, part 87a;
+      # R11): Folio changes one arm of a Windows window procedure there, upstream's own suite
+      # is three compile-time assertions, and membership would pull its examples' and
+      # doctests' dev-dependencies into the lock and its upstream code under this workspace's
+      # clippy. See vendor/winit/CHANGES-FOLIO.md; the copy goes when a winit release carries
+      # the arm.
+      #
       # Asked of cargo, not of a grep: the manifest mentions each path twice
       # (members and [patch.crates-io]), so grepping it passes even with the
       # member deleted.
@@ -1621,6 +1673,18 @@ jobs:
           ./scripts/ci/check-request-door-sites-tests.ps1
           ./scripts/ci/check-request-door-sites.ps1
 
+      # 0.4.10 plan row 68d (R9): the persisted documents' key sets, per version. bt-persist's
+      # `document_keys_tests` and bt-app's `the_integration_records_keep_their_keys` (the suite
+      # above) hold each document's rows of docs/plans/DOCUMENT-KEYS.tsv at its current version to
+      # the source, and this holds the register to the merge base's: no row edited or removed, and
+      # a new row only at a version above its document's highest there. Its scratch-repository
+      # suite runs first, one case per rule.
+      - name: the document key sets change only at a new version
+        shell: pwsh
+        run: |
+          ./scripts/ci/check-document-keys-tests.ps1
+          ./scripts/ci/check-document-keys.ps1
+
       # T-HEADLESS-RUNTIME-SEAM: the places bt-app names a backend holder for the
       # native backend are listed, and the list is held to the merge base's (or
       # its seed): no row added.
@@ -1895,6 +1959,18 @@ jobs:
       - name: package.ps1 against the release manifest
         shell: pwsh
         run: ./scripts/release/package-tests.ps1 -Binaries target/debug
+
+      # `release-statement.ps1` over a directory packed from the same build,
+      # with the check this checkout compiles (0.4.10 plan row 102, part 2):
+      # the statement it writes read back against the files, and each refusal.
+      # A signature that verifies needs a release key, which no runner holds;
+      # that half is `bt_winres::release_statement`'s own tests.
+      - name: build the release statement's check
+        run: cargo build -p bt-winres --features release-key,inflate --bin check-release-statement --locked
+
+      - name: release-statement.ps1 on a packed release
+        shell: pwsh
+        run: ./scripts/release/release-statement-tests.ps1 -Binaries target/debug -CheckBinary target/debug/check-release-statement.exe
 
       - name: install WARP
         shell: pwsh

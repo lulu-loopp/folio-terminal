@@ -13,6 +13,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# The key sets of the persisted documents are read from this crate's own types through the index
+# (`src/document_keys_tests.rs`, 0.4.10 plan row 68d). Tests only, and `bt-source`'s own manifest
+# says that nothing in `folio.exe` may ever depend on it.
+bt-source = { path = "../bt-source" }
 # Every test's scratch name comes from one place (`bt_testpath`, T-TEST-HYGIENE-048).
 bt-testpath = { path = "../bt-testpath" }
 

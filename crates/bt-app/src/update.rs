@@ -98,6 +98,9 @@ use std::{
 };
 
 use bt_persist::UpdateCheckV1;
+use bt_platform::HostPlatform;
+
+use crate::update_job::SignatureNote;
 
 /// The host the question goes to.
 pub const RELEASES_HOST: &str = "api.github.com";
@@ -535,12 +538,13 @@ pub const FEED_LIST: &str = "releases.json";
 /// release with at least `tag_name`, `name`, `draft`, `prerelease` and
 /// `assets[]{name, browser_download_url, size}` — and the assets beside it,
 /// each `browser_download_url` a `file:` URL. The check reads the list here
-/// instead of asking [`RELEASES_HOST`], and a press copies the offer's two
-/// files instead of downloading them (`update_job::FeedCopy`); **everything
-/// after the fetch is the release page's road**: the checksum document, the
-/// archive reader and the signer the running build requires. A feed can
-/// therefore only deliver a build signed by the same signer, which is what
-/// makes a visible flag safe to have.
+/// instead of asking [`RELEASES_HOST`], and a press copies the offer's files
+/// instead of downloading them (`update_job::FeedCopy`); **everything after
+/// the fetch is the release page's road**: the release statement, verified with
+/// the release keys the running build embeds, and the archive reader holding
+/// every file to it (0.4.10 plan row 102). A feed can therefore only deliver a
+/// release a key holder vouched for, which is what makes a visible flag safe to
+/// have.
 ///
 /// **One process's input, never a fact.** Given on the command line and held
 /// in [`FEED`] for this process only: no environment variable, no settings
@@ -1657,6 +1661,89 @@ pub(crate) fn last_checked_deadline(now: Instant, now_ms: u64) -> Option<Instant
         .then(|| crate::i18n::LastChecked::next_change_in_ms(view.checked_at_ms, now_ms))
         .flatten()
         .and_then(|milliseconds| now.checked_add(Duration::from_millis(milliseconds)))
+}
+
+// ── this copy's signature, for About → Version ──────────────────────────────
+
+/// **The last reading of this copy's signature** (0.4.10 plan row 102 part 3,
+/// R4): [`THIS_COPY_UNREAD`] until a reading has answered, then
+/// [`THIS_COPY_OURS`] or [`THIS_COPY_NOT_OURS`].
+static THIS_COPY_SIGNATURE: AtomicU8 = AtomicU8::new(THIS_COPY_UNREAD);
+const THIS_COPY_UNREAD: u8 = 0;
+const THIS_COPY_OURS: u8 = 1;
+const THIS_COPY_NOT_OURS: u8 = 2;
+
+/// Whether a reading of this copy's signature is out: one at a time.
+static THIS_COPY_READING: AtomicBool = AtomicBool::new(false);
+
+/// **What About → Version says of this copy's signature** — the last
+/// reading's ([`read_this_copy_signature`]); [`SignatureNote::Nothing`]
+/// before any reading has answered.
+pub(crate) fn this_copy_note() -> SignatureNote {
+    if THIS_COPY_SIGNATURE.load(AtomicOrdering::Acquire) == THIS_COPY_NOT_OURS {
+        SignatureNote::NotOurService
+    } else {
+        SignatureNote::Nothing
+    }
+}
+
+/// **Read this copy's signature again, off the window thread** (0.4.10 plan
+/// row 102 part 3, R4): the About page asks once per visit
+/// (`settings::SettingsPanel::take_about_open_edge`), a certificate revoked
+/// while Folio runs included. The running `folio.exe`'s
+/// `update_prepare_windows::service_signature` under the cache-only policy
+/// (`Policy::SystemCacheOnly`: revocation from what this machine holds,
+/// nothing asked of the network; a revocation it does not hold says nothing,
+/// `ServiceSignature::version_line_note`), on a worker in the background
+/// band; its answer is published, said in `diagnostics.log`
+/// the first time and whenever it changes, and wakes the loop. A reading already out answers this
+/// visit as well. On `platform`s other than Windows no Authenticode reading
+/// exists, and nothing starts. Answers whether a reading was started.
+pub(crate) fn read_this_copy_signature(platform: HostPlatform) -> bool {
+    if platform != HostPlatform::Windows
+        || THIS_COPY_READING
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .is_err()
+    {
+        return false;
+    }
+    let started = bt_platform::spawn_at_priority(
+        "bt-this-copy-signature",
+        bt_platform::ThreadPriority::BelowNormal,
+        |_ctx| {
+            let (note, said) = match std::env::current_exe() {
+                Ok(exe) => {
+                    let signed = crate::update_prepare_windows::service_signature(
+                        &exe,
+                        &bt_platform::trust::Policy::SystemCacheOnly,
+                        &crate::update_prepare_windows::OUR_SERVICE,
+                    );
+                    (signed.version_line_note(), signed.as_said())
+                }
+                Err(error) => (
+                    SignatureNote::NotOurService,
+                    format!("not read: its executable is not found ({error})"),
+                ),
+            };
+            let read = match note {
+                SignatureNote::Nothing => THIS_COPY_OURS,
+                SignatureNote::NotOurService => THIS_COPY_NOT_OURS,
+            };
+            if THIS_COPY_SIGNATURE.swap(read, AtomicOrdering::AcqRel) != read {
+                crate::diagnostics::note(&format!("Folio: this copy's folio.exe is {said}"));
+            }
+            THIS_COPY_READING.store(false, AtomicOrdering::Release);
+            if let Some(wake) = WAKE.get() {
+                wake();
+            }
+        },
+    );
+    if started.is_err() {
+        // The visit after this one asks again.
+        THIS_COPY_READING.store(false, AtomicOrdering::Release);
+        return false;
+    }
+    true
 }
 
 /// The wall clock, in milliseconds since the Unix epoch.
@@ -3575,6 +3662,7 @@ mod tests {
                 path: String::new(),
                 tag: "v0.4.7".to_owned(),
                 file_name: name.to_owned(),
+                most: bt_platform::https_download::DOWNLOAD_CEILING_LIMIT,
             };
             assert!(
                 transport.fetch(&request, &into, &fetching).is_err(),
@@ -3582,6 +3670,120 @@ mod tests {
             );
             assert!(!into.join(name).exists(), "{name}: nothing is left");
         }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (0.4.10 plan row 102 part 3, R4) — **no reading of this copy's
+    /// signature starts off Windows**: macOS and the other Unixes have no
+    /// Authenticode reading, so About → Version says nothing of one there.
+    ///
+    /// MUTATION: drop the platform test in `read_this_copy_signature`
+    /// (`plant-102-3-reads-off-windows.py`).
+    #[test]
+    fn no_reading_of_this_copys_signature_starts_off_windows() {
+        use bt_platform::HostPlatform;
+        for platform in [HostPlatform::MacOs, HostPlatform::OtherUnix] {
+            assert!(
+                !super::read_this_copy_signature(platform),
+                "{platform:?} starts no reading"
+            );
+        }
+    }
+
+    /// RED (0.4.10 plan row 102 part 3, R4) — **About → Version is wired to
+    /// the reading**: the settings layout's About edge asks for this copy's
+    /// signature, and the line the page draws is given the last reading.
+    ///
+    /// MUTATION: delete the `read_this_copy_signature` call from
+    /// `Runtime::settings_layout` (`plant-102-3-about-asks-nothing.py`), or
+    /// hand `version_row` `SignatureNote::Nothing`
+    /// (`plant-102-3-line-given-nothing.py`).
+    #[test]
+    fn the_about_page_asks_for_this_copys_signature_and_draws_it() {
+        use crate::test_support::{squeezed, squeezed_body};
+        assert!(
+            squeezed_body("Runtime", "settings_layout").contains(&squeezed(
+                "if about_opened { update::read_this_copy_signature(bt_platform::host_platform()); }"
+            )),
+            "the About visit asks for the reading"
+        );
+        assert!(
+            squeezed_body("Runtime", "settings_values")
+                .contains(&squeezed("i18n::current(), update::this_copy_note(), ),")),
+            "the Version line is given the last reading"
+        );
+    }
+
+    /// RED (0.4.10 plan row 102, the part 3 review's P2-12 and N21) — **the
+    /// readings nothing was pressed for ask the network nothing**: About's
+    /// reading of this copy and the resumer of this copy read the signature
+    /// under `Policy::SystemCacheOnly`; only the Prepare's, right after a press
+    /// of Update, keeps `Policy::System`.
+    ///
+    /// MUTATION: read this copy under `Policy::System` again
+    /// (`plant-102-3-about-asks-the-network.py`), or resume under it
+    /// (`plant-102-3-resume-asks-the-network.py`).
+    #[test]
+    fn the_readings_nothing_was_pressed_for_read_the_cache_only() {
+        use crate::test_support::{free_fn_body, squeezed};
+        for reading in ["read_this_copy_signature", "resumer_for_this_copy"] {
+            let body = squeezed(free_fn_body(reading));
+            assert!(body.contains("Policy::SystemCacheOnly,"), "{reading}");
+            assert!(!body.contains("Policy::System,"), "{reading}");
+        }
+    }
+
+    /// RED (0.4.10 plan row 102, the 1b+2 review's N12) — **a feed's file
+    /// larger than its request may hold is refused before it is copied**: a
+    /// statement the list gives as one byte over 64 KiB leaves nothing behind.
+    ///
+    /// MUTATION: drop the size check in `FeedCopy::fetch`
+    /// (`plant-102-n12-feed-copies-any-size.py`).
+    #[test]
+    fn a_feed_file_larger_than_its_request_holds_is_not_copied() {
+        let home = dir("feed-oversized");
+        let folder = home.join("feed");
+        std::fs::create_dir_all(&folder).unwrap();
+        let name = bt_winres::release_statement::STATEMENT_FILE;
+        let most = bt_winres::release_statement::STATEMENT_MAX_BYTES;
+        std::fs::write(folder.join(name), vec![b'a'; most + 1]).unwrap();
+        std::fs::write(
+            folder.join(FEED_LIST),
+            serde_json::json!([{
+                "tag_name": "v0.4.10",
+                "name": "Folio v0.4.10",
+                "draft": false,
+                "prerelease": false,
+                "assets": [{
+                    "name": name,
+                    "browser_download_url": url_of(&folder.join(name)),
+                    "size": most + 1,
+                }],
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let feed = Feed::at(&format!("{}/", url_of(&folder)));
+        let into = home.join("into");
+        std::fs::create_dir_all(&into).unwrap();
+        let transport = crate::update_job::transport_for(
+            Some(&feed),
+            std::sync::Arc::new(crate::update_job::NoDownloadDoor),
+        );
+        let fetching = crate::update_job::Fetching {
+            report: std::sync::Arc::new(|_| {}),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let offer = crate::update_job::Offer::mint(
+            crate::update_txn::TxnId::new([0x12; 16]),
+            "v0.4.10",
+            bt_platform::HostPlatform::Windows,
+        )
+        .expect("a release");
+        let [statement, _] = offer.requests();
+        let refused = transport.fetch(&statement, &into, &fetching);
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(!into.join(name).exists(), "nothing is left");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

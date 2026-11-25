@@ -17,11 +17,12 @@ use std::time::{Duration, Instant};
 use bt_platform::admission::{WaitToken, WorkerCtx, admitted, doors};
 
 use bt_persist::{
-    BindingOverrideV1, Debouncer, DocumentBytes, ExitState, KEYBINDINGS_SCHEMA_VERSION,
-    KeybindingsPlatformV1, KeybindingsV1, ProfilesV1, ReadReport, SessionV1, SettingsV1,
-    WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel, read_keybindings,
-    read_keybindings_keeping_bytes, read_profiles, read_profiles_keeping_bytes, read_session,
-    read_settings, read_settings_keeping, read_settings_keeping_bytes, remove_sentinel,
+    BindingOverrideV1, Debouncer, DocumentBytes, ExitState, FallbackReason,
+    KEYBINDINGS_SCHEMA_VERSION, KeybindingsPlatformV1, KeybindingsV1, ProfilesV1, ReadReport,
+    SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel,
+    read_keybindings, read_keybindings_keeping_bytes, read_profiles, read_profiles_keeping_bytes,
+    read_session, read_settings, read_settings_keeping, read_settings_keeping_bytes,
+    remove_sentinel,
 };
 
 use crate::document_request::{DocumentState, QuitDocument, ReadNews, StoreAnswer};
@@ -247,10 +248,37 @@ impl<T: PartialEq> Revision<T> {
 /// what stands in for the damaged document — and it is a closure rather than a
 /// parameter because a sentence that called all six "the defaults" would be the
 /// vaguest of the six everywhere.
+///
+/// **Except a file newer than this build, kept as a copy, in the data folder's writer** (0.4.10
+/// plan row 68d, R4; review N6): the refusal is noted for the carry pass's refused copies
+/// ([`crate::rejected_copies::note_refused_newer`]), which says it once — the copies are the
+/// memory — and the start raises nothing for it ([`newer_refusal_to_note`]). The log line
+/// stays. A newer file with no copy kept (a trial owes it, or the keeping failed) keeps the
+/// sentence: with no copy there is nothing to remember it by. So does a process that is not the
+/// writer, whose carry pass says nothing.
 pub(crate) fn read_fault(
     report: &ReadReport,
     file: &str,
+    writer: bool,
     in_force: impl FnOnce(&str) -> String,
+) -> Option<String> {
+    read_fault_noting(
+        report,
+        file,
+        writer,
+        in_force,
+        crate::rejected_copies::note_refused_newer,
+    )
+}
+
+/// [`read_fault`], with what notes a newer file's refusal handed in (`note`), so a test sees
+/// the note without the process's cell.
+fn read_fault_noting(
+    report: &ReadReport,
+    file: &str,
+    writer: bool,
+    in_force: impl FnOnce(&str) -> String,
+    note: impl FnOnce(crate::rejected_copies::KeptDocument, String),
 ) -> Option<String> {
     let ReadReport::FellBackToDefaults { reason, kept } = report else {
         return None;
@@ -258,17 +286,44 @@ pub(crate) fn read_fault(
     crate::diagnostics::stderr_line(format!(
         "BT_PERSIST {file} fell back to defaults: {reason:?} kept={kept:?}"
     ));
+    let kept_name = kept.as_ref().map(|kept| {
+        kept.file_name()
+            .unwrap_or(kept.as_os_str())
+            .to_string_lossy()
+            .into_owned()
+    });
+    if let Some((document, copy)) =
+        newer_refusal_to_note(reason, kept_name.as_deref(), file, writer)
+    {
+        note(document, copy);
+        return None;
+    }
     let sentence = in_force(file);
-    Some(match kept {
-        Some(kept) => crate::i18n::persisted_file_kept_copy(
-            &sentence,
-            &kept
-                .file_name()
-                .unwrap_or(kept.as_os_str())
-                .to_string_lossy(),
-        ),
+    Some(match kept_name {
+        Some(kept) => crate::i18n::persisted_file_kept_copy(&sentence, &kept),
         None => sentence,
     })
+}
+
+/// **Which refusal the start leaves to the carry pass's refused copies** (0.4.10 plan row 68d,
+/// R4; review N1, N6): a file newer than this build (`FutureSchemaVersion`) of one of the five
+/// live documents, kept as `copy`, in the process that writes the folder — the document and the
+/// copy's name. Every other reason, a refusal with no copy kept, and a process that is not the
+/// writer answer `None`: the start says those itself.
+fn newer_refusal_to_note(
+    reason: &FallbackReason,
+    copy: Option<&str>,
+    file: &str,
+    writer: bool,
+) -> Option<(crate::rejected_copies::KeptDocument, String)> {
+    let (FallbackReason::FutureSchemaVersion { .. }, Some(copy)) = (reason, copy) else {
+        return None;
+    };
+    if !writer {
+        return None;
+    }
+    let document = crate::rejected_copies::KeptDocument::live_named(file)?;
+    Some((document, copy.to_owned()))
 }
 
 /// **Whether this process is the one that writes `%APPDATA%\Folio\`** (review
@@ -336,11 +391,52 @@ pub fn is_storage_writer() -> bool {
 pub(crate) fn is_writer_of(directory: &Path) -> bool {
     let name = bt_platform::instance::claim_name(directory);
     let mut table = claim_table();
-    if let Some(answer) = table.get(&name) {
-        return answer.is_some();
+    if let Some(row) = table.get(&name) {
+        return row.claim.is_some();
     }
+    #[cfg(test)]
+    let_go_of_the_claims_on_removed_directories(&mut table);
     let answer = bt_platform::instance::try_claim_data_directory(directory);
-    remember_claim_answer(&mut table, name, answer)
+    remember_claim_answer(&mut table, name, directory, answer)
+}
+
+/// **One row of the claim table**: the claim this process took on a directory (it is the writer,
+/// and the guard lives here), or `None` (it asked and was refused) — and, in a test build, the
+/// directory it was asked of, which is how the test build's
+/// `let_go_of_the_claims_on_removed_directories` knows a test's directory is gone.
+struct ClaimRow {
+    claim: Option<bt_platform::instance::DataDirectoryClaim>,
+    #[cfg(test)]
+    directory: PathBuf,
+}
+
+impl ClaimRow {
+    fn of(directory: &Path, claim: Option<bt_platform::instance::DataDirectoryClaim>) -> Self {
+        #[cfg(not(test))]
+        let _ = directory;
+        Self {
+            claim,
+            #[cfg(test)]
+            directory: directory.to_path_buf(),
+        }
+    }
+}
+
+/// **A test's data directory, once removed, is nobody's**, so the claim this process holds on it
+/// is let go: the lock's descriptor closed and its file unlinked (`DataDirectoryClaim`'s drop),
+/// and a refusal of it forgotten (0.4.10 plan row 103, the Mac filter's two reds).
+///
+/// The product has one data directory and holds its claim for the life of the process. A test
+/// process opens a store in a scratch directory of its own for nearly every test — each one asks
+/// [`is_writer_of`], each claim holds a descriptor — and removes the directory when the test is
+/// done. Kept for the life of the process, those claims were a descriptor per test ever run: 266
+/// of the 338 the bt-app test binary held open under row 103's filter on macOS, where a process
+/// starts with 256, so whichever test opened a file next past that was refused "Too many open
+/// files" — which tests ran beside it decided which test failed. Asked before each new claim, so
+/// the table holds the claims of the directories that are still there.
+#[cfg(test)]
+fn let_go_of_the_claims_on_removed_directories(table: &mut HashMap<String, ClaimRow>) {
+    table.retain(|_, row| row.directory.exists());
 }
 
 /// Keep a settled claim answer for this process. `Sweeping` is not an answer
@@ -348,13 +444,14 @@ pub(crate) fn is_writer_of(directory: &Path) -> bool {
 /// the next [`is_writer_of`] ask goes to the platform again instead of
 /// inheriting a refusal from the sweep.
 fn remember_claim_answer(
-    table: &mut HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>,
+    table: &mut HashMap<String, ClaimRow>,
     name: String,
+    directory: &Path,
     answer: Result<bt_platform::instance::DataDirectoryClaim, bt_platform::instance::ClaimRefusal>,
 ) -> bool {
     match answer {
         Ok(claim) => {
-            table.insert(name, Some(claim));
+            table.insert(name, ClaimRow::of(directory, Some(claim)));
             true
         }
         Err(bt_platform::instance::ClaimRefusal::Sweeping) => false,
@@ -362,7 +459,7 @@ fn remember_claim_answer(
             bt_platform::instance::ClaimRefusal::Held
             | bt_platform::instance::ClaimRefusal::QueryDenied(_),
         ) => {
-            table.insert(name, None);
+            table.insert(name, ClaimRow::of(directory, None));
             false
         }
     }
@@ -383,7 +480,7 @@ pub(crate) fn let_go_of_every_claim() {
         Err(std::sync::TryLockError::WouldBlock) => return,
     };
     for row in table.values_mut() {
-        *row = None;
+        row.claim = None;
     }
 }
 
@@ -392,20 +489,15 @@ pub(crate) fn let_go_of_every_claim() {
 /// the process) or `None` (it asked and was refused). Written by
 /// [`is_writer_of`] on a first settled ask and by [`adopt_claim`]; a transient
 /// sweep leaves no row. Read by nothing else.
-fn claim_table() -> std::sync::MutexGuard<
-    'static,
-    HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>,
-> {
+fn claim_table() -> std::sync::MutexGuard<'static, HashMap<String, ClaimRow>> {
     claims()
         .lock()
         .expect("the claim table is locked to read or take one entry and nothing else")
 }
 
 /// The table [`claim_table`] locks.
-fn claims() -> &'static Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>> {
-    static CLAIMS: OnceLock<
-        Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>>,
-    > = OnceLock::new();
+fn claims() -> &'static Mutex<HashMap<String, ClaimRow>> {
+    static CLAIMS: OnceLock<Mutex<HashMap<String, ClaimRow>>> = OnceLock::new();
     CLAIMS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -452,10 +544,10 @@ pub(crate) fn adopt_claim(directory: &Path, claim: bt_platform::instance::DataDi
     // after it, so that a debug stop never leaves the table poisoned.
     let earlier = match claim_table().entry(name.clone()) {
         std::collections::hash_map::Entry::Vacant(row) => {
-            row.insert(Some(claim));
+            row.insert(ClaimRow::of(directory, Some(claim)));
             None
         }
-        std::collections::hash_map::Entry::Occupied(row) => Some(row.get().is_some()),
+        std::collections::hash_map::Entry::Occupied(row) => Some(row.get().claim.is_some()),
     };
     if let Some(was_writer) = earlier {
         crate::diagnostics::stderr_line(format!(
@@ -1010,6 +1102,9 @@ enum StorageJob {
     /// A hand-editable document, written only if the file still holds what
     /// the request expects, and answered on its own channel.
     Document(crate::document_request::DocumentJob),
+    /// A newer build's copy brought back over the older build's write (0.4.10 plan row 68d),
+    /// answered on its own channel.
+    CopyBack(crate::copy_back::CopyBackJob),
     /// A hand-editable document, read while it stands still.
     Read(crate::document_request::ReadJob),
     /// A quit's copy of a hand-editable document into the `recovered` folder,
@@ -1083,6 +1178,7 @@ fn serve_storage_job(
         StorageJob::Document(job) => crate::document_request::serve_document(worker, job),
         StorageJob::Read(job) => crate::document_request::serve_read(worker, job),
         StorageJob::Recovered(job) => crate::document_request::serve_recovered(worker, job),
+        StorageJob::CopyBack(job) => crate::document_request::serve_copy_back(worker, job),
     }
     Served::Done
 }
@@ -1530,6 +1626,14 @@ impl StorageLane {
         job: crate::document_request::RecoveredJob,
     ) -> Result<StorageRequest, NotAdmitted> {
         self.admit_document_job(StorageJob::Recovered(job))
+    }
+
+    /// Hand a newer build's copy, to be brought back, over (0.4.10 plan row 68d).
+    pub(crate) fn send_copy_back(
+        &self,
+        job: crate::copy_back::CopyBackJob,
+    ) -> Result<StorageRequest, NotAdmitted> {
+        self.admit_document_job(StorageJob::CopyBack(job))
     }
 
     /// Whether a worker serves the queue now ([`LaneShared::up`]). Never waits.
@@ -2179,12 +2283,18 @@ impl SessionStore {
         crate::update_trial::owe_copy(&report, &session_path, |path| {
             let _ = read_session(path);
         });
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Session,
+            read_bytes.clone().into_bytes(),
+        );
         // §5.4 case 1 — no file yet — is the normal first run and must not
         // alert; every other non-`Loaded` outcome must (§5.3: "explicit alert,
         // never pretend it succeeded").
         let mut fault = read_fault(
             &report,
             SESSION_FILE_NAME,
+            writer_of_record,
             crate::i18n::session_file_unreadable,
         );
         if !degradation.is_clean() {
@@ -2469,6 +2579,13 @@ impl SessionStore {
         if self.retry_on_trigger && !self.debouncer.is_dirty() {
             self.hand_over();
         }
+    }
+
+    /// **Keep current** (0.4.10 plan row 68d, R8): the layout written at this build's version
+    /// at the end of a quiet window, although nothing in it changed — the file holds it at an
+    /// older one.
+    pub(crate) fn write_at_this_version(&mut self, now: Instant) {
+        self.debouncer.mark_dirty(now);
     }
 
     /// When the event loop should wake to write, if it should.
@@ -3201,6 +3318,8 @@ pub(crate) struct ScriptedJobs {
 pub(crate) enum ScriptedJob {
     Document(crate::document_request::DocumentJob),
     Recovered(crate::document_request::RecoveredJob),
+    /// A Bring back; the scripted lane drops it, which answers it as refused.
+    CopyBack,
     /// A document's stable read, which the test answers.
     Read(crate::document_request::ReadJob),
     /// A session document.
@@ -3222,6 +3341,7 @@ impl ScriptedJobs {
         Some(match job {
             StorageJob::Document(job) => ScriptedJob::Document(job),
             StorageJob::Recovered(job) => ScriptedJob::Recovered(job),
+            StorageJob::CopyBack(_) => ScriptedJob::CopyBack,
             StorageJob::Read(job) => ScriptedJob::Read(job),
             StorageJob::Session(_) => ScriptedJob::Session,
             StorageJob::Receipt { .. } => ScriptedJob::Receipt,
@@ -3291,7 +3411,13 @@ impl SettingsStore {
         let dir = storage_dir();
         let path = settings_write_path(&dir, SETTINGS_FILE_NAME);
         make_data_folder(path.parent().unwrap_or(&dir));
-        Self::read_at(path, is_writer_of(&dir), lane)
+        let store = Self::read_at(path, is_writer_of(&dir), lane);
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Settings,
+            store.document.revision().bytes.clone(),
+        );
+        store
     }
 
     /// Read the file at `path` into a store — [`Self::open`] once the path and
@@ -3306,6 +3432,7 @@ impl SettingsStore {
         let fault = read_fault(
             &report,
             SETTINGS_FILE_NAME,
+            writer_of_record,
             crate::i18n::settings_file_unreadable,
         );
         Self {
@@ -3481,6 +3608,22 @@ impl SettingsStore {
     /// force stays.
     pub(crate) fn ask_reread(&mut self) {
         self.document.ask_read();
+    }
+
+    /// **Bring back a newer build's copy of this document** (0.4.10 plan row 68d, R7) —
+    /// [`crate::document_request::DocumentState::bring_back`].
+    pub(crate) fn bring_back(&mut self, bytes: std::sync::Arc<[u8]>) {
+        self.document.bring_back(bytes);
+    }
+
+    /// What the last Bring back came to, once.
+    pub(crate) fn take_copy_back(&mut self) -> Option<crate::copy_back::CopyBackDone> {
+        self.document.take_copy_back()
+    }
+
+    /// **Keep current** (row 68d, R8): the document written once at this build's version.
+    pub(crate) fn write_at_this_version(&mut self) {
+        self.document.write_at_this_version();
     }
 
     /// Whether a re-read of `settings.json` is still to be answered.
@@ -3757,7 +3900,13 @@ impl KeybindingsStore {
         let dir = storage_dir();
         let path = settings_write_path(&dir, KEYBINDINGS_FILE_NAME);
         make_data_folder(path.parent().unwrap_or(&dir));
-        Self::read_at(path, is_writer_of(&dir), lane)
+        let store = Self::read_at(path, is_writer_of(&dir), lane);
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Keybindings,
+            store.document.revision().bytes.clone(),
+        );
+        store
     }
 
     /// Read the file at `path` into a store — [`Self::open`] once the path and
@@ -3773,6 +3922,7 @@ impl KeybindingsStore {
         let fault = read_fault(
             &report,
             KEYBINDINGS_FILE_NAME,
+            writer_of_record,
             crate::i18n::keybindings_file_unreadable,
         );
         Self {
@@ -3892,6 +4042,22 @@ impl KeybindingsStore {
     /// in force stays.
     pub(crate) fn ask_reread(&mut self) {
         self.document.ask_read();
+    }
+
+    /// **Bring back a newer build's copy of this document** (0.4.10 plan row 68d, R7) —
+    /// [`crate::document_request::DocumentState::bring_back`].
+    pub(crate) fn bring_back(&mut self, bytes: std::sync::Arc<[u8]>) {
+        self.document.bring_back(bytes);
+    }
+
+    /// What the last Bring back came to, once.
+    pub(crate) fn take_copy_back(&mut self) -> Option<crate::copy_back::CopyBackDone> {
+        self.document.take_copy_back()
+    }
+
+    /// **Keep current** (row 68d, R8): the document written once at this build's version.
+    pub(crate) fn write_at_this_version(&mut self) {
+        self.document.write_at_this_version();
     }
 
     /// Whether a re-read of `keybindings.json` is still to be answered.
@@ -4121,7 +4287,13 @@ impl ProfilesStore {
     pub(crate) fn open(lane: StorageLane) -> Self {
         let dir = storage_dir();
         make_data_folder(&dir);
-        Self::at_on(dir.join(PROFILES_FILE_NAME), lane)
+        let store = Self::at_on(dir.join(PROFILES_FILE_NAME), lane);
+        // What this start read, for the carry pass's refused copies (row 68f).
+        crate::rejected_copies::note_opened_document(
+            crate::rejected_copies::KeptDocument::Profiles,
+            store.document.revision().bytes.clone(),
+        );
+        store
     }
 
     /// The same store over a named file, which is what makes the re-read
@@ -4135,12 +4307,13 @@ impl ProfilesStore {
         crate::update_trial::owe_copy(&report, &path, keep_profiles);
         // §5.4 case 1 — no file — is the ordinary state of nearly every machine
         // and must not alert. Everything else must, naming the file (§5.3).
+        let writer_of_record = is_writer_of_document(&path);
         let fault = read_fault(
             &report,
             PROFILES_FILE_NAME,
+            writer_of_record,
             crate::i18n::profiles_file_unreadable,
         );
-        let writer_of_record = is_writer_of_document(&path);
         Self {
             document: DocumentState::opened(
                 PROFILES_FILE_NAME,
@@ -4225,6 +4398,22 @@ impl ProfilesStore {
     ///   is nothing yet in force to keep.
     pub(crate) fn ask_reread(&mut self) {
         self.document.ask_read();
+    }
+
+    /// **Bring back a newer build's copy of this document** (0.4.10 plan row 68d, R7) —
+    /// [`crate::document_request::DocumentState::bring_back`].
+    pub(crate) fn bring_back(&mut self, bytes: std::sync::Arc<[u8]>) {
+        self.document.bring_back(bytes);
+    }
+
+    /// What the last Bring back came to, once.
+    pub(crate) fn take_copy_back(&mut self) -> Option<crate::copy_back::CopyBackDone> {
+        self.document.take_copy_back()
+    }
+
+    /// **Keep current** (row 68d, R8): the document written once at this build's version.
+    pub(crate) fn write_at_this_version(&mut self) {
+        self.document.write_at_this_version();
     }
 
     /// Whether a re-read of `profiles.json` is still to be answered.
@@ -6225,6 +6414,38 @@ pub(crate) mod tests {
         claim_table().contains_key(&bt_platform::instance::claim_name(directory))
     }
 
+    /// RED (mutation: drop the `let_go_of_the_claims_on_removed_directories` call from
+    /// `is_writer_of`) — **a test's data directory, once removed, leaves the claim table, and the
+    /// claim on it is let go** (0.4.10 plan row 103): the next directory claimed finds no row for
+    /// the first, so the test process holds a claim, and its descriptor, only for the directories
+    /// that are still there — not one for every test it ever ran, which on macOS ran out at 256.
+    #[test]
+    fn a_removed_directorys_claim_is_let_go_at_the_next_claim() {
+        let first = bt_testpath::temp_path("claim-removed-first");
+        let second = bt_testpath::temp_path("claim-removed-second");
+        std::fs::create_dir_all(&first).expect("the first directory");
+        std::fs::create_dir_all(&second).expect("the second directory");
+        assert!(
+            is_writer_of(&first),
+            "the first directory is this process's"
+        );
+        let first_name = bt_platform::instance::claim_name(&first);
+        std::fs::remove_dir_all(&first).expect("the first directory is removed");
+        assert!(
+            is_writer_of(&second),
+            "the second directory is this process's"
+        );
+        assert!(
+            !claim_table().contains_key(&first_name),
+            "the removed directory's claim is let go"
+        );
+        assert!(
+            the_claim_table_has_answered_for(&second),
+            "the directory still there keeps its claim"
+        );
+        let _ = std::fs::remove_dir_all(&second);
+    }
+
     /// RED (B-EXPLORER-CLAIM) — **`--explorer-command`'s language lookup reads
     /// the language and leaves the data directory's claim free, with no answer
     /// remembered in this process's claim table and nothing written in the
@@ -6442,6 +6663,7 @@ pub(crate) mod tests {
         assert!(!remember_claim_answer(
             &mut table,
             name.clone(),
+            Path::new("swept-directory"),
             Err(bt_platform::instance::ClaimRefusal::Sweeping),
         ));
         assert!(
@@ -11118,3 +11340,7 @@ pub(crate) mod contract_adapter {
         assert_eq!(delivered, [0, 1, 2], "delivered in the order admitted");
     }
 }
+
+#[cfg(test)]
+#[path = "read_fault_tests.rs"]
+mod read_fault_tests;

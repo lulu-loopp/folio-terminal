@@ -1815,6 +1815,13 @@ impl<B: Backend> Runtime<'_, B> {
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
+        // The copy-back card (0.4.10 plan row 68d): it takes the pointer outright, as the update
+        // card does.
+        if self.hover_copy_back_card(position.x, position.y)? {
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         if settings::geometry::pointer_moved(self, position.x, position.y)? {
             return Ok(());
         }
@@ -4127,7 +4134,7 @@ impl<B: Backend> Runtime<'_, B> {
                     .set_maximized(!self.window.window.is_maximized());
             }
             seats::ChromeTarget::CloseWindow => {
-                self.request_window_close()
+                self.request_window_close(bt_platform::close_road::OwnCloseRoad::CaptionButton)
                     .context("request self-drawn caption close")?;
             }
             // **The rail, on none of its controls.** Nothing happens, and the
@@ -4398,14 +4405,13 @@ impl<B: Backend> Runtime<'_, B> {
             }
             return Ok(());
         }
-        // The uninstaller's confirmation card (T-UNINSTALL-UX), in the order it is drawn. Every
-        // press is swallowed, beside the card as well as on it; the `×` is Cancel.
-        if let (Some(layout), Some(position)) =
-            (self.uninstall_card_layout(), self.window.pointer_position)
+        // The uninstaller's confirmation card (T-UNINSTALL-UX), then the copy-back card (0.4.10
+        // plan row 68d), in the order they are drawn: the first one up takes the press. Every
+        // press is swallowed, beside the card as well as on it; the `×` is Cancel, or Not now.
+        if let (Some(card), Some(position)) = (self.confirm_card_up(), self.window.pointer_position)
         {
             if state == ElementState::Pressed && button == MouseButton::Left {
-                let target = restore::update_card_hit(&layout, position.x, position.y);
-                self.press_uninstall_card(target)?;
+                self.press_confirm_card(card, position.x, position.y)?;
             }
             return Ok(());
         }
@@ -6706,8 +6712,15 @@ impl<B: Backend> Runtime<'_, B> {
         }
         // **One line per file** (B1), through the same maker the gate uses: the
         // card is about a list, and a list drawn as a wrapped sentence is a list
-        // nobody can count.
-        let lines = restore::unsaved_lines(quit.names());
+        // nobody can count. **And what is running, last** (0.4.10 plan row 87, part 87e;
+        // the coordinator's item 14): one card, the running-work line under the names.
+        let work = quit.card_running_work();
+        let mut lines = restore::unsaved_lines(quit.names());
+        lines.extend(crate::i18n::quit_running_work(work.agents, work.commands));
+        let words = restore::quit_card_words(
+            quit.card(),
+            matches!(quit.reason(), crate::quit::Reason::UpdateRestart { .. }),
+        );
         let (width, height) = self.window.renderer.presentation_geometry().swapchain_size;
         let (width, height) = (width as f32, height as f32);
         let scale = self.window.renderer.scale_factor() as f32;
@@ -6722,20 +6735,23 @@ impl<B: Backend> Runtime<'_, B> {
             })
             .collect();
         let content = restore::QuitContent {
+            words,
             message_lines,
-            save_text_width: renderer.measure_chrome_text(
-                gpu,
-                restore::quit_save_text(),
-                restore::BUTTON_FONT_LOGICAL_PX * scale,
-            ),
+            save_text_width: words.saves.then(|| {
+                renderer.measure_chrome_text(
+                    gpu,
+                    restore::quit_save_text(),
+                    restore::BUTTON_FONT_LOGICAL_PX * scale,
+                )
+            }),
             cancel_text_width: renderer.measure_chrome_text(
                 gpu,
                 restore::gate_cancel_text(),
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
-            discard_text_width: renderer.measure_chrome_text(
+            leave_text_width: renderer.measure_chrome_text(
                 gpu,
-                restore::gate_discard_all_text(),
+                words.leave,
                 restore::BUTTON_FONT_LOGICAL_PX * scale,
             ),
         };

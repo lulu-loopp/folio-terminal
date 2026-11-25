@@ -67,6 +67,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         copy_on_select: false,
         multiline_paste_ask: false,
         resume_agents: false,
+        close_keeps_running: false,
         update_check: false,
         quake_height: 65,
         quake_width: 45,
@@ -77,6 +78,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         quake_restore: bt_persist::QuakeRestoreV1::Folders,
         first_run_card: bt_persist::FirstRunCardV1::Shown,
         web_pages_used: bt_persist::WebPagesUsedV1::Used,
+        first_hide_toast: bt_persist::FirstHideToastV1::Shown,
         launch_opens: bt_persist::LaunchOpensV1::TabInLastWindow,
         option_sends_alt: true,
     };

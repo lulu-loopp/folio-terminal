@@ -88,7 +88,8 @@ impl From<EventLoopProxy<AppEvent>> for LoopProxy {
 pub(crate) mod prelude {
     pub(crate) use super::{
         Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
-        ImeCaretDoor, LoopDoor, MathMenuDoor, SavePickerDoor, TaskbarDoor, UiaDoor, WindowHost,
+        ImeCaretDoor, LoopDoor, MathMenuDoor, SavePickerDoor, TaskbarDoor, ToastDoor, UiaDoor,
+        WindowHost,
     };
 }
 
@@ -120,6 +121,15 @@ pub(crate) trait Backend: Sized + 'static {
     type ImeCaret: ImeCaretDoor;
     /// The loop a turn runs in: how the application stops it and paces it.
     type Loop: LoopDoor;
+    /// The process's desk in the notification centre: the toasts it raises and the clicks on
+    /// them (0.4.10 plan row 87, part 87d).
+    type Toasts: ToastDoor;
+    /// The run's icon in the notification area (0.4.10 plan row 87, part 87b).
+    type Tray: TrayDoor;
+    /// **The activity a put-away run holds while it works** (0.4.10 plan row 87, part 87c), held
+    /// for as long as the value lives — `bt_platform::process_activity::ProcessActivity` for the
+    /// product, which keeps App Nap off on macOS.
+    type Activity;
 
     /// **Every window's surface, built again on the device layer** — what a device the driver
     /// took away, and the debug build's surface self-test, ask of every window at once.
@@ -153,6 +163,25 @@ pub(crate) trait Backend: Sized + 'static {
     /// (plan row 191) — `bt_platform::session_end::ask_to_be_ended_first`, once per process, by
     /// the launch's first window (`FolioApp::ask_to_be_ended_before_the_shells`).
     fn ask_to_be_ended_first(event_loop: &Self::Loop, level: u32) -> Result<(), String>;
+
+    /// **Whether this platform has a notification area for the run's icon** (0.4.10 plan row 87,
+    /// part 87b) — `bt_platform::HostPlatform::has_a_notification_area` for the product.
+    fn has_a_notification_area(event_loop: &Self::Loop) -> bool;
+
+    /// **The run's icon in the notification area, put up showing `picture`** (part 87b) —
+    /// `bt_platform::tray::TrayIcon::put_up`: `wake` is all its host may do after parking a
+    /// gesture, `note` its door to `diagnostics.log`. An `Err` is a host that could not be made.
+    fn put_up_tray(
+        event_loop: &Self::Loop,
+        labels: bt_platform::tray::TrayLabels,
+        picture: bt_platform::tray::TrayPicture,
+        wake: Box<dyn Fn()>,
+        note: Box<dyn Fn(&str)>,
+    ) -> Result<Self::Tray, String>;
+
+    /// **Begin the activity** (part 87c), `reason` the sentence the system's tools show for it —
+    /// `bt_platform::process_activity::ProcessActivity::begin_holding`. Dropping the answer ends it.
+    fn begin_activity(event_loop: &Self::Loop, reason: &str) -> Result<Self::Activity, String>;
 }
 
 /// **The product's backend**: winit's window, `bt-render`'s renderer over the shared device,
@@ -171,6 +200,9 @@ impl Backend for Native {
     type SavePicker = bt_platform::SaveFilePicker;
     type ImeCaret = bt_platform::ImeSystemCaret;
     type Loop = ActiveEventLoop;
+    type Toasts = crate::NotificationDesk;
+    type Tray = bt_platform::tray::TrayIcon;
+    type Activity = bt_platform::process_activity::ProcessActivity;
 
     fn rebuild_every_surface(
         gpu: &mut Self::Device,
@@ -201,6 +233,27 @@ impl Backend for Native {
 
     fn ask_to_be_ended_first(_event_loop: &ActiveEventLoop, level: u32) -> Result<(), String> {
         bt_platform::session_end::ask_to_be_ended_first(level)
+    }
+
+    fn has_a_notification_area(_event_loop: &ActiveEventLoop) -> bool {
+        bt_platform::host_platform().has_a_notification_area()
+    }
+
+    fn put_up_tray(
+        _event_loop: &ActiveEventLoop,
+        labels: bt_platform::tray::TrayLabels,
+        picture: bt_platform::tray::TrayPicture,
+        wake: Box<dyn Fn()>,
+        note: Box<dyn Fn(&str)>,
+    ) -> Result<bt_platform::tray::TrayIcon, String> {
+        bt_platform::tray::TrayIcon::put_up(labels, picture, wake, note)
+    }
+
+    fn begin_activity(
+        _event_loop: &ActiveEventLoop,
+        reason: &str,
+    ) -> Result<bt_platform::process_activity::ProcessActivity, String> {
+        bt_platform::process_activity::ProcessActivity::begin_holding(reason)
     }
 }
 
@@ -263,9 +316,18 @@ pub(crate) trait WindowHost {
     /// The work area of the display this window is on — `bt_platform::get_work_area`; `None`
     /// where the platform will not say.
     fn work_area(&self) -> Option<bt_platform::WindowRect>;
+    /// **Every display the platform names now, as the layout restore judges against them** —
+    /// `restore_monitors_of` over the window's own monitor list, primary first; empty where the
+    /// platform will not say (0.4.10 plan row 87, part 87a: the way back of a put-away window).
+    fn monitors_to_restore_on(&self) -> Vec<crate::RestoreMonitor>;
     /// **The window stood at an outer rectangle on whichever display it names** —
     /// `bt_platform::stand_window_at`, which says it again until the display's scale has settled.
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String>;
+    /// **The rectangle a hidden window takes when it is next shown normal** — restored from
+    /// minimised or un-maximised — written without showing it and without changing its posture:
+    /// `bt_platform::set_hidden_window_normal_rect`, for a window that is not normal, whose own
+    /// rectangle is the system's (0.4.10 plan row 87, part 87a, re-review P1-4).
+    fn keep_normal_rect_while_hidden(&self, rect: bt_platform::WindowRect) -> Result<(), String>;
     /// **Who owns the glass at a point on the screen**, physical pixels: this window, another
     /// one, or nobody the platform will name — `bt_platform::top_level_window_at` asked about
     /// this window's own handle.
@@ -297,6 +359,10 @@ pub(crate) trait WindowHost {
     fn set_backdrop(&self, acrylic: bool) -> Result<(), String>;
     /// Whether the window stays above other windows — `bt_platform::set_window_topmost`.
     fn set_topmost(&self, topmost: bool) -> Result<(), String>;
+    /// Whether the system's own lists of this application's windows name this one —
+    /// `bt_platform::set_window_listed` (0.4.10 plan row 87, part 87c, R5): off while the window
+    /// is put away, so that AppKit's Window menu and Dock list cannot show it behind the door.
+    fn set_listed(&self, listed: bool) -> Result<(), String>;
     /// The frame's dark or light plate — `bt_platform::set_window_dark_mode`.
     fn set_dark_mode(&self, dark: bool) -> Result<(), String>;
     /// The colour the system paints the window with before its first frame, or none —
@@ -308,8 +374,18 @@ pub(crate) trait WindowHost {
     /// The keyboard focus taken back into the window from whatever child holds it (a page) —
     /// `bt_platform::take_keyboard_focus`.
     fn take_keyboard_focus(&self) -> Result<(), String>;
-    /// The window asked to close, as its own close button asks — `bt_platform::request_window_close`.
-    fn request_close(&self) -> Result<(), String>;
+    /// The window asked to close, as Folio's own request by `road` —
+    /// `bt_platform::request_window_close`, which carries the road in the message (0.4.10 plan
+    /// row 103).
+    fn request_close(&self, road: bt_platform::close_road::OwnCloseRoad) -> Result<(), String>;
+    /// **Folio's window from now on, to the close witness**: every close the window thread's hooks
+    /// see reach it is kept for its `CloseRequested` — `bt_platform::close_road::watch_closes`.
+    fn watch_closes(&self);
+    /// **What the platform saw of the close request this window has just received**, taken —
+    /// `bt_platform::close_road::take_close_arrival`; `None` when nothing was witnessed.
+    fn take_close_arrival(&self) -> Option<bt_platform::close_road::CloseArrival>;
+    /// The window has gone: the close witness forgets it — `bt_platform::close_road::unwatch_closes`.
+    fn unwatch_closes(&self);
     /// The taskbar button flashed for attention — `bt_platform::flash_window`.
     fn flash(&self);
     /// The taskbar button's flash stopped — `bt_platform::stop_flashing_window`.
@@ -476,8 +552,17 @@ impl WindowHost for Arc<Window> {
             .ok()
             .and_then(|native| bt_platform::get_work_area(native).ok())
     }
+    fn monitors_to_restore_on(&self) -> Vec<crate::RestoreMonitor> {
+        crate::restore_monitors_of(
+            Window::primary_monitor(self),
+            Window::available_monitors(self),
+        )
+    }
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
         bt_platform::stand_window_at(native_or_say(self)?, rect)
+    }
+    fn keep_normal_rect_while_hidden(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
+        bt_platform::set_hidden_window_normal_rect(native_or_say(self)?, rect)
     }
     fn glass_at(&self, x: i32, y: i32) -> crate::GlassHere {
         let Ok(mine) = crate::native_window_of(self) else {
@@ -519,6 +604,9 @@ impl WindowHost for Arc<Window> {
     fn set_topmost(&self, topmost: bool) -> Result<(), String> {
         bt_platform::set_window_topmost(native_or_say(self)?, topmost)
     }
+    fn set_listed(&self, listed: bool) -> Result<(), String> {
+        bt_platform::set_window_listed(native_or_say(self)?, listed)
+    }
     fn set_dark_mode(&self, dark: bool) -> Result<(), String> {
         bt_platform::set_window_dark_mode(native_or_say(self)?, dark)
     }
@@ -531,8 +619,23 @@ impl WindowHost for Arc<Window> {
     fn take_keyboard_focus(&self) -> Result<(), String> {
         bt_platform::take_keyboard_focus(native_or_say(self)?)
     }
-    fn request_close(&self) -> Result<(), String> {
-        bt_platform::request_window_close(native_or_say(self)?)
+    fn request_close(&self, road: bt_platform::close_road::OwnCloseRoad) -> Result<(), String> {
+        bt_platform::request_window_close(native_or_say(self)?, road)
+    }
+    fn watch_closes(&self) {
+        if let Ok(native) = crate::native_window_of(self) {
+            bt_platform::close_road::watch_closes(native);
+        }
+    }
+    fn take_close_arrival(&self) -> Option<bt_platform::close_road::CloseArrival> {
+        crate::native_window_of(self)
+            .ok()
+            .and_then(bt_platform::close_road::take_close_arrival)
+    }
+    fn unwatch_closes(&self) {
+        if let Ok(native) = crate::native_window_of(self) {
+            bt_platform::close_road::unwatch_closes(native);
+        }
     }
     fn flash(&self) {
         if let Ok(native) = crate::native_window_of(self) {
@@ -562,7 +665,16 @@ impl WindowHost for Arc<Window> {
         ending: std::rc::Rc<dyn Fn()>,
     ) -> Option<bt_platform::session_end::SessionEndWatch> {
         let native = crate::native_window_of(self).ok()?;
-        bt_platform::session_end::SessionEndWatch::install(native, hear, reason, ending).ok()
+        // The window's note door is `diagnostics::note` (`Self::note`), handed down as itself: the
+        // subclass says the outside quit's arrival through it (0.4.10 plan row 87, part 87a).
+        bt_platform::session_end::SessionEndWatch::install(
+            native,
+            hear,
+            Box::new(crate::diagnostics::note),
+            reason,
+            ending,
+        )
+        .ok()
     }
     type Uia = bt_platform::uia::UiaHook;
     fn answer_ui_automation(
@@ -640,6 +752,37 @@ pub(crate) trait TaskbarDoor {
 impl TaskbarDoor for bt_platform::Taskbar {
     fn set_progress(&self, progress: bt_platform::TaskbarProgress) -> Result<(), String> {
         bt_platform::Taskbar::set_progress(self, progress)
+    }
+}
+
+/// **The run's icon in the notification area, as the application tells it** (0.4.10 plan row 87,
+/// part 87b) — `bt_platform::tray::TrayIcon`'s methods; the icon goes when the value does
+/// ([`Self::remove_the_icon`]).
+pub(crate) trait TrayDoor {
+    /// Show `picture`.
+    fn change(&self, picture: &bt_platform::tray::TrayPicture);
+    /// The menu's words, for the next time it opens.
+    fn relabel(&self, labels: &bt_platform::tray::TrayLabels);
+    /// What a person asked of the icon since this was last asked, in their order.
+    fn take_gestures(&self) -> Vec<bt_platform::tray::TrayGesture>;
+    /// **The icon taken out of the notification area**, and its host with it.
+    fn remove_the_icon(self);
+}
+
+impl TrayDoor for bt_platform::tray::TrayIcon {
+    fn change(&self, picture: &bt_platform::tray::TrayPicture) {
+        bt_platform::tray::TrayIcon::change(self, picture);
+    }
+    fn relabel(&self, labels: &bt_platform::tray::TrayLabels) {
+        bt_platform::tray::TrayIcon::relabel(self, labels);
+    }
+    fn take_gestures(&self) -> Vec<bt_platform::tray::TrayGesture> {
+        bt_platform::tray::TrayIcon::take_gestures(self)
+    }
+    fn remove_the_icon(self) {
+        // The value is consumed here and goes out of scope at the end of this body: on Windows
+        // the icon, its host and its drawn image go with it (`TrayIcon`'s `Drop`); the portable
+        // twin holds nothing.
     }
 }
 
@@ -1416,6 +1559,81 @@ impl SavePickerDoor for bt_platform::SaveFilePicker {
 pub(crate) trait ImeCaretDoor {
     fn update(&mut self, x: i32, y: i32) -> Result<(), String>;
     fn destroy(&mut self);
+}
+
+/// **The desk a run's notifications go out through** (§7.6; 0.4.10 plan row 87, part 87d, R7 of
+/// T-TRAY-87D): one toast raised, or the platform's refusal; and the launch strings of the toasts
+/// clicked since the last ask. The product's is `NotificationDesk`, built lazily on the first toast
+/// that passes the gate; the test suite's records what it is handed and reaches nothing.
+pub(crate) trait ToastDoor {
+    /// Raise one toast; `Err` is the platform's refusal, said once.
+    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String>;
+    /// Every clicked toast's launch string since the last call.
+    fn take_activations(&self) -> Vec<String>;
+}
+
+/// **The product's toast door is the desk** (0.4.10 plan row 87, part 87d; R7 of T-TRAY-87D),
+/// implemented here with every other door of the seam.
+impl ToastDoor for crate::NotificationDesk {
+    /// Raise one toast, building the platform side if this is the first, or say why not.
+    ///
+    /// **The refusal is answered rather than only logged** (user ruling 2026-08-25). A desk that
+    /// swallowed a platform error into `stderr` left the one failure mode nobody can detect: the
+    /// reader is not notified, and is not notified that they were not notified. The `Err` is what
+    /// the caller turns into a card in the window — see [`crate::Runtime::raise_attention`].
+    ///
+    /// `Ok(())` on an already-refused desk, and it is not a lie: the sentence being reported is
+    /// "this machine cannot raise notifications", it has been said once, and saying it again on
+    /// every later message would be the flood the one-card rule exists to prevent.
+    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
+        if self.refused {
+            return Ok(());
+        }
+        if self.voice.is_none() {
+            let proxy = self.proxy.clone();
+            let wake: Box<dyn Fn() + Send> = Box::new(move || {
+                // Nothing is done here beyond waking the loop, for
+                // `AppEvent::GitChanged`'s reason and one of its own: this runs on
+                // a platform thread with no access to any window, and the launch
+                // string is already in the notifier's own queue.
+                let _ = proxy.send_event(AppEvent::NotificationClicked);
+            });
+            // **An update's trial writes no identity** (`update_trial`, F-7):
+            // the toast goes out under the one the old build registered, and
+            // the commit writes this build's.
+            let opened = if crate::update_trial::defer(crate::update_trial::Writer::ToastIdentity) {
+                bt_platform::Notifier::without_registration(wake)
+            } else {
+                bt_platform::Notifier::new(crate::APP_NAME, wake)
+            };
+            match opened {
+                Ok(voice) => self.voice = Some(voice),
+                Err(error) => {
+                    crate::diagnostics::stderr_line(format!(
+                        "desktop notifications unavailable: {error}"
+                    ));
+                    self.refused = true;
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(voice) = self.voice.as_mut()
+            && let Err(error) = voice.show(title, body, launch)
+        {
+            crate::diagnostics::stderr_line(format!("desktop notification refused: {error}"));
+            self.refused = true;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Every clicked toast's launch string since the last call.
+    fn take_activations(&self) -> Vec<String> {
+        self.voice
+            .as_ref()
+            .map(bt_platform::Notifier::take_activations)
+            .unwrap_or_default()
+    }
 }
 
 impl ImeCaretDoor for bt_platform::ImeSystemCaret {

@@ -93,7 +93,7 @@ impl Disk {
                 ScriptedJob::Session => self.seen.push(Seen::Session),
                 ScriptedJob::Receipt => self.seen.push(Seen::Receipt),
                 ScriptedJob::Backup => self.seen.push(Seen::Backup),
-                ScriptedJob::Read(_) | ScriptedJob::Handoff(_) => {}
+                ScriptedJob::Read(_) | ScriptedJob::Handoff(_) | ScriptedJob::CopyBack => {}
             }
         }
     }
@@ -1817,7 +1817,8 @@ fn every_quit_the_product_begins_carries_the_session_budget() {
     let txn = crate::update_txn::TxnId::new([0x49; 16]);
     for reason in [
         Reason::Asked,
-        Reason::LaunchWireQuit,
+        Reason::LaunchWireQuit { by_a_person: true },
+        Reason::LaunchWireQuit { by_a_person: false },
         Reason::UpdateRestart { txn },
     ] {
         let quit = Quit::begin_for(Vec::new(), reason);
@@ -1831,4 +1832,165 @@ fn every_quit_the_product_begins_carries_the_session_budget() {
     );
     assert_eq!(QUIT_DOCUMENTS_BY, std::time::Duration::from_millis(1_500));
     assert_eq!(QUIT_RECOVERY_BY, std::time::Duration::from_millis(2_500));
+}
+
+/// One command running, the work a running-work card asks about.
+const ONE_COMMAND: RunningWork = RunningWork {
+    agents: 0,
+    commands: 1,
+};
+
+/// RED (0.4.10 plan row 87, part 87e; T-TRAY-87E-QUIT-ASKS, R8) — **a quit asks once while
+/// something runs, for every reason a person gives, and never for the system's**: with nothing
+/// unsaved it is the running-work card, whose answers are Quit (on to the documents) and Cancel;
+/// with something unsaved it is the unsaved card, which keeps its three answers and carries the
+/// work. AppKit's quit asks only when a person asked it (`LaunchWireQuit { by_a_person }`), and a
+/// quit with nothing running and nothing unsaved asks nothing at all.
+///
+/// PLANT 87e-P33: in `Quit::begin_asking`, ask only on names (`names.is_empty()` alone) — the
+/// running-work card never stands and the first assertion goes red.
+#[test]
+fn a_quit_asks_once_while_something_runs_for_a_persons_reason() {
+    let txn = crate::update_txn::TxnId::new([0x87; 16]);
+    let person = [
+        Reason::Asked,
+        Reason::UpdateRestart { txn },
+        Reason::LaunchWireQuit { by_a_person: true },
+    ];
+    for reason in person {
+        let mut quit = Quit::begin_asking(Vec::new(), ONE_COMMAND, reason);
+        assert_eq!(quit.step(), QuitStep::Ask, "{reason:?} asks");
+        assert_eq!(quit.card(), QuitCard::RunningWork);
+        assert_eq!(quit.card_running_work(), ONE_COMMAND);
+        assert_eq!(
+            quit.answer(QuitAnswer::Save),
+            QuitStep::Ask,
+            "nothing to save: not this card's answer"
+        );
+        assert_eq!(quit.answer(QuitAnswer::Discard), QuitStep::Ask);
+        assert_eq!(
+            quit.answer(QuitAnswer::Quit),
+            QuitStep::Documents,
+            "Quit goes on as a quit with nothing to ask"
+        );
+
+        let mut both = Quit::begin_asking(vec!["notes.md".to_owned()], ONE_COMMAND, reason);
+        assert_eq!(both.step(), QuitStep::Ask);
+        assert_eq!(both.card(), QuitCard::Unsaved, "one card, the unsaved one");
+        assert_eq!(both.card_running_work(), ONE_COMMAND, "carrying the work");
+        assert_eq!(
+            both.answer(QuitAnswer::Quit),
+            QuitStep::Ask,
+            "the unsaved card has no Quit"
+        );
+        assert_eq!(both.answer(QuitAnswer::Discard), QuitStep::Discard);
+
+        let idle = Quit::begin_asking(Vec::new(), RunningWork::NONE, reason);
+        assert_eq!(idle.step(), QuitStep::Documents, "nothing to lose, no card");
+    }
+    let system = Reason::LaunchWireQuit { by_a_person: false };
+    let quit = Quit::begin_asking(Vec::new(), ONE_COMMAND, system);
+    assert_eq!(
+        quit.step(),
+        QuitStep::Documents,
+        "a log-out, a restart or a shut-down does not ask"
+    );
+    assert_eq!(
+        quit.card_running_work(),
+        RunningWork::NONE,
+        "and carries no work"
+    );
+    let named = Quit::begin_asking(vec!["notes.md".to_owned()], ONE_COMMAND, system);
+    assert_eq!(
+        named.step(),
+        QuitStep::Ask,
+        "the unsaved card stands for it"
+    );
+    assert_eq!(
+        named.card_running_work(),
+        RunningWork::NONE,
+        "without the work line"
+    );
+
+    for (reason, asks) in [
+        (Reason::Asked, true),
+        (Reason::UpdateRestart { txn }, true),
+        (Reason::LaunchWireQuit { by_a_person: true }, true),
+        (system, false),
+    ] {
+        assert_eq!(reason.asks_about_running_work(), asks, "{reason:?}");
+    }
+}
+
+/// RED (0.4.10 plan row 87, part 87e; R1) — **AppKit's quit is a person's only when it gives no
+/// reason**: the Dock's Quit, Activity Monitor's, a script's; a log-out, a restart, a shut-down
+/// and a reason nobody knows are the system's.
+///
+/// PLANT 87e-P20: count `QuitReason::Other(_)` as a person's — the unknown reason's row goes red.
+#[test]
+fn the_systems_quit_is_a_persons_only_without_a_reason() {
+    use bt_platform::QuitReason;
+    for (reason, persons) in [
+        (QuitReason::NoneGiven, true),
+        (QuitReason::LogOut, false),
+        (QuitReason::Restart, false),
+        (QuitReason::ShutDown, false),
+        (QuitReason::Other(0x1234_5678), false),
+    ] {
+        assert_eq!(the_systems_quit_is_a_persons(reason), persons, "{reason:?}");
+    }
+}
+
+/// RED (0.4.10 plan row 87, part 87e; T10g, R3) — **Cancel on the running-work card of an
+/// update's Restart gives the update up as a cancelled quit**, which is what puts the job back at
+/// `Verified` with its Ready card (`update_job`'s `a_report_moves_the_job_only_along_the_machine`):
+/// the update stays ready, and the next Restart asks again.
+///
+/// PLANT 87e-P36: on the running-work card, answer Cancel without giving the update up — no
+/// report is owed and the job would stay at `Quitting`.
+#[test]
+fn cancel_on_restart_to_update_keeps_the_update_ready() {
+    let txn = crate::update_txn::TxnId::new([0x8e; 16]);
+    let mut quit = Quit::begin_asking(Vec::new(), ONE_COMMAND, Reason::UpdateRestart { txn });
+    assert_eq!(quit.card(), QuitCard::RunningWork);
+    assert_eq!(quit.answer(QuitAnswer::Cancel), QuitStep::Abandon);
+    assert_eq!(
+        quit.take_update_report(),
+        Some(Progress {
+            txn,
+            step: Step::QuitAbandoned(Abandon::Cancelled)
+        }),
+        "the job is told the quit was cancelled"
+    );
+    assert_eq!(quit.take_cancelled(), None, "and no card follows a Cancel");
+}
+
+/// RED (0.4.10 plan row 87, part 87e; R8) — **a question answered is not put again**: a quit whose
+/// running-work card was answered Quit and whose documents then could not be kept carries that
+/// answer into its cancellation, and the quit the card's choice resumes reads it; a quit that
+/// never asked about running work carries nothing, and nor does a cancellation nobody chose.
+///
+/// PLANT 87e-P40: drop the bit from `Quit::cancel` — the chosen cancellation reads `false`.
+#[test]
+fn the_running_work_answer_rides_into_the_cancelled_quits_choice() {
+    let mut answered = Quit::begin_asking(Vec::new(), ONE_COMMAND, Reason::Asked);
+    assert_eq!(answered.answer(QuitAnswer::Quit), QuitStep::Documents);
+    answered.cancel(Vec::new());
+    let cancelled = answered.take_cancelled().expect("the cancellation");
+    assert!(
+        !cancelled.running_work_was_answered(),
+        "not before the choice is made"
+    );
+    assert!(cancelled.chosen().running_work_was_answered());
+
+    let mut idle = Quit::begin_asking(Vec::new(), RunningWork::NONE, Reason::Asked);
+    assert_eq!(idle.step(), QuitStep::Documents);
+    idle.cancel(Vec::new());
+    assert!(
+        !idle
+            .take_cancelled()
+            .expect("the cancellation")
+            .chosen()
+            .running_work_was_answered()
+    );
 }

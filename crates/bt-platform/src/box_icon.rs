@@ -92,8 +92,9 @@ impl Drop for ProgramIcons {
     }
 }
 
-/// One side of the program's icon group, from the module this process is running.
-fn icon_of_this_module(side: u32) -> Option<HICON> {
+/// One side of the program's icon group, from the module this process is running (the
+/// notification area's icon is loaded by it too, `crate::tray`).
+pub(crate) fn icon_of_this_module(side: u32) -> Option<HICON> {
     let side = Result::ok(i32::try_from(side))?;
     // SAFETY: no name, so the call answers the executable's own module, which lives as long as
     // the process.

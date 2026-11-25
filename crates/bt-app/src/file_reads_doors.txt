@@ -152,6 +152,11 @@ expand_member: .read_exact
 # member or the running image, opened on Lane::Update (`file_reads::open`) and
 # hashed a bounded chunk at a time by `update_prepare::digest_of`.
 digest_of: .read
+# A release statement or its signature (0.4.10 plan row 102, the 1b+2 review's N11): opened
+# on Lane::Update (`file_reads::open`) and read through `take(most + 1)` by
+# `update_prepare::statement_file_bytes`, so a file past its ceiling is refused without being
+# read whole. The file key is the census's own spelling.
+update_prepare.rs: statement_file_bytes: .read_to_end
 # A release feed's file (U-30b, `--update-feed`): opened on Lane::Update
 # (`file_reads::open`) and read by the durable-copy door through
 # `update_job::FeedBytes` (`feed_chunk`), in place of the download door.

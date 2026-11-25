@@ -453,7 +453,10 @@ impl<B: Backend> Runtime<'_, B> {
     /// The values no row shows, and the two rows whose press only records a
     /// value read where it is used, are stored as they are — for them storing is
     /// the whole of putting them in force.
-    fn apply_imported_setting(&mut self, change: SettingChange) -> Result<()> {
+    ///
+    /// `pub(super)` for the put-away's tests (0.4.10 plan row 87, part 87d), which turn the
+    /// close switch off through the door an import and a hand edit share.
+    pub(super) fn apply_imported_setting(&mut self, change: SettingChange) -> Result<()> {
         match change {
             SettingChange::Theme(mode) => {
                 self.apply_theme_mode(mode)?;
@@ -583,6 +586,11 @@ impl<B: Backend> Runtime<'_, B> {
             }
             SettingChange::ResumeAgents(enabled) => {
                 self.apply_resume_agents(enabled);
+            }
+            // **Through the row's own door** (0.4.10 plan row 87, part 87d): turning it off brings a
+            // put-away window back, which a store alone would not.
+            SettingChange::CloseKeepsRunning(enabled) => {
+                self.apply_close_keeps_running(enabled);
             }
             SettingChange::WebPages(scheme) => {
                 self.apply_web_color_scheme(scheme)?;

@@ -450,6 +450,40 @@ fn an_expired_leaf_with_a_valid_timestamp_is_accepted() {
 ///
 /// MUTATION: build the test engine without `hExclusiveRoot` and the test root
 /// stops chaining (and `exclusive_roots` is no longer 1).
+/// RED (0.4.10 plan row 102, the part 3 review's P2-12 and N21) — **the
+/// cache-only policy has Windows retrieve nothing over the network**: its
+/// engine is Windows' own, `WinVerifyTrust` is asked with
+/// `WTD_CACHE_ONLY_URL_RETRIEVAL` and the time-stamp authority's chain with
+/// `CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL`; the system policy keeps both off.
+///
+/// MUTATION: `Engine::provider_flags` leaves out
+/// `WTD_CACHE_ONLY_URL_RETRIEVAL` (`plant-102-3-cache-only-asks-the-network.py`).
+#[cfg(windows)]
+#[test]
+fn the_cache_only_policy_has_windows_retrieve_nothing() {
+    use windows::Win32::Security::Cryptography::CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL;
+    use windows::Win32::Security::WinTrust::WTD_CACHE_ONLY_URL_RETRIEVAL;
+
+    let cached = crate::trust::arm::engine_of(&super::Policy::SystemCacheOnly).unwrap();
+    assert!(!cached.is_exclusive(), "Windows' own roots");
+    assert!(
+        cached
+            .provider_flags()
+            .contains(WTD_CACHE_ONLY_URL_RETRIEVAL)
+    );
+    assert_eq!(
+        cached.retrieval_flags(),
+        CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL
+    );
+    let system = crate::trust::arm::engine_of(&super::Policy::System).unwrap();
+    assert!(
+        !system
+            .provider_flags()
+            .contains(WTD_CACHE_ONLY_URL_RETRIEVAL)
+    );
+    assert_eq!(system.retrieval_flags(), 0);
+}
+
 #[cfg(windows)]
 #[test]
 fn the_machine_store_is_never_written() {

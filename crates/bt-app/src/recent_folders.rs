@@ -149,6 +149,20 @@ impl RecentFolders {
         }
     }
 
+    /// **A saved list merged into this one** (0.4.10 plan row 68d, R7) —
+    /// `crate::seed::SeedVault::merge_persisted`'s rule: newest first, one row per folder, the
+    /// newer moment winning and a tie keeping this list's row, up to the list's length.
+    pub fn merge_persisted(&mut self, saved: &[RecentFolderV1]) {
+        let saved = Self::from_persisted(saved);
+        let mut merged = std::mem::take(&mut self.entries);
+        merged.extend(saved.entries);
+        merged.sort_by(|newer, older| older.at.cmp(&newer.at));
+        let mut paths = std::collections::HashSet::new();
+        merged.retain(|entry| paths.insert(entry.path.clone()));
+        merged.truncate(RECENT_FOLDER_CAPACITY);
+        self.entries = merged;
+    }
+
     #[must_use]
     pub fn to_persisted(&self) -> Vec<RecentFolderV1> {
         self.entries

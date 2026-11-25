@@ -1237,6 +1237,94 @@ pub fn apply_recorded(
 mod tests {
     use super::*;
 
+    /// RED (0.4.10 plan row 68d, D11; ruling R9) — **the integration records keep their keys at
+    /// their versions**: for `integration-marks.json`, `integration-profile-files.json` and
+    /// `update-homes.json`, the types the record reaches are exactly the rows of
+    /// `docs/plans/DOCUMENT-KEYS.tsv` at the version this build writes, each shape equal to the
+    /// source's, and the register names no version above it. The three refuse a key they do not
+    /// know (`deny_unknown_fields`), so a key added at a version every older build of it reads is
+    /// a record those builds refuse.
+    ///
+    /// MUTATION: a field added to `Marks` (`plant-68d-record-key-added.py`).
+    #[test]
+    fn the_integration_records_keep_their_keys() {
+        use crate::test_support::{document_key_rows, record_shapes_reached};
+        use bt_source::ItemQuery;
+        let written = |value: serde_json::Value| -> u32 {
+            let version = value["version"]
+                .as_u64()
+                .expect("a record writes its version");
+            u32::try_from(version).expect("a version fits a u32")
+        };
+        let records = [
+            (
+                "integration-marks",
+                ItemQuery::type_item("Marks").in_module("crate::shell_integration::profile_marks"),
+                written(serde_json::to_value(Marks::default()).unwrap()),
+            ),
+            (
+                "integration-profile-files",
+                ItemQuery::type_item("ProfileFiles")
+                    .in_module("crate::shell_integration::profile_marks"),
+                FILES_RECORD_VERSION,
+            ),
+            (
+                "update-homes",
+                ItemQuery::type_item("UpdateHomesRecord").in_module("crate::update_homes"),
+                written(
+                    serde_json::to_value(crate::update_homes::UpdateHomesRecord::default())
+                        .unwrap(),
+                ),
+            ),
+        ];
+        let roots: Vec<ItemQuery> = records.iter().map(|(_, root, _)| root.clone()).collect();
+        let sources = record_shapes_reached(&roots);
+        let mut wrong = Vec::new();
+        for ((document, root, version), source) in records.iter().zip(&sources) {
+            let rows = document_key_rows(document);
+            let highest = rows.iter().map(|(at, ..)| *at).max();
+            if highest != Some(*version) {
+                wrong.push(format!(
+                    "{document}: the register's highest version is {highest:?}, and this build \
+                     writes {version}"
+                ));
+            }
+            let pinned: std::collections::BTreeMap<&str, &str> = rows
+                .iter()
+                .filter(|(at, ..)| at == version)
+                .map(|(_, type_name, shape)| (*type_name, *shape))
+                .collect();
+            for (type_name, shape) in source {
+                match pinned.get(type_name.as_str()) {
+                    Some(row) if row == shape => {}
+                    Some(row) => wrong.push(format!(
+                        "{document} v{version}: {type_name} is not the shape its row pins\n  \
+                         row: {row}\n  source: {shape}"
+                    )),
+                    None => wrong.push(format!(
+                        "{document} v{version}: {type_name}, reached from {root}, has no row; the \
+                         source's row would be\n  {document}\t{version}\t{type_name}\t{shape}\t\
+                         <date>: <ticket>; <why>"
+                    )),
+                }
+            }
+            for type_name in pinned.keys() {
+                if !source.contains_key(*type_name) {
+                    wrong.push(format!(
+                        "{document} v{version}: the row of {type_name} names a type the record no \
+                         longer reaches"
+                    ));
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "a record's keys changed without a new version; bump the version, read the old one \
+             and add the new version's rows to docs/plans/DOCUMENT-KEYS.tsv:\n{}",
+            wrong.join("\n")
+        );
+    }
+
     #[test]
     fn shell_integration_record_failure_prevents_owned_profile_edit() {
         let root = super::super::tests::temp_dir("owned-record-failure");

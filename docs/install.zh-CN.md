@@ -5,7 +5,7 @@
 ## Windows
 
 从[发布页](https://github.com/lulu-loopp/folio-terminal/releases)下载
-`folio-<version>-windows-x64.zip`，解压到任意目录，运行 `folio.exe`。无需安装。`SHA256SUMS.txt` 是下载文件的校验和。系统要求：**Windows 10 1809 及以上或 Windows 11，64 位**。
+`folio-<version>-windows-x64.zip`（未做 Windows 签名的版本名为 `folio-<version>-windows-x64-unsigned.zip`，首次启动时 Windows 会发出警告），解压到任意目录，运行 `folio.exe`。无需安装。`SHA256SUMS.txt` 是下载文件的校验和。系统要求：**Windows 10 1809 及以上或 Windows 11，64 位**。
 
 压缩包共十个文件，需放在同一文件夹中。`folio.exe` 是主程序；`conpty.dll` 和 `OpenConsole.exe` 是启动 shell 的必需组件；`folio.msix` 是签名包，用于注册右键菜单第一页入口，指向解压目录；`folio-here.cmd` 供 VS Code 调用；`uninstall.cmd` 用于卸载清理；其余是两份许可证、第三方声明和商标说明。
 

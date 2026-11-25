@@ -387,6 +387,17 @@ pub enum Capability {
     /// login item is a different mechanism with its own consent, and until it is built the
     /// General page has no row for it there. Another Unix has no build.
     SignInStart,
+    /// Keeping the run when its last ordinary window is closed: the window put away, its shells
+    /// and agents running (0.4.10 plan row 87).
+    ///
+    /// **Wherever a put-away run has a way back** (`HostPlatform::a_put_away_run_has_a_way_back`,
+    /// part 87c, 2026-11-20): on Windows the close puts the window away and the notification area
+    /// holds the icon that brings it back (parts 87a and 87b); on macOS the same close puts it away
+    /// and the Dock icon's click brings it back (part 87c). The same fact the close's rule reads,
+    /// so the row is offered exactly where its switch reaches something (ruled 2026-11-14, item
+    /// 13). Another Unix has no build and no way back. **No first-run row**: the switch ships on,
+    /// and the card asks about writes into other people's files.
+    KeepRunningWhenClosed,
 }
 
 impl Capability {
@@ -406,6 +417,7 @@ impl Capability {
             | Self::AgentDiscovery
             | Self::WindowBackdrop
             | Self::SignInStart => matches!(platform, HostPlatform::Windows),
+            Self::KeepRunningWhenClosed => platform.a_put_away_run_has_a_way_back(),
             Self::AgentResume => matches!(platform, HostPlatform::Windows | HostPlatform::MacOs),
             Self::OptionKey => matches!(platform, HostPlatform::MacOs),
         }

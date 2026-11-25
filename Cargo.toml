@@ -77,6 +77,13 @@ unsafe_code = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+# A `debug_assert!` evaluates its argument in test builds only, so a call inside one that changes
+# state is code the shipped build does not run. One closed the vendor grid's resize transaction,
+# and every release kept every row a resized pane printed (0.4.10 plan row 107). The lint sees a
+# `&mut` argument and a call on a local or a `&mut` binding; it does not see a call through a field
+# (`self.term.finish_resize_transaction()`, the shape row 107 found), so that shape is not guarded
+# here.
+debug_assert_with_mut_call = "deny"
 
 [workspace.dependencies]
 # exact: a 0.26.x release on crates.io would otherwise out-resolve the local
@@ -371,3 +378,4 @@ mitex = { path = "vendor/mitex" }
 mitex-parser = { path = "vendor/mitex-parser" }
 portable-pty = { path = "vendor/conpty/portable-pty" }
 vte = { path = "vendor/vte" }
+winit = { path = "vendor/winit" }

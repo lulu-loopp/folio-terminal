@@ -903,6 +903,12 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     # `objc2-core-services`, a package, and is sent by name instead.
     "NSAppleEventDescriptor",
     "NSAppleEventManager",
+    # 0.4.10 plan row 87, part 87c: the activity a put-away run holds while it works, so App Nap
+    # does not slow its PTY drains — `-[NSProcessInfo beginActivityWithOptions:reason:]` and
+    # `endActivity:` (`src/process_activity.rs`). **Not a package**: `NSProcessInfo` turns on
+    # `objc2-foundation`'s `bitflags` edge, which `NSAppleEventDescriptor` above already turns on
+    # and `Cargo.lock` already lists.
+    "NSProcessInfo",
     "std",
 ] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
@@ -1266,6 +1272,8 @@ trust-harness = ["dep:bt-testpath"]
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+# The workspace's entry, copied as the three above are (0.4.10 plan row 107; see its comment there).
+debug_assert_with_mut_call = "deny"
 
 [dependencies]
 # **Only with `trust-harness`**, and for this crate's own tests: every test's scratch name comes

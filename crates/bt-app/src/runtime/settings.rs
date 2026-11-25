@@ -286,6 +286,9 @@ impl<B: Backend> Runtime<'_, B> {
         if let Some(enabled) = settings::resume_agents_requested(target) {
             self.apply_resume_agents(enabled);
         }
+        if let Some(enabled) = settings::close_keeps_running_requested(target) {
+            self.apply_close_keeps_running(enabled);
+        }
         if let Some(enabled) = settings::shell_integration_requested(target) {
             self.apply_shell_integration(enabled)?;
         }
@@ -703,6 +706,9 @@ impl<B: Backend> Runtime<'_, B> {
             | Row::Notifications
             | Row::TurnEndNotifications
             | Row::ResumeAgents
+            // What a close does with the run is a switch the reader chose, and its default is not a
+            // value this page's reset should put back over that choice (0.4.10 plan row 87).
+            | Row::CloseKeepsRunning
             | Row::ShellIntegration
             // And doubly never again, for `ContextMenu`'s reason over a different store: what a
             // reset would be putting back is not a value in this file, it is a block in the user's
@@ -2286,6 +2292,16 @@ impl<B: Backend> Runtime<'_, B> {
         if general_opened {
             carry_pass::begin_carry_pass(carry_pass::CarryAsk::START_AT_SIGN_IN);
         }
+        // **About → Version's own edge** (0.4.10 plan row 102 part 3, R4): this copy's signature
+        // is read again when the reader looks at About, once per visit, on a worker; its answer
+        // redraws the page.
+        let about_opened = self.window.settings.take_about_open_edge(
+            self.window.settings.category() == settings::SettingsCategory::About
+                && rows.contains(&settings::SettingsRow::AboutVersion),
+        );
+        if about_opened {
+            update::read_this_copy_signature(bt_platform::host_platform());
+        }
         // The second probe on the same door and for the same argument: the page that prints which
         // copilot this machine has is the page that asks. Idempotent, and an atomic load after the
         // first call — see `attention_copilot::begin_probe`.
@@ -2653,6 +2669,7 @@ impl<B: Backend> Runtime<'_, B> {
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             turn_end_notification: self.app.settings_store.loaded().turn_end_notification,
             resume_agents: self.app.settings_store.loaded().resume_agents,
+            close_keeps_running: self.app.settings_store.loaded().close_keeps_running,
             shell_integration: self.app.settings_store.loaded().shell_integration,
             powershell_profile_line_present: shell_integration::powershell_profile_line_present(),
             git_panel: self.app.settings_store.loaded().git_panel,
@@ -2663,6 +2680,7 @@ impl<B: Backend> Runtime<'_, B> {
                 update::offer().as_deref(),
                 update::unix_epoch_ms(),
                 i18n::current(),
+                update::this_copy_note(),
             ),
             update_mark: self
                 .window

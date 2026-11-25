@@ -528,11 +528,21 @@ the dirty gate (`restore::DirtyGate`), which answers raised, nothing to ask, or
 busy — and **a busy gate never authorises the operation that found it busy**
 (2026-09-25, ticket 58): only nothing to ask lets the verb go on; a request that
 finds another question up is dropped, and that question keeps its own request.
-**The last ordinary window's close is the summoned terminal's shut too**
-(2026-10-09, T-SUMMON-DIRTY-PREVIEW): before the run ends, the summoned terminal's
-gate is put the run's end (`GateRequest::ShutWithTheRun`) and, when it asks, the
-summoned terminal is brought up holding the card; Save all or Discard re-runs that
-window's close, and Cancel leaves it open — the summoned terminal never stands alone.
+**The last ordinary window's close is the summoned terminal's shut too when that
+close ends the run** (2026-10-09, T-SUMMON-DIRTY-PREVIEW): with Keep running when
+closed off, or for a last window whose shells all exited. Before the run ends, the
+summoned terminal's gate is put the run's end (`GateRequest::ShutWithTheRun`) and,
+when it asks, the summoned terminal is brought up holding the card; Save all or
+Discard re-runs that window's close, and Cancel leaves it open. **On Windows and on
+macOS, with the switch on (the default, 2026-11-14; macOS since 2026-11-20), the
+last ordinary window's close puts the window away instead** (0.4.10 row 87):
+nothing is asked, the summoned terminal stays as it was, and both go when the run
+goes, which is only at a quit, the system's end, the outside quit message
+(Windows), or the exit of the put-away window's last shell (Windows; on macOS that
+window is filed into Recent and the application stays in the Dock, whose click
+then opens a fresh window). A
+put-away run the system restarts comes back on the glass: the layout keeps no
+put-away bit. The summoned terminal never stands alone.
 **From.** §7.1.3; §7.1.3q; §7.1.3s *undo lives on the buffer, and the dirty dot is
 a position in it*; §7.1.3v *a buffer knows which disk state it is holding, and a
 read is answered against the body it was issued for* (`T-EDIT-DISK`); §7.1.3w;
@@ -1270,13 +1280,16 @@ transaction the running Folio is running — from the press to the quit, or whil
 its launch pass settles one — is not disturbed: the report is kept as the
 launch's last failure, named on Version with Details once the job is `Idle`. A
 reported launch whose folder the running Folio refuses opens its own window
-instead of ending with a sentence nobody reads. **The frozen address**: a press fetches exactly
-two files, by the offer's own tag, from
-`https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/` —
+instead of ending with a sentence nobody reads. **The frozen address**: a press fetches by the offer's own tag, from
+`https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/`, never
+`/releases/latest/`. Builds 0.4.6–0.4.9 fetch exactly two files —
 `folio-<version>-windows-x64.zip` with `SHA256SUMS.txt`, or
-`Folio-<version>-macos-arm64.dmg` with `SHA256SUMS-macos.txt` — never
-`/releases/latest/`; this grammar is read by every earlier build and does not
-change. **The card** says one line per state with C9's verbs (Update · Later ·
+`Folio-<version>-macos-arm64.dmg` with `SHA256SUMS-macos.txt` — and that
+grammar does not change: the checksum files and the disk image keep those names
+in every release, and a release whose archive is `-unsigned` is one those
+builds do not find, so their readers install it by hand. From 0.4.10 a press fetches
+`RELEASE-STATEMENT.txt` and `RELEASE-STATEMENT.txt.sig` first and then the one
+file the verified statement names for its platform (0.4.10 plan row 102). **The card** says one line per state with C9's verbs (Update · Later ·
 Skip; Cancel under the download's bar; Restart · Later at `Verified`; a failure's
 reason, then `Nothing changed.`, `Previous version restored.` or `Update
 incomplete.` with the folder of its own home's journal, whatever path
@@ -1798,7 +1811,18 @@ behind that plumbing. The ruled shape is in `docs/ARCHITECTURE.md` §10.
 **Rule.** A normal quit is a four-phase transaction (`quit::Quit` / `QuitStep`,
 advanced by `FolioApp::settle_quit`): ① one application-wide dirty gate over
 every dirty preview buffer and uncommitted editor, offering save-all, discard-all
-or cancel; ② a read-only photograph of every window; ③ the judged atomic write
+or cancel — **and over running work** (0.4.10 plan row 87, part 87e; the owner's
+ruling R8 of 2026-11-14): while an agent's turn is under way or a command runs
+(`running_work`: a pane bound to its agent's turns by them, every other pane by its
+session's `OSC 133` `C` without its `D`, full screen included; a pane without shell
+integration, or whose shell has ended, is not counted), the same step asks once, for a reason a person gave
+(`quit::Reason::asks_about_running_work`) — the running-work line last on the unsaved
+card, or alone on a card of its own, *Quit Folio?* (*Restart Folio?* for the update's
+Restart) with Quit and Cancel, Cancel focused; a put-away window is brought back
+before it asks; the system's end, the Restart Manager's close and the quit from
+outside begin no quit and so never ask, and AppKit's log-out, restart or shut-down
+answers a running-work card Quit, giving an update's Restart up and disarming an armed
+Uninstall first, so that the system's end starts no applier and no uninstaller; ② a read-only photograph of every window; ③ the judged atomic write
 (`Runtime::quit_save` and the judged flush — **a refused disk means do not
 leave, unless the person chooses to leave without the change the refusal names,
 on the card that names it**); ④ retirement, with windows hidden and the loop still pumping only the
@@ -1820,7 +1844,7 @@ files with one choice, *Leave without this change*, which alone leaves without
 them; a quit asked again runs the transaction again. **The spare web controller shares the run's one
 bounded retirement** (ticket 60): `App::run_retiring_until` is set once, when the last
 window closes or ④ begins, the spare retires in that same branch, and the run ends only
-when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The quit has a reason** (`quit::Reason`, 0.4.6 U-21): `Asked` — the chord, the menu bar's Quit, the system's quit — or `UpdateRestart`, the update's Restart, which runs the same four phases unchanged. For `UpdateRestart`, ③ is a named session generation the loop waits for across turns under `quit::UPDATE_RECEIPT_DEADLINE` (a clock, not a wait); a Cancel at ①, an incomplete save or a refused write abandons the update with the quit, and a receipt that does not come in time abandons the update and **not** the quit; from the photograph on no session change is admitted, no launch is taken and the restore card neither rises nor is answered; and only after the receipt, at the way out, is `Handoff` written durably and the applier started (`update_handoff`). **The two failure roads skip phases ① and ③**;
+when it has let go or the bound has run out (then it is abandoned with one line); the last closed window stays in the registry, hidden, until then, as it stays for its own pages. **The quit has a reason** (`quit::Reason`, 0.4.6 U-21): `Asked` — the chord, the menu bar's Quit, the Settings card's Uninstall — `LaunchWireQuit { by_a_person }`, AppKit's quit, a person's only when it gives no reason (`quit::the_systems_quit_is_a_persons`, 87e) — or `UpdateRestart`, the update's Restart, which runs the same four phases unchanged. For `UpdateRestart`, ③ is a named session generation the loop waits for across turns under `quit::UPDATE_RECEIPT_DEADLINE` (a clock, not a wait); a Cancel at ①, an incomplete save or a refused write abandons the update with the quit, and a receipt that does not come in time abandons the update and **not** the quit; from the photograph on no session change is admitted, no launch is taken and the restore card neither rises nor is answered; and only after the receipt, at the way out, is `Handoff` written durably and the applier started (`update_handoff`). **The two failure roads skip phases ① and ③**;
 the controlled one keeps the edits ① would have asked about by a write of its own.
 `FolioApp::fail` — twelve call sites — asks the
 device-loss latch first, then prints its stopped line and leaves by the one road a

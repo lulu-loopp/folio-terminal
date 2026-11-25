@@ -421,6 +421,21 @@ impl SeedVault {
         }
     }
 
+    /// **A saved list merged into this one** (0.4.10 plan row 68d, R7: the layout a newer build
+    /// saved, brought back): every entry of both, newest first, one per key — the newer moment
+    /// wins, and a tie keeps this list's — up to the list's length. Read through
+    /// [`Self::from_persisted`], so an entry it would not load is not merged either.
+    pub fn merge_persisted(&mut self, saved: &[RecentEntryV1]) {
+        let saved = Self::from_persisted(saved);
+        let mut merged = std::mem::take(&mut self.entries);
+        merged.extend(saved.entries);
+        merged.sort_by(|newer, older| older.at.cmp(&newer.at));
+        let mut keys = std::collections::HashSet::new();
+        merged.retain(|entry| keys.insert(entry.seed.recent_key()));
+        merged.truncate(RECENT_CAPACITY);
+        self.entries = merged;
+    }
+
     #[must_use]
     pub fn to_persisted(&self) -> Vec<RecentEntryV1> {
         self.entries
@@ -1172,6 +1187,72 @@ mod tests {
                 url: "http://localhost:5173/app?tab=logs#top".to_owned()
             }],
             "the page the tab was on rides with it, as a file's path always has"
+        );
+    }
+
+    /// RED (0.4.10 plan row 68d, R7; review N10) — **a saved list merged into this one keeps every
+    /// entry of both, newest first, one per key**: the newer moment wins a shared key, a tie keeps
+    /// this list's entry, an entry whose stamp cannot be read is not merged, and the list stops
+    /// at its length.
+    ///
+    /// MUTATION: the older moment of a shared key is kept (`plant-68d-merge-keeps-the-older.py`).
+    #[test]
+    fn a_merged_list_keeps_the_newer_entry_of_each_key() {
+        let saved = |cwd: &str, timestamp: &str| RecentEntryV1 {
+            key: format!("pwsh|{cwd}|"),
+            seed: RecentSeedV1::Term {
+                profile_id: "pwsh".to_owned(),
+                cwd: cwd.to_owned(),
+                manual_name: None,
+            },
+            timestamp: timestamp.to_owned(),
+            previews: Vec::new(),
+        };
+        let mut vault = SeedVault::default();
+        vault.record(term("C:/only-here", None), Vec::new(), at(500));
+        let here = vec![RecentPreviewV1::File("C:/tie/here.md".to_owned())];
+        vault.record(term("C:/tie", None), here.clone(), at(1_000));
+        vault.record(term("C:/newer-here", None), Vec::new(), at(2_000));
+        vault.merge_persisted(&[
+            saved("C:/newer-here", "1970-01-01T00:16:40Z"),
+            saved("C:/tie", "1970-01-01T00:16:40Z"),
+            saved("C:/newer-saved", "1970-01-01T00:41:40Z"),
+            saved("C:/only-here", "1970-01-01T00:25:00Z"),
+            saved("C:/unreadable", "not a time"),
+        ]);
+        let rows: Vec<(Seed, SystemTime)> = vault
+            .entries()
+            .iter()
+            .map(|entry| (entry.seed.clone(), entry.at))
+            .collect();
+        let tie = vault.entries().last().map(|entry| entry.previews.clone());
+        assert_eq!(
+            rows,
+            [
+                (term("C:/newer-saved", None), at(2_500)),
+                (term("C:/newer-here", None), at(2_000)),
+                (term("C:/only-here", None), at(1_500)),
+                (term("C:/tie", None), at(1_000)),
+            ],
+            "newest first, the newer moment of each key"
+        );
+        assert_eq!(tie, Some(here), "a tie keeps this list's entry");
+
+        let mut full = SeedVault::default();
+        for index in 0..RECENT_CAPACITY {
+            full.record(
+                term(&format!("C:/here-{index}"), None),
+                Vec::new(),
+                at(100 + index as u64),
+            );
+        }
+        full.merge_persisted(&[saved("C:/oldest", "1970-01-01T00:00:01Z")]);
+        assert_eq!(full.len(), RECENT_CAPACITY, "up to the list's length");
+        assert!(
+            full.entries()
+                .iter()
+                .all(|entry| entry.seed != term("C:/oldest", None)),
+            "the oldest entry is the one past it"
         );
     }
 }

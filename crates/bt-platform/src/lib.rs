@@ -3209,6 +3209,28 @@ impl HostPlatform {
     pub const fn an_application_outlives_its_last_window(self) -> bool {
         matches!(self, Self::MacOs)
     }
+
+    /// **Whether this platform has a notification area to put the run's icon in** (0.4.10 plan
+    /// row 87, part 87b): Windows does, so `bt-app` puts the icon up while its switch keeps the
+    /// run. macOS's way back to a running application is its Dock icon (part 87c), and a Linux
+    /// desktop's tray is not written. A value, for [`host_platform`]'s reason.
+    #[must_use]
+    pub const fn has_a_notification_area(self) -> bool {
+        matches!(self, Self::Windows)
+    }
+
+    /// **Whether a run whose last window is put away has a way back here** (0.4.10 plan row 87,
+    /// part 87c; the coordinator's R2 of 2026-11-20): Windows does, the run's icon in the
+    /// notification area ([`Self::has_a_notification_area`]); macOS does, the application's Dock
+    /// icon, which stands whether or not the application has a window, and whose click AppKit
+    /// answers as a reopen. A Linux desktop's tray is not written, so a run put away there would be
+    /// a process with no window and no road to it: `bt-app`'s close keeps the run only where this
+    /// answers yes, and its Settings row is offered only there. A value, for [`host_platform`]'s
+    /// reason.
+    #[must_use]
+    pub const fn a_put_away_run_has_a_way_back(self) -> bool {
+        matches!(self, Self::Windows | Self::MacOs)
+    }
 }
 
 /// **The variable that names this user's home directory on `platform`.**
@@ -3383,6 +3405,50 @@ pub(crate) fn image_of(started_as: std::path::PathBuf) -> Result<RunningImage, S
         path: started_as.clone(),
         started_as,
     })
+}
+
+/// **Where this process's executable stands now** (0.4.10 plan row 87, part 87c; the coordinator's
+/// R9 of 2026-11-20): the path another program's file should name to start this copy, asked each
+/// time it is wanted rather than kept from the start.
+///
+/// **On macOS a bundle moves under the process running it**: Finder moves an application while it
+/// runs, and the executable inside it keeps running from its new place. [`running_image`] is the
+/// start's answer, kept for the process's life, so a round of the carry pass after the move — the
+/// agents' hooks, the sign-in entry — would write the path the bundle had at the start, a path
+/// nothing stands at any more. Here the kernel is asked (`proc_pidpath` of this process, which it
+/// answers from the executable's vnode as it is named now), and the answer is that path.
+///
+/// **Elsewhere, [`running_image`]'s path**: on Windows the start's resolution of the image
+/// (`GetFinalPathNameByHandleW`); a Windows copy renamed while it runs keeps that answer until its
+/// next start, as it did before 87c.
+pub fn running_image_now() -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let size = u32::try_from(buffer.len())
+            .map_err(|_| "the image path's buffer is too large to name".to_owned())?;
+        // SAFETY: the buffer is `size` bytes and lives across the call; `getpid` is this process.
+        let written =
+            unsafe { libc::proc_pidpath(libc::getpid(), buffer.as_mut_ptr().cast(), size) };
+        let written = usize::try_from(written)
+            .ok()
+            .filter(|written| *written > 0)
+            .ok_or_else(|| {
+                format!(
+                    "proc_pidpath refused this process's image ({})",
+                    std::io::Error::last_os_error()
+                )
+            })?;
+        buffer.truncate(written);
+        Ok(std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            buffer,
+        )))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        running_image().map(|image| image.path.clone())
+    }
 }
 #[must_use]
 pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
@@ -6233,6 +6299,85 @@ mod running_image_tests {
             )
         );
         assert_eq!(moved.folder(), Some(Path::new(r"D:\程序")));
+    }
+}
+
+/// **A macOS image is named where it stands now** (0.4.10 plan row 87, part 87c, R9 of
+/// 2026-11-20; [`running_image_now`]): a copy of this test executable, started from a folder of its
+/// own, renames that folder while it runs and asks where it is.
+#[cfg(all(test, target_os = "macos"))]
+mod running_image_now_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    const MOVER_MODE: &str = "RUNNING_IMAGE_NOW_MOVER";
+
+    /// The helper: renames the folder it was started from to the one `MOVER_MODE` names, then says
+    /// where it is now and where it was started.
+    #[test]
+    fn mover_says_where_it_stands() {
+        let Ok(moved_to) = std::env::var(MOVER_MODE) else {
+            return;
+        };
+        let started = running_image().expect("the helper's image").path.clone();
+        let folder = started.parent().expect("its folder");
+        std::fs::rename(folder, &moved_to).expect("the folder is renamed under the helper");
+        println!(
+            "now {}",
+            running_image_now().expect("the image now").display()
+        );
+        println!("started {}", started.display());
+    }
+
+    /// RED (PLANT 87c-P60's platform half: answer [`running_image`]'s path from
+    /// [`running_image_now`] on macOS) — **a copy renamed while it runs answers its new path**, and
+    /// the start's answer is still the old one.
+    #[test]
+    fn the_image_path_follows_a_rename() {
+        let exe = std::env::current_exe().expect("this test executable");
+        let root = exe
+            .parent()
+            .expect("its folder")
+            .join(bt_testpath::unique_name("folio-image-now"));
+        let before = root.join("before");
+        let after = root.join("after");
+        std::fs::create_dir_all(&before).expect("the first folder");
+        let copy = before.join(exe.file_name().expect("a file name"));
+        std::fs::copy(&exe, &copy).expect("the test executable is copied");
+        let output = quiet_command(&copy)
+            .args([
+                "--exact",
+                "running_image_now_tests::mover_says_where_it_stands",
+                "--nocapture",
+            ])
+            .env(MOVER_MODE, &after)
+            .output()
+            .expect("start the copy");
+        let _ = std::fs::remove_dir_all(&root);
+        let said = String::from_utf8_lossy(&output.stdout);
+        let line = |word: &str| {
+            said.lines()
+                .find_map(|line| line.strip_prefix(word))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| panic!("the helper says `{word}`: {said}"))
+        };
+        let name = exe.file_name().expect("a file name");
+        let now = line("now ");
+        assert_eq!(
+            now.file_name(),
+            Some(name),
+            "the image is still this executable: {said}"
+        );
+        assert!(
+            now.parent().is_some_and(|folder| folder.ends_with("after")),
+            "the image is named in the folder it was moved to: {said}"
+        );
+        assert!(
+            line("started ")
+                .parent()
+                .is_some_and(|folder| folder.ends_with("before")),
+            "and the start's answer is the start's: {said}"
+        );
     }
 }
 /// **A probe's owner reads life, not the clock alone** (G-SWEEP-048, T-PROBE-COLD-CACHE): the
@@ -9223,6 +9368,12 @@ pub mod threads;
 /// them by. Nothing is installed off Windows; see the module's own header.
 pub mod pump;
 
+/// **Which road a window's close came by** (0.4.10 plan row 103): Folio's own requests carry
+/// their road in the `WM_CLOSE` they post, and the window thread's hooks ([`pump`]) witness every
+/// close — its road, how it was delivered, whether the window was in front and where the pointer
+/// was — for the window's `CloseRequested` to take. It reads and says; it refuses nothing.
+pub mod close_road;
+
 /// **The program's icon on the system's message box** (0.4.10 plan row 72,
 /// T-MESSAGE-BOX-WEARS-THE-ICON): the executable's own icon group, loaded at the box's
 /// display's scale and sent to the box as its window's icon by a `WH_CBT` hook this thread holds
@@ -9232,6 +9383,16 @@ pub mod pump;
 mod box_icon;
 #[cfg(windows)]
 pub use box_icon::ProgramIcons;
+
+/// **Folio's icon in the notification area** (0.4.10 plan row 87, part 87b): a host window of
+/// its own, the icon in the shell's version-4 shape, its menu, and the badge `bt-app`'s fold
+/// asks for. Constructible and showing nothing where there is no notification area
+/// ([`HostPlatform::has_a_notification_area`]).
+pub mod tray;
+
+/// **An activity that keeps macOS from napping this process** (0.4.10 plan row 87, part 87c): held
+/// by `bt-app` while a put-away run works; a token that holds nothing elsewhere.
+pub mod process_activity;
 
 /// **The shell's two icon sides at a display's scale** (0.4.10 plan rows 71 and 72): the small
 /// icon (`SM_CXSMICON`, 16 at 96 DPI) and the big one (`SM_CXICON`, 32 at 96 DPI), each
@@ -13146,9 +13307,26 @@ mod windows_impl {
         .max(1)
     }
 
-    pub fn request_window_close(window: NativeWindow) -> Result<(), String> {
-        unsafe { PostMessageW(Some(window.as_hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0)) }
-            .map_err(|error| format!("PostMessageW(WM_CLOSE) failed: {error}"))
+    /// Ask the window to close, as Folio's own request by `road`.
+    ///
+    /// **The road rides in the message** (0.4.10 plan row 103): `wParam` is its
+    /// number and `lParam` Folio's tag, two parameters `WM_CLOSE` does not use and
+    /// winit drops, so the close witness (`close_road`) can tell this close from
+    /// any other program's at the moment it reaches the window — a mark kept
+    /// beside the message would be taken by whichever close arrived first.
+    pub fn request_window_close(
+        window: NativeWindow,
+        road: crate::close_road::OwnCloseRoad,
+    ) -> Result<(), String> {
+        unsafe {
+            PostMessageW(
+                Some(window.as_hwnd()),
+                WM_CLOSE,
+                WPARAM(road.mark_code()),
+                LPARAM(crate::close_road::OWN_CLOSE_TAG),
+            )
+        }
+        .map_err(|error| format!("PostMessageW(WM_CLOSE) failed: {error}"))
     }
 
     /// Put the keyboard back on this window itself.
@@ -14835,6 +15013,16 @@ mod windows_impl {
         .map_err(|error| format!("SetWindowPos(topmost={topmost}) failed: {error}"))
     }
 
+    /// **Whether the system's own lists of this application's windows name this one** (0.4.10
+    /// plan row 87, part 87c, R5): nothing to do on Windows. The one list Windows keeps of a
+    /// program's windows is the taskbar's, and a hidden window has no button there; Alt+Tab
+    /// skips it too. The macOS arm takes a put-away window out of the Window menu and the Dock
+    /// tile's window list, whose rows would order it in behind the door's back.
+    pub fn set_window_listed(window: NativeWindow, listed: bool) -> Result<(), String> {
+        let _ = (window, listed);
+        Ok(())
+    }
+
     /// Tell DWM which of the two canvases this window is wearing —
     /// `DWMWA_USE_IMMERSIVE_DARK_MODE`.
     ///
@@ -16108,6 +16296,95 @@ mod windows_impl {
     /// straddling. A fourth would be a loop that had stopped being an argument
     /// about dpi and started being a wait.
     const STANDING_ATTEMPTS: usize = 3;
+
+    /// **A hidden window's normal rectangle written, and the window left hidden and in the posture
+    /// it is in** (0.4.10 plan row 87, part 87a, re-review P1-4): `rect` is the outer rectangle, in
+    /// screen pixels, that the window takes when it is next shown normal — restored from minimised,
+    /// or un-maximised.
+    ///
+    /// The one door for a window that is maximised or minimised, whose own rectangle is not the
+    /// person's ([`stand_window_at`] moves the rectangle a window stands at, which for those two
+    /// postures is the system's: the maximised frame, or the icon's parking place). It is
+    /// `SetWindowPlacement` with `showCmd = SW_HIDE`, over the placement the window already has —
+    /// its flags, its minimised and maximised positions — with `rcNormalPosition` replaced.
+    ///
+    /// **Workspace coordinates, converted here and nowhere else**: `rcNormalPosition` of a window
+    /// that is not a tool window is stated relative to the work area of the monitor the rectangle
+    /// is on, not to the screen (the trap [`is_window_minimized`] names). The offset is taken from
+    /// the monitor `rect` lands on — `MonitorFromRect`, the primary monitor for a rectangle on
+    /// none — which is the monitor the system reads the rectangle against.
+    ///
+    /// Refused for a window that is shown: `SW_HIDE` would hide it.
+    pub fn set_hidden_window_normal_rect(
+        window: NativeWindow,
+        rect: WindowRect,
+    ) -> Result<(), String> {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromRect};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowLongW, GetWindowPlacement, IsWindowVisible, SW_HIDE,
+            SetWindowPlacement, WINDOWPLACEMENT, WS_EX_TOOLWINDOW,
+        };
+        let hwnd = window.as_hwnd();
+        // SAFETY: `window` originates from winit's live Win32WindowHandle; IsWindowVisible only
+        // reads its style.
+        if unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return Err(
+                "the window is shown; its normal rectangle is written only while it is hidden"
+                    .to_owned(),
+            );
+        }
+        let mut placement = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: as above; `placement` is a live, exclusively borrowed WINDOWPLACEMENT with its
+        // `length` set as the API requires.
+        unsafe { GetWindowPlacement(hwnd, &mut placement) }
+            .map_err(|error| format!("GetWindowPlacement failed: {error}"))?;
+        let screen = RECT {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        };
+        // SAFETY: as above; GetWindowLongW only reads the window's extended style.
+        let tool_window =
+            unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        let (dx, dy) = if tool_window {
+            (0, 0)
+        } else {
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: `screen` is a live RECT; MonitorFromRect with MONITOR_DEFAULTTOPRIMARY
+            // always returns a valid monitor handle, and `info` stays valid and exclusively
+            // borrowed across this read-only query with its `cbSize` set.
+            let ok = unsafe {
+                let monitor = MonitorFromRect(&screen, MONITOR_DEFAULTTOPRIMARY);
+                GetMonitorInfoW(monitor, &mut info)
+            };
+            if !ok.as_bool() {
+                return Err("GetMonitorInfoW failed".to_owned());
+            }
+            (
+                info.rcWork.left - info.rcMonitor.left,
+                info.rcWork.top - info.rcMonitor.top,
+            )
+        };
+        placement.rcNormalPosition = RECT {
+            left: screen.left - dx,
+            top: screen.top - dy,
+            right: screen.right - dx,
+            bottom: screen.bottom - dy,
+        };
+        placement.showCmd = SW_HIDE.0 as u32;
+        // SAFETY: as above; `placement` is the window's own placement, read just now, with its
+        // normal rectangle and show command replaced.
+        unsafe { SetWindowPlacement(hwnd, &placement) }
+            .map_err(|error| format!("SetWindowPlacement(hidden normal rect) failed: {error}"))
+    }
 
     /// The work area — the monitor minus the taskbar and other appbars — of the
     /// display this window sits on, in physical pixels.
@@ -20469,13 +20746,14 @@ pub use windows_impl::{
     monospace_font_families, mouse_button_down, os_ui_language, pointer_position,
     pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
     register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
-    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, silence_std_streams, stand_window_at, standalone_alert,
-    std_error_is_console, stop_flashing_window, system_backdrop_available, system_high_contrast,
-    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
-    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
-    virtual_key_is_dead, virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at, write_std_error, write_to_console,
+    set_current_thread_priority, set_hidden_window_normal_rect, set_system_backdrop,
+    set_window_dark_mode, set_window_listed, set_window_outer_rect, set_window_topmost,
+    silence_std_streams, stand_window_at, standalone_alert, std_error_is_console,
+    stop_flashing_window, system_backdrop_available, system_high_contrast, system_uses_light_apps,
+    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_is_dead,
+    virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
+    work_area_at, write_std_error, write_to_console,
 };
 
 /// **Say one thing in the system's box, over no window** — the ownerless door every platform
@@ -20506,9 +20784,10 @@ pub use portable_impl::{
     install_context_menu, is_window_cloaked, keyboard_layout_shift_table, keyboard_layouts,
     leave_process, let_the_system_translate_touch, mouse_button_down, read_context_menu,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    set_system_backdrop, silence_std_streams, system_backdrop_available, system_high_contrast,
-    thread_mouse_capture, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
-    write_std_error, write_to_console,
+    set_hidden_window_normal_rect, set_system_backdrop, silence_std_streams,
+    system_backdrop_available, system_high_contrast, thread_mouse_capture,
+    virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code, write_std_error,
+    write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).
@@ -20578,9 +20857,9 @@ pub use portable_impl::{
     SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
     get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
     monitor_id_at, os_ui_language, pointer_position, pointer_position_in_window,
-    request_window_close, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    stand_window_at, system_uses_light_apps, take_keyboard_focus, top_level_window_at,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
+    request_window_close, set_window_dark_mode, set_window_listed, set_window_outer_rect,
+    set_window_topmost, stand_window_at, system_uses_light_apps, take_keyboard_focus,
+    top_level_window_at, virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
 };
 
 /// **The window and the screen, over AppKit** (M1-3).
@@ -20602,9 +20881,9 @@ pub use macos_impl::{
     SystemSettingsWatch, client_area_animation_enabled, dpi_at, get_dpi_for_window,
     get_window_rect, get_work_area, install_window_class_background, is_window_minimized,
     monitor_id_at, os_ui_language, pointer_position, pointer_position_in_window,
-    request_window_close, set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    stand_window_at, system_uses_light_apps, take_keyboard_focus, top_level_window_at,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
+    request_window_close, set_window_dark_mode, set_window_listed, set_window_outer_rect,
+    set_window_topmost, stand_window_at, system_uses_light_apps, take_keyboard_focus,
+    top_level_window_at, virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at,
 };
 
 /// **The two doors that own the surface's view, on macOS** (M1-4).
@@ -22297,7 +22576,7 @@ mod macos_window_backend_tests {
 
     /// **The window and screen group**, named once for both pins — the doors
     /// M1-3 moved, in the order the re-export lists spell them.
-    const DOORS: [&str; 23] = [
+    const DOORS: [&str; 24] = [
         "client_area_animation_enabled",
         "dpi_at",
         "get_dpi_for_window",
@@ -22311,6 +22590,7 @@ mod macos_window_backend_tests {
         "pointer_position_in_window",
         "request_window_close",
         "set_window_dark_mode",
+        "set_window_listed",
         "set_window_outer_rect",
         "set_window_topmost",
         "stand_window_at",

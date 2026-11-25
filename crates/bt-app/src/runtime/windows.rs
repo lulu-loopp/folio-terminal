@@ -59,8 +59,12 @@ impl<B: Backend> Runtime<'_, B> {
         take_owned_keyboard_focus(&self.window.window)
     }
 
-    pub(in crate::runtime) fn request_window_close(&self) -> Result<()> {
-        request_owned_window_close(&self.window.window)
+    /// Ask this window to close, as Folio's own request by `road` (0.4.10 plan row 103).
+    pub(in crate::runtime) fn request_window_close(
+        &self,
+        road: bt_platform::close_road::OwnCloseRoad,
+    ) -> Result<()> {
+        request_owned_window_close(&self.window.window, road)
     }
 }
 
@@ -870,6 +874,196 @@ impl<B: Backend> Runtime<'_, B> {
     /// [`Self::dress_new_window`], with the launch trace between them.
     pub(crate) fn show_new_window(&mut self, maximized: bool) -> Result<()> {
         self.put_the_window_on_the_glass(maximized)
+    }
+
+    /// **Put the run's last ordinary window away** (0.4.10 plan row 87, part 87a; R1, R3): the close
+    /// that would have ended the run hides the window instead, and keeps everything in it.
+    ///
+    /// What [`Self::hide_quake_window`] does less its keyboard hand-back — the gesture the window
+    /// held is cancelled, and the window leaves the glass through the owner-thread door — plus one
+    /// write of the window's picture, so that the document on the disk is the layout as it was put
+    /// away. Nothing else: no dirty gate (nothing is lost, so nothing is asked), no teardown
+    /// ([`Self::close_window`] is not reached), and the run's sentinel stays where it is.
+    ///
+    /// **The close's own record is spent here, and said** (review P1-2): every road that puts the
+    /// window away (the window-event door's arm, and `FolioApp::close` for a close that reaches it
+    /// another way) comes through this one, which takes the arrival the request carried and says
+    /// it on the put-away's own close line ([`crate::exit_diagnostics::window_put_away_line`]):
+    /// the road, delivery, foreground and pointer row 103 names on a close, for the close that
+    /// with the switch on is put away and never closed.
+    ///
+    /// **And the window's recordings are paused** (the coordinator's ruling of 2026-11-18): a
+    /// closed window is not heard; they play again when it is brought back. Its pages are left
+    /// running — an agent may be driving them.
+    ///
+    /// `window_shown` is kept, for `hide_quake_window`'s reason: a hidden window is not a window
+    /// that was never shown.
+    ///
+    /// `platform` is the one the close's rules were asked of (`FolioApp::platform`, part 87c's R1),
+    /// handed to the first-hide toast's rule so that a Mac's put-away run on any host says what a
+    /// Mac says: nothing.
+    pub(crate) fn put_the_window_away(
+        &mut self,
+        platform: bt_platform::HostPlatform,
+    ) -> Result<()> {
+        let how = crate::exit_diagnostics::ClosedHow::Asked(
+            self.take_close_asked()
+                .unwrap_or(crate::exit_diagnostics::CloseAsked::UNMARKED),
+        );
+        self.end_capture(Ending::Cancel)?;
+        // An owner-thread door (`doors::SetVisible`). A refusal is a hide that had no effect, and
+        // the window, still on the glass, is not marked away.
+        let hidden = admitted::<doors::SetVisible, _>(|token| {
+            owner_door::set_visible(token, &self.window.window, false);
+        });
+        if hidden.is_err() {
+            return Ok(());
+        }
+        self.window.put_away = true;
+        // Off AppKit's Window menu and the Dock tile's list while it is away (part 87c, R5): a row
+        // there would order it in behind the door. Nothing to do on Windows, whose taskbar has no
+        // button for a hidden window. A refusal is said; the door still brings the window back.
+        if let Err(error) = self.window.window.set_listed(false) {
+            self.window
+                .window
+                .note(&format!("BT_PUT_AWAY the window list: {error}"));
+        }
+        self.window.video.pause_while_away();
+        // The turn's facts read again, so that this turn's own fold and present already see a
+        // window off the glass (gate 1), not the next turn's.
+        self.observe_window_place();
+        self.mark_session_dirty(Instant::now());
+        let facts = self.closed_facts(self.app.quake.window(), None);
+        crate::exit_diagnostics::say_window_put_away(how, facts, |line| {
+            self.window.window.note(line);
+        });
+        self.tell_the_first_put_away(platform);
+        Ok(())
+    }
+
+    /// **Store the reader's answer about `Keep running when closed`** (0.4.10 plan row 87, part
+    /// 87d): the row's press, an import and a hand edit of `settings.json` all come here.
+    ///
+    /// Nothing waits for a restart: the close reads the loaded settings each time it is asked
+    /// (`FolioApp::the_close_keeps_the_run`), so the next close already answers the new way.
+    ///
+    /// **Off brings every put-away window back** (R8 of T-TRAY-87D) on the loop's next turn, and
+    /// nothing here asks for it: the notification-area icon's look at the switch
+    /// (`FolioApp::settle_tray`, part 87b) reads the stored Off, brings a put-away window back
+    /// through the one door and then takes the icon down (one road, ruled 2026-11-19). Off is the
+    /// old behaviour exactly, and no window is left hidden with its icon gone.
+    pub(crate) fn apply_close_keeps_running(&mut self, enabled: bool) {
+        let mut settings = self.app.settings_store.loaded().clone();
+        settings.close_keeps_running = enabled;
+        self.app.settings_store.store(settings);
+    }
+
+    /// **A close that reached this window while it is put away, ignored**
+    /// (`CloseFate::AlreadyAway`, review P1-2): the request's record is spent, and the once-a-run note names the road it came
+    /// by, so the tool that closes every top-level window it finds is named by what it sent.
+    pub(crate) fn ignore_the_close_while_away(&mut self) {
+        let asked = self
+            .take_close_asked()
+            .unwrap_or(crate::exit_diagnostics::CloseAsked::UNMARKED);
+        crate::a_close_reached_a_put_away_window(asked.road_said());
+    }
+
+    /// **Bring a put-away window back on the glass** (0.4.10 plan row 87, part 87a; R10, R13): the
+    /// window's half of `FolioApp::bring_the_window_back`, the one door every road back takes.
+    ///
+    /// [`Self::put_the_window_on_the_glass`] — written re-entrant for the summoned terminal, so a
+    /// second show is a statement of fact and not a step — with the window as it was: maximized if
+    /// it was put away maximized. `false` for a window that is not put away, which is left alone,
+    /// and for one that is closing (review P2-1): a window on its way out is never brought back.
+    ///
+    /// Before the show, the window is held to a monitor that is there now
+    /// ([`Self::hold_the_window_to_a_present_monitor`], review P2-3); after it, the recordings the
+    /// put-away paused play again.
+    pub(crate) fn bring_the_window_back_on_the_glass(&mut self) -> Result<bool> {
+        if !self.window.put_away || self.window.leaving.is_some() {
+            return Ok(false);
+        }
+        self.window.put_away = false;
+        // Back on the system's lists of the application's windows (part 87c, R5).
+        if let Err(error) = self.window.window.set_listed(true) {
+            self.window
+                .window
+                .note(&format!("BT_PUT_AWAY the window list: {error}"));
+        }
+        let maximized = self.window.window.is_maximized();
+        self.hold_the_window_to_a_present_monitor();
+        self.put_the_window_on_the_glass(maximized)?;
+        self.window.video.play_again_after_away();
+        // And read again on the glass, for the put-away's reason the other way round.
+        self.observe_window_place();
+        Ok(true)
+    }
+
+    /// **A put-away window's rectangle held to a monitor that is there now** (0.4.10 plan row 87,
+    /// part 87a, review P2-3): a resident run lives through docking and undocking, and the system
+    /// does not move a hidden window off a monitor that has gone.
+    ///
+    /// The judgement is the layout restore's own, unchanged ([`crate::choose_restored_placement`]
+    /// over the monitors the platform names, primary first), asked of the paragraph this window
+    /// would write ([`Self::window_snapshot`]) as it comes: its bounds are the window's **normal**
+    /// rectangle in every posture — the one it stands at while it is normal, the one it last stood
+    /// at normal while it is maximised or minimised, which is the rectangle the restore judges
+    /// too. A maximised window's own rectangle is the system's maximised frame, which overhangs
+    /// its work area and which the restore never measures (re-review P1-4).
+    ///
+    /// A rectangle the judgement keeps is left where it is. One it fits or moves (one no monitor
+    /// can see forfeits its corner to the primary monitor's, as a restored one does) is put where
+    /// it says ([`crate::startup_window_rect`], the restore's own conversion):
+    /// - a **normal** window is stood there;
+    /// - a **maximised or minimised** one is never stood anywhere: the rectangle is written as the
+    ///   one it takes when it is next shown normal, the window left hidden and in its posture
+    ///   (`keep_normal_rect_while_hidden`), so that un-maximised, or restored from the taskbar, it
+    ///   lands on a monitor that is there.
+    ///
+    /// Nothing is judged where the platform names no monitor. A refused write is said, and the
+    /// window comes back where it is.
+    fn hold_the_window_to_a_present_monitor(&mut self) {
+        let monitors = self.window.window.monitors_to_restore_on();
+        let Some(primary) = monitors.first().copied() else {
+            return;
+        };
+        let paragraph = self.window_snapshot();
+        let Some(placement) = crate::choose_restored_placement(&paragraph, &monitors) else {
+            return;
+        };
+        let bounds = paragraph.placement.bounds;
+        let kept = placement.position
+            == Some(winit::dpi::LogicalPosition::new(
+                f64::from(bounds.x),
+                f64::from(bounds.y),
+            ))
+            && placement.size == crate::sane_restored_size(bounds);
+        if kept {
+            return;
+        }
+        let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
+        let primary_corner = {
+            let left = crate::physical_px(primary.left, scale);
+            let top = crate::physical_px(primary.top, scale);
+            bt_platform::WindowRect {
+                left,
+                top,
+                right: left,
+                bottom: top,
+            }
+        };
+        let rect = crate::startup_window_rect(Some(placement), primary_corner, scale);
+        let normal = !self.window.window.is_iconic() && !self.window.window.is_maximized();
+        let written = if normal {
+            self.window.window.stand_at(rect)
+        } else {
+            self.window.window.keep_normal_rect_while_hidden(rect)
+        };
+        if let Err(error) = written {
+            self.window
+                .window
+                .note(&format!("BT_PUT_AWAY the way back: {error}"));
+        }
     }
 
     /// The three things showing a window does, said once for the two doors that
@@ -1975,6 +2169,70 @@ impl<B: Backend> Runtime<'_, B> {
         self.window.window_close_requested.take()
     }
 
+    /// **A close request has reached this window: note which road it came by** (0.4.10 plan row
+    /// 103) — the close witness's record of it, taken once, and where the pointer was, named by
+    /// this window's own chrome ([`Self::pointer_at_close`]). The wait's re-run of a held close
+    /// (`WindowRuntime::close_rerun`) is not a request and keeps the arrival it re-runs;
+    /// every other request replaces whatever was held (R7). Nothing is decided here: the gate and
+    /// the close go on exactly as before (不当保姆).
+    pub(crate) fn note_close_arrival(&mut self) {
+        if std::mem::take(&mut self.window.close_rerun) {
+            return;
+        }
+        let arrival = self.window.window.take_close_arrival();
+        let pointer = self.pointer_at_close(arrival.map(|arrival| arrival.pointer));
+        self.window.close_asked = Some(crate::exit_diagnostics::CloseAsked { arrival, pointer });
+    }
+
+    /// **The held close's arrival, spent by the close it belongs to** (0.4.10 plan row 103, R7):
+    /// `FolioApp::close` takes it when the close is performed. Every write of
+    /// `WindowRuntime::close_asked` is in this module, with [`Self::note_close_arrival`].
+    pub(crate) fn take_close_asked(&mut self) -> Option<crate::exit_diagnostics::CloseAsked> {
+        self.window.close_asked.take()
+    }
+
+    /// **The next `CloseRequested` is (or is not) the wait's re-run of a held close** —
+    /// `FolioApp::settle_close_waits` says which before it re-runs one (0.4.10 plan row 103, R7).
+    pub(crate) fn mark_close_rerun(&mut self, rerun: bool) {
+        self.window.close_rerun = rerun;
+    }
+
+    /// **The showing summoned terminal's `×` is a hide, not a close**: the close witness's record
+    /// of the request is spent and nothing is held; a wait's re-run brought no record of its own
+    /// (0.4.10 plan row 103).
+    pub(crate) fn spend_close_arrival(&mut self) {
+        if !std::mem::take(&mut self.window.close_rerun) {
+            let _ = self.window.window.take_close_arrival();
+        }
+    }
+
+    /// **What this window is as it closes** (0.4.10 plan row 103): ordinary or the summoned
+    /// terminal (`summon`), its id, how many tabs and panes it holds, and the ordinary windows
+    /// left when the run goes on.
+    pub(crate) fn closed_facts(
+        &self,
+        summon: Option<WindowId>,
+        windows_left: Option<usize>,
+    ) -> crate::exit_diagnostics::ClosedFacts {
+        let id = self.window.window.id();
+        crate::exit_diagnostics::ClosedFacts {
+            window: if summon == Some(id) {
+                crate::exit_diagnostics::ClosedWindow::Summon
+            } else {
+                crate::exit_diagnostics::ClosedWindow::Ordinary
+            },
+            id: u64::from(id),
+            tabs: self.window.tabs.len(),
+            panes: self
+                .window
+                .tabs
+                .iter()
+                .map(|tab| tab.seats.pane_count())
+                .sum(),
+            windows_left,
+        }
+    }
+
     /// **What this window would lose if the process left now**, by name.
     ///
     /// One window's contribution to the summary card's one list. Two classes,
@@ -2003,6 +2261,18 @@ impl<B: Backend> Runtime<'_, B> {
             })
             .chain(self.uncommitted_edit_name())
             .collect()
+    }
+
+    /// **What this window's panes are running** (0.4.10 plan row 87, part 87e): every tab's, on
+    /// [`Self::quit_dirty_names`]' own reasoning — a command running on a tab nobody is looking at
+    /// ends on quit all the same. The one reader is [`crate::running_work`].
+    pub(crate) fn window_running_work(&self) -> crate::running_work::RunningWork {
+        self.window
+            .tabs
+            .iter()
+            .fold(crate::running_work::RunningWork::NONE, |work, tab| {
+                work + tab.tab_running_work()
+            })
     }
 
     /// **What this window's buffers came to under the quit's `Save`, said on its card**
@@ -2285,6 +2555,7 @@ impl<B: Backend> Runtime<'_, B> {
             || self.window.first_run.is_open()
             || self.paste_card_seat().is_some()
             || self.update_card_is_up()
+            || self.copy_back_card_is_up()
             || self.window.settings.is_open()
             || self.restore_card_is_up()
     }
@@ -2481,6 +2752,9 @@ impl<B: Backend> Runtime<'_, B> {
     /// can see — the one outcome worse than an error, and the reason `fail`'s
     /// own comment says so about windows.
     fn let_go_of_this_window(&mut self) -> Result<()> {
+        // **A window let go is no longer put away** (0.4.10 plan row 87, part 87a, review P2-1):
+        // on every road that ends a window, so that nothing brings a closing window back.
+        self.window.put_away = false;
         // **Off the screen first, and on every road that ends a window**
         // (§7.34, user report 2026-08-27: 关掉旧 folio 再开新的,输入法就坏了).
         //
@@ -3138,8 +3412,11 @@ fn take_owned_keyboard_focus(window: &impl WindowHost) -> Result<()> {
     }
 }
 
-fn request_owned_window_close(window: &impl WindowHost) -> Result<()> {
-    window.request_close().map_err(|error| anyhow!(error))
+fn request_owned_window_close(
+    window: &impl WindowHost,
+    road: bt_platform::close_road::OwnCloseRoad,
+) -> Result<()> {
+    window.request_close(road).map_err(|error| anyhow!(error))
 }
 
 /// The `(bounds, maximized)` pair a snapshot should record.
@@ -3230,3 +3507,17 @@ fn uia_frames<'a>(
 #[cfg(test)]
 #[path = "windows_tests.rs"]
 mod tests;
+
+// On every host since 87c (0.4.10 plan row 87): each test names the platform it pins
+// (`FolioApp::platform`), so a Mac's put-away runs on a Windows runner and a Windows one on a Mac.
+#[cfg(test)]
+#[path = "put_away_tests.rs"]
+mod put_away_tests;
+
+// The put-away run on the roads only Windows has: Folio's quit from outside and the system's
+// question at the end of the session, both Windows messages, with 87e's T10f (those messages
+// while a command runs) and T10h (the quit from the run's icon in the notification area)
+// (part 87c, R11 of 2026-11-20).
+#[cfg(all(test, windows))]
+#[path = "put_away_windows_tests.rs"]
+mod put_away_windows_tests;

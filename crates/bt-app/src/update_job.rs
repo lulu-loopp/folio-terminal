@@ -3,7 +3,7 @@
 //! §D, C11, and revision (b)'s U-18 row).
 //!
 //! The update check ([`crate::update`]) stops at a tag. This module starts
-//! there: it holds the **offer** — `{ txn, tag, asset, hash_doc, to_version }`,
+//! there: it holds the **offer** — `{ txn, tag, to_version, platform }`,
 //! minted once when the card would be raised and never derived again — and the
 //! state that offer is in:
 //!
@@ -50,10 +50,10 @@
 //! through the download door ([`ReleaseDownload`]), the image attached and its
 //! bundle checked, copied and checked again, the rescue clone, the journal at
 //! `Prepared`, each refusal a named [`Stop`]. On Windows it is the Prepare of
-//! `update_prepare_windows` (U-20): the archive and its checksum document into
-//! the installation's own folder, the space reserved, the archive expanded and
-//! its signed files held to the running build's identity, the set copied into
-//! `set\` and checked again there, the rescue copy of the running executable,
+//! `update_prepare_windows` (U-20): the release statement and the archive it
+//! names into the installation's own folder (0.4.10 plan row 102), the space
+//! reserved, the archive expanded and every member held to the statement, the
+//! set copied into `set\` and checked again there, the rescue copy of the running executable,
 //! the inventories, the journal at `Prepared`. Elsewhere it is [`Unsupported`],
 //! which refuses before any network, staging, flush or wait: the job goes
 //! straight to [`State::Failed`]. The quit barrier is U-21 ([`Job::restart`], and the two answers the quit delivers
@@ -73,8 +73,10 @@
 
 use std::io::Read;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use bt_persist::UpdateCheckV1;
 use bt_platform::HostPlatform;
@@ -125,13 +127,13 @@ pub(crate) struct Offer {
     txn: TxnId,
     /// The release's tag, verbatim (`v0.4.7-preview`).
     tag: String,
-    /// The archive (Windows) or disk image (macOS), by its versioned name.
-    asset: String,
-    /// The checksum document beside it.
-    hash_doc: String,
     /// The version the tag names (`0.4.7`): the tag without `v` and
     /// `-preview`, `docs/RELEASING.md` "The tag".
     to_version: String,
+    /// **The platform word the release statement lists this copy's file
+    /// under** (`windows-x64`, `macos-arm64`; 0.4.10 plan row 102): the
+    /// file's name is the statement's, not composed here.
+    platform: &'static str,
 }
 
 impl Offer {
@@ -141,23 +143,16 @@ impl Offer {
     #[must_use]
     pub(crate) fn mint(txn: TxnId, tag: &str, platform: HostPlatform) -> Option<Self> {
         let to_version = released_version(tag)?;
-        let (asset, hash_doc) = match platform {
-            HostPlatform::Windows => (
-                format!("folio-{to_version}-windows-x64.zip"),
-                "SHA256SUMS.txt".to_owned(),
-            ),
-            HostPlatform::MacOs => (
-                format!("Folio-{to_version}-macos-{MACOS_ARCHITECTURE}.dmg"),
-                "SHA256SUMS-macos.txt".to_owned(),
-            ),
+        let platform = match platform {
+            HostPlatform::Windows => bt_winres::release_statement::WINDOWS_X64,
+            HostPlatform::MacOs => bt_winres::release_statement::MACOS_ARM64,
             HostPlatform::OtherUnix => return None,
         };
         Some(Self {
             txn,
             tag: tag.to_owned(),
-            asset,
-            hash_doc,
             to_version,
+            platform,
         })
     }
 
@@ -179,22 +174,47 @@ impl Offer {
         &self.to_version
     }
 
-    /// The archive or disk image, by its versioned name.
+    /// The platform word the release statement lists this copy's file under.
     #[must_use]
-    pub(crate) fn asset(&self) -> &str {
-        &self.asset
+    pub(crate) const fn release_platform(&self) -> &'static str {
+        self.platform
     }
 
-    /// **The two files a press fetches, and nothing else** (C11): the asset and
-    /// its checksum document, both by the offer's own tag.
+    /// **The two files a press fetches first** (C11; 0.4.10 plan row 102):
+    /// the release statement and its signature, both by the offer's own tag,
+    /// each held at the door to the most its reader takes — 64 KiB and 64
+    /// bytes (the 1b+2 review's N12). The one other file a press fetches is
+    /// the one the verified statement names ([`Self::asset_request`]).
     #[must_use]
     pub(crate) fn requests(&self) -> [Request; 2] {
-        [&self.asset, &self.hash_doc].map(|name| Request {
+        use bt_winres::release_statement::{
+            SIGNATURE_BYTES, SIGNATURE_FILE, STATEMENT_FILE, STATEMENT_MAX_BYTES,
+        };
+        [
+            (STATEMENT_FILE, STATEMENT_MAX_BYTES as u64),
+            (SIGNATURE_FILE, SIGNATURE_BYTES as u64),
+        ]
+        .map(|(name, most)| self.file_request(name, most))
+    }
+
+    /// **The file `name` of the offer's release**, by its tag — the name a
+    /// verified statement gives this platform's file, which the statement's
+    /// grammar holds to one file name (no separator, no `..` path) — under
+    /// the download door's own ceiling.
+    #[must_use]
+    pub(crate) fn asset_request(&self, name: &str) -> Request {
+        self.file_request(name, bt_platform::https_download::DOWNLOAD_CEILING_LIMIT)
+    }
+
+    /// The file `name` of the offer's release, of at most `most` bytes.
+    fn file_request(&self, name: &str, most: u64) -> Request {
+        Request {
             host: RELEASE_HOST,
             path: format!("{RELEASE_DOWNLOAD_PATH}/{}/{name}", self.tag),
             tag: self.tag.clone(),
-            file_name: name.clone(),
-        })
+            file_name: name.to_owned(),
+            most,
+        }
     }
 }
 
@@ -221,6 +241,9 @@ pub(crate) struct Request {
     /// The offer's tag, which `path` also spells.
     pub(crate) tag: String,
     pub(crate) file_name: String,
+    /// **The most bytes the file may hold**: the ceiling the door holds the
+    /// download to, and the size a feed's copy may be.
+    pub(crate) most: u64,
 }
 
 // ── the evidence, and eligibility ───────────────────────────────────────────
@@ -626,20 +649,21 @@ pub(crate) enum Stop {
     Journal,
     /// A file of the offer did not arrive.
     Download,
-    /// The image is not the one the checksum document names, or the document
-    /// names none.
+    /// **The release statement does not vouch for the offer** (0.4.10 plan
+    /// row 102): its signature does not verify with a key this build embeds,
+    /// it is signed by a key this copy remembers as retired, it is for
+    /// another tag or version, or it lists no file for this platform; or a
+    /// staged transaction's kept statement is missing or no longer verifies.
+    /// Nothing was changed.
+    StatementRefused,
+    /// The archive or image is not the one the release statement lists: its
+    /// SHA-256 or its size differs.
     Sums,
     /// The image could not be attached.
     Mount,
     /// The bundle on the image, or its copy, is not this publisher's Folio of
     /// the offered version for this machine's architecture.
     Identity,
-    /// **A signature's revocation could not be checked because where its
-    /// answer is published could not be reached** (0.4.9
-    /// T-UPDATE-OFFLINE-IDENTITY-CARD; `trust::Refusal::RevocationOffline`):
-    /// no network, or that server down. Refused as [`Self::Identity`] is —
-    /// the next press asks again.
-    Offline,
     /// The bundle could not be copied off the image.
     Copy,
     /// The rescue copy of the running build could not be made.
@@ -668,10 +692,10 @@ impl Stop {
             Self::Newer => "another Folio's unfinished update holds this installation",
             Self::Journal => "the update's folder or journal could not be written",
             Self::Download => "a file did not download",
-            Self::Sums => "the image does not match its checksum",
+            Self::StatementRefused => "the release statement does not vouch for the offer",
+            Self::Sums => "the download does not match the release statement",
             Self::Mount => "the image could not be attached",
             Self::Identity => "the new build is not the offered, signed Folio",
-            Self::Offline => "a signature's revocation could not be checked without the network",
             Self::Copy => "the new build could not be copied",
             Self::Clone => "the running build could not be kept aside",
             Self::TooOld => "the release needs a newer updater than this build",
@@ -995,7 +1019,7 @@ impl Transport for ReleaseDownload {
             user_agent: crate::update::USER_AGENT,
             directory: into,
             file_name: &request.file_name,
-            ceiling: DOWNLOAD_CEILING_LIMIT,
+            ceiling: request.most.min(DOWNLOAD_CEILING_LIMIT),
             idle_timeout: DOWNLOAD_IDLE_TIMEOUT,
             floor: DOWNLOAD_FLOOR_BYTES,
             monitor: &monitor,
@@ -1010,8 +1034,7 @@ impl Transport for ReleaseDownload {
 /// read through `file_reads` on [`bt_platform::file_reads::Lane::Update`] and
 /// copied durably into `into` under the file's own name — in place of
 /// [`ReleaseDownload`], and nothing else changes: the driver holds what it
-/// copied to the checksum document and to the running build's signer exactly
-/// as it holds a download. Bytes are reported as they are copied, and a
+/// copied to the release statement exactly as it holds a download. Bytes are reported as they are copied, and a
 /// cancelled job stops the copy and removes what it wrote.
 pub(crate) struct FeedCopy(crate::update::Feed);
 
@@ -1023,6 +1046,12 @@ impl Transport for FeedCopy {
         fetching: &Fetching,
     ) -> Result<std::path::PathBuf, String> {
         let (source, size) = self.0.asset(&request.tag, &request.file_name)?;
+        if size > request.most {
+            return Err(format!(
+                "{} is {size} bytes in the feed, more than the {} it may hold",
+                request.file_name, request.most
+            ));
+        }
         let target = into.join(&request.file_name);
         copy_feed_file(&source, &target, size, fetching).map(|()| target)
     }
@@ -1178,16 +1207,21 @@ pub(crate) fn driver_for_this_copy() -> (Box<dyn Driver>, SharedTransport) {
 
 /// **How this copy revalidates a staged transaction a later launch finds**
 /// (U-33): the running install folder's on Windows
-/// (`update_prepare_windows::resumer`, under the system's trust), the running
+/// (`update_prepare_windows::resumer`, with the embedded release keys and
+/// this copy's data folder), the running
 /// bundle's on macOS (`update_prepare_macos::resumer_of_this_copy`), and
 /// nothing anywhere else (`update_prepare::no_resume`, which discards).
 #[must_use]
 pub(crate) fn resumer_for_this_copy() -> Resumer {
     match bt_platform::host_platform() {
         HostPlatform::Windows => match std::env::current_exe() {
-            Ok(exe) => {
-                crate::update_prepare_windows::resumer(exe, bt_platform::trust::Policy::System)
-            }
+            Ok(exe) => crate::update_prepare_windows::resumer(
+                exe,
+                crate::update_prepare::Vouching::of_this_copy(),
+                // A launch reads the staged set's signature without a press:
+                // from this machine's cache only (the part 3 review's N21).
+                bt_platform::trust::Policy::SystemCacheOnly,
+            ),
             Err(_) => crate::update_prepare::no_resume(),
         },
         HostPlatform::MacOs => crate::update_prepare_macos::resumer_of_this_copy(),
@@ -1212,11 +1246,14 @@ pub(crate) enum Landed {
     /// set's own version under the transaction's identity, and the staged
     /// transaction, lock held — the verified card, as if its download had just
     /// finished; `restart_missed` when Restart was pressed for it and the
-    /// restart did not happen (0.4.8 E3), which that card says.
+    /// restart did not happen (0.4.8 E3), which that card says; `note`, what
+    /// the card says of the set's signature, read again at this launch (row
+    /// 102 part 3).
     Resumed {
         offer: Offer,
         staged: Box<Staged>,
         restart_missed: bool,
+        note: SignatureNote,
     },
 }
 
@@ -1275,6 +1312,10 @@ pub(crate) enum Abandon {
     /// [`crate::quit::UPDATE_RECEIPT_DEADLINE`]. The quit went on; the update
     /// did not, because nobody saw the document land.
     SessionTimedOut,
+    /// **The system is ending the session** — a log-out, a restart or a shut-down answered the
+    /// quit's card — and no applier starts while it does (0.4.10 plan row 87, part 87e; the
+    /// coordinator's ruling of 2026-11-19 on the review's P2-3).
+    SystemEndingTheSession,
 }
 
 impl Abandon {
@@ -1287,6 +1328,7 @@ impl Abandon {
             Self::SessionRefused => "the session could not be written",
             Self::DocumentsUnsaved => "a change to a configuration file could not be saved",
             Self::SessionTimedOut => "the session write did not finish in time",
+            Self::SystemEndingTheSession => "the system is ending the session",
         }
     }
 }
@@ -1351,31 +1393,118 @@ pub(crate) fn evidence_landed() {
 }
 
 /// Where a driver leaves the staged transaction for the job, until the job
-/// reads its `Verified` report: the transaction it belongs to, and the value.
-type StagedSlot = Arc<Mutex<Option<(TxnId, Staged)>>>;
+/// reads its `Verified` report: the transaction it belongs to, the value, and
+/// what the Ready card says of the staged set's signature.
+type StagedSlot = Arc<Mutex<Option<(TxnId, Staged, SignatureNote)>>>;
+
+/// **What a surface says of a `folio.exe`'s signature** (0.4.10 plan row 102
+/// part 3, R4 and R5) — the updater's own reading of it, which decides no step:
+/// the Ready card of a staged set, and About → Version of this copy, add one
+/// sentence for [`Self::NotOurService`] and nothing otherwise.
+///
+/// Windows' answer is the reading (`update_prepare_windows::service_signature`):
+/// a valid signature by our signing service says nothing, and every other
+/// answer — another signer, none, revoked, offline, unknown — says the
+/// sentence. On macOS no Authenticode reading exists, and nothing is said.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SignatureNote {
+    /// Signed by our signing service, not read, or no such reading here.
+    #[default]
+    Nothing,
+    /// Windows' reading names no valid signature by our signing service.
+    NotOurService,
+}
+
+/// **A job's inbox**: the reports its drivers posted, waiting for the window
+/// thread, and the signal each post gives. The loop is woken through
+/// `PROGRESS_WAKE`; a test that drives a job with no loop waits on `report_posted`
+/// for the next report (`Job::await_reports`) instead of reading a clock.
+#[derive(Default)]
+struct ProgressInbox {
+    reports: Mutex<Vec<Progress>>,
+    report_posted: Condvar,
+    /// **How many [`Poster`]s of this inbox are alive** (the 1b+2 review's
+    /// N14): made or cloned, one more; dropped — a worker's that ended, or
+    /// unwound — one fewer, said on `report_posted`. A drop takes `reports`'
+    /// lock to count down, so a waiter that reads the count there misses no
+    /// drop. **Tests only** (the part 3 review's P2-9): its one reader is
+    /// `Job::await_reports`; the product counts nothing, and a poster's drop
+    /// takes no lock.
+    #[cfg(test)]
+    posters: AtomicUsize,
+}
 
 /// **A driver's way back to the job**: reports carry the transaction they
-/// belong to, wait in the job's inbox, and wake the loop.
-#[derive(Clone)]
+/// belong to, wait in the job's inbox, and wake the loop. A clone is
+/// another handle on the same transaction; in a test, counted
+/// ([`ProgressInbox`]'s `posters`).
+#[cfg_attr(not(test), derive(Clone))]
 pub(crate) struct Poster {
     txn: TxnId,
-    inbox: Arc<Mutex<Vec<Progress>>>,
+    inbox: Arc<ProgressInbox>,
     staged: StagedSlot,
     /// Set by the job when the reader cancels this transaction's download: the
     /// driver stops at its next step.
     cancelled: Arc<AtomicBool>,
 }
 
+#[cfg(test)]
+impl Clone for Poster {
+    fn clone(&self) -> Self {
+        Self::counted(
+            self.txn,
+            Arc::clone(&self.inbox),
+            Arc::clone(&self.staged),
+            Arc::clone(&self.cancelled),
+        )
+    }
+}
+
+#[cfg(test)]
+impl Drop for Poster {
+    fn drop(&mut self) {
+        let reports = self
+            .inbox
+            .reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.inbox.posters.fetch_sub(1, Ordering::SeqCst);
+        drop(reports);
+        self.inbox.report_posted.notify_all();
+    }
+}
+
 impl Poster {
+    /// **A poster of `inbox`** — in a test, counted among its live ones
+    /// (N14). The count goes up without the inbox's lock: a poster is made by
+    /// a press, on the thread that would wait, or cloned from a live one, so
+    /// the count is never 0 while a waiter could see this one coming.
+    fn counted(
+        txn: TxnId,
+        inbox: Arc<ProgressInbox>,
+        staged: StagedSlot,
+        cancelled: Arc<AtomicBool>,
+    ) -> Self {
+        #[cfg(test)]
+        inbox.posters.fetch_add(1, Ordering::SeqCst);
+        Self {
+            txn,
+            inbox,
+            staged,
+            cancelled,
+        }
+    }
+
     /// **Report `Verified`, handing the job what Prepare leaves behind** —
     /// the home, the journal at `Prepared` and the transaction lock (U-21's
     /// seam for U-20 / U-27): the quit's hand-over writes `Handoff` from it,
-    /// under that lock, at the way out.
+    /// under that lock, at the way out. `note` is what the Ready card says of
+    /// the staged set's signature ([`SignatureNote`], row 102 part 3).
     ///
     /// # Errors
     /// The job was cancelled first: the staged transaction comes back, for the
     /// driver to abandon — a job that has moved on never holds it.
-    pub(crate) fn verified(&self, staged: Staged) -> Result<(), Box<Staged>> {
+    pub(crate) fn verified(&self, staged: Staged, note: SignatureNote) -> Result<(), Box<Staged>> {
         let mut slot = self
             .staged
             .lock()
@@ -1383,10 +1512,24 @@ impl Poster {
         if self.cancelled() {
             return Err(Box::new(staged));
         }
-        *slot = Some((self.txn, staged));
+        *slot = Some((self.txn, staged, note));
         drop(slot);
         self.post(Step::Verified);
         Ok(())
+    }
+
+    /// **A poster no job reads** — a test's, for a step of a Prepare run on
+    /// its own: what it posts waits in an inbox nobody drains, and it is never
+    /// cancelled.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn of_a_test(txn: TxnId) -> Self {
+        Self::counted(
+            txn,
+            Arc::default(),
+            Arc::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     /// Whether the job has cancelled this poster's transaction.
@@ -1404,12 +1547,14 @@ impl Poster {
     /// Report `step` for this poster's transaction.
     pub(crate) fn post(&self, step: Step) {
         self.inbox
+            .reports
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(Progress {
                 txn: self.txn,
                 step,
             });
+        self.inbox.report_posted.notify_all();
         if let Some(wake) = PROGRESS_WAKE.get() {
             wake();
         }
@@ -1475,12 +1620,16 @@ pub(crate) struct Job<W> {
     /// [`Job::offers_enabled`] in the product.
     offers: bool,
     /// Reports from a driver, waiting for the window thread.
-    inbox: Arc<Mutex<Vec<Progress>>>,
+    inbox: Arc<ProgressInbox>,
     /// What a driver left with its `Verified` report, until the job takes it.
     staged_slot: StagedSlot,
     /// **The staged transaction** — its home, its journal and the lock O holds
     /// on it — from `Verified` until the process leaves (U-21).
     staged: Option<Staged>,
+    /// **What the Ready card says of the staged set's signature** (row 102
+    /// part 3), handed over with [`Self::staged`]: by the `Verified` report, or
+    /// by the launch that resumed the set.
+    staged_note: SignatureNote,
     /// Why the last quit gave the update up, while the card is back at
     /// `Verified` (U-21; U-19 names it).
     abandoned: Option<Abandon>,
@@ -1559,9 +1708,10 @@ impl<W: Copy + Eq> Job<W> {
             last_failure: None,
             said: false,
             offers,
-            inbox: Arc::new(Mutex::new(Vec::new())),
+            inbox: Arc::default(),
             staged_slot: Arc::new(Mutex::new(None)),
             staged: None,
+            staged_note: SignatureNote::Nothing,
             abandoned: None,
             running: None,
             launch: Launch::Done,
@@ -1837,6 +1987,7 @@ impl<W: Copy + Eq> Job<W> {
                 offer,
                 staged,
                 restart_missed,
+                note,
             } => {
                 let line = format!(
                     "Folio: update job — {} was prepared at an earlier launch and is verified again",
@@ -1848,6 +1999,7 @@ impl<W: Copy + Eq> Job<W> {
                     presenters.quake,
                 );
                 self.staged = Some(*staged);
+                self.staged_note = note;
                 self.state = State::Verified(offer);
                 self.restart_missed = restart_missed;
                 self.put_away = false;
@@ -1889,6 +2041,24 @@ impl<W: Copy + Eq> Job<W> {
     #[must_use]
     pub(crate) const fn staged(&self) -> Option<&Staged> {
         self.staged.as_ref()
+    }
+
+    /// **What the Ready card says of the staged set's signature** (row 102
+    /// part 3): the reading handed over with [`Self::staged`];
+    /// [`SignatureNote::Nothing`] before any was.
+    #[must_use]
+    pub(crate) const fn staged_note(&self) -> SignatureNote {
+        self.staged_note
+    }
+
+    /// A job standing at `Verified` with `offer`, whose staged set's
+    /// signature reads as `note` — a card test's way to the Ready card's
+    /// sentence without a driver.
+    #[cfg(test)]
+    pub(crate) fn verified_noting_for_test(offer: Offer, note: SignatureNote) -> Self {
+        let mut job = Self::verified_for_test(offer);
+        job.staged_note = note;
+        job
     }
 
     /// **A transaction staged as the `Verified` report leaves it**, for a test of the hand-over
@@ -2208,9 +2378,37 @@ impl<W: Copy + Eq> Job<W> {
         std::mem::take(
             &mut *self
                 .inbox
+                .reports
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         )
+    }
+
+    /// **Wait until a driver has reported**, without applying it — a test's
+    /// way to drive a job with no loop to wake: `true` once the inbox holds a
+    /// report, at once if it already does; `false` once it holds none and no
+    /// poster of it is left to post one — a driver whose worker ended, or
+    /// unwound, without its last word (the 1b+2 review's N14). It reads no
+    /// clock.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn await_reports(&self) -> bool {
+        let mut reports = self
+            .inbox
+            .reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while reports.is_empty() {
+            if self.inbox.posters.load(Ordering::SeqCst) == 0 {
+                return false;
+            }
+            reports = self
+                .inbox
+                .report_posted
+                .wait(reports)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        true
     }
 
     /// **Apply what the drivers reported**, in order — the handler of
@@ -2219,6 +2417,7 @@ impl<W: Copy + Eq> Job<W> {
         let reports = std::mem::take(
             &mut *self
                 .inbox
+                .reports
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
@@ -2245,10 +2444,11 @@ impl<W: Copy + Eq> Job<W> {
                     .staged_slot
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take_if(|(txn, _)| *txn == offer.txn)
-                    .map(|(_, staged)| staged);
-                if staged.is_some() {
-                    self.staged = staged;
+                    .take_if(|(txn, _, _)| *txn == offer.txn)
+                    .map(|(_, staged, note)| (staged, note));
+                if let Some((staged, note)) = staged {
+                    self.staged = Some(staged);
+                    self.staged_note = note;
                 }
                 (State::Verified(offer), Applied::Moved)
             }
@@ -2305,12 +2505,12 @@ impl<W: Copy + Eq> Job<W> {
             }
             (State::Available(offer), Verb::Press) => {
                 let cancelled = Arc::new(AtomicBool::new(false));
-                let post = Poster {
-                    txn: offer.txn,
-                    inbox: Arc::clone(&self.inbox),
-                    staged: Arc::clone(&self.staged_slot),
-                    cancelled: Arc::clone(&cancelled),
-                };
+                let post = Poster::counted(
+                    offer.txn,
+                    Arc::clone(&self.inbox),
+                    Arc::clone(&self.staged_slot),
+                    Arc::clone(&cancelled),
+                );
                 match driver.prepare(&offer, transport, &post) {
                     Ok(()) => {
                         self.last_failure = None;
@@ -2438,7 +2638,7 @@ mod tests {
     use super::{
         Applied, Bytes, Driver, Effect, Evidence, Failure, Fetching, Gathered, Handling, Job, Kind,
         NotEligible, Offer, Pending, Poster, Presenters, Refused, Request, Route, SharedTransport,
-        State, Step, Stop, TABLE, Transport, Unsupported, Verb,
+        SignatureNote, State, Step, Stop, TABLE, Transport, Unsupported, Verb,
     };
     use crate::install_channel::{self, Channel, Manager};
     use crate::update_txn::TxnId;
@@ -2614,11 +2814,14 @@ mod tests {
             threads.spawn(|| {
                 post.post(Step::Staged);
                 assert!(
-                    post.verified(Staged {
-                        home: home.clone(),
-                        journal,
-                        lock,
-                    })
+                    post.verified(
+                        Staged {
+                            home: home.clone(),
+                            journal,
+                            lock,
+                        },
+                        SignatureNote::Nothing,
+                    )
                     .is_ok(),
                     "the job was not cancelled"
                 );
@@ -3524,21 +3727,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// RED (U-18) — **a press fetches exactly two files, by the offer's own
-    /// tag, and never "latest".**
+    /// RED (U-18; 0.4.10 plan row 102 part 1b) — **the offer fetches the
+    /// release statement and its signature by its own tag, and never
+    /// "latest"; the platform's file is asked for by the name it is given,
+    /// by the same tag.**
     ///
-    /// C11: `/releases/download/<tag>/folio-<version>-windows-x64.zip` and
-    /// `SHA256SUMS.txt` (macOS: the versioned `.dmg` and
-    /// `SHA256SUMS-macos.txt`); `<version>` is the tag without `v` and
-    /// `-preview`. "latest" can move under an open offer (R-8).
+    /// C11 and §1.12: `/releases/download/<tag>/RELEASE-STATEMENT.txt` and
+    /// `RELEASE-STATEMENT.txt.sig`, on both platforms; the offer knows the
+    /// platform word the statement lists its file under, not the file's name.
+    /// "latest" can move under an open offer (R-8).
     ///
     /// MUTATION: build the path on `/releases/latest/download` in
-    /// `Offer::requests`.
+    /// `Offer::asset_request` (`plant-102-1b-latest.py`).
     #[test]
-    fn a_press_fetches_exactly_two_files_by_the_offers_own_tag() {
+    fn the_offer_fetches_the_statement_and_its_signature_by_tag() {
         let windows =
             Offer::mint(txn(1), "v0.4.7-preview", HostPlatform::Windows).expect("a release tag");
         assert_eq!(windows.to_version(), "0.4.7");
+        assert_eq!(windows.release_platform(), "windows-x64");
         let paths = windows
             .requests()
             .map(|request| (request.host, request.path));
@@ -3547,20 +3753,36 @@ mod tests {
             [
                 (
                     "github.com",
-                    "/lulu-loopp/folio-terminal/releases/download/v0.4.7-preview/folio-0.4.7-windows-x64.zip".to_owned()
+                    "/lulu-loopp/folio-terminal/releases/download/v0.4.7-preview/RELEASE-STATEMENT.txt".to_owned()
                 ),
                 (
                     "github.com",
-                    "/lulu-loopp/folio-terminal/releases/download/v0.4.7-preview/SHA256SUMS.txt".to_owned()
+                    "/lulu-loopp/folio-terminal/releases/download/v0.4.7-preview/RELEASE-STATEMENT.txt.sig".to_owned()
                 ),
             ]
         );
+        let asset = windows.asset_request("folio-0.4.7-windows-x64.zip");
+        assert_eq!(
+            (
+                asset.host,
+                asset.path.as_str(),
+                asset.tag.as_str(),
+                asset.file_name.as_str()
+            ),
+            (
+                "github.com",
+                "/lulu-loopp/folio-terminal/releases/download/v0.4.7-preview/folio-0.4.7-windows-x64.zip",
+                "v0.4.7-preview",
+                "folio-0.4.7-windows-x64.zip"
+            )
+        );
         let mac = Offer::mint(txn(1), "v0.4.7", HostPlatform::MacOs).expect("a release tag");
+        assert_eq!(mac.release_platform(), "macos-arm64");
         assert_eq!(
             mac.requests().map(|request| request.file_name),
             [
-                "Folio-0.4.7-macos-arm64.dmg".to_owned(),
-                "SHA256SUMS-macos.txt".to_owned()
+                "RELEASE-STATEMENT.txt".to_owned(),
+                "RELEASE-STATEMENT.txt.sig".to_owned()
             ]
         );
         for tag in ["0.4.7", "v0.4.7-rc.1", "v0.4", "vx.y.z", "v0.4.7+build"] {
@@ -4110,6 +4332,7 @@ mod tests {
                     offer: Offer::mint(tx, "v0.4.9", HostPlatform::Windows).expect("a release"),
                     staged: Box::new(staged),
                     restart_missed,
+                    note: super::SignatureNote::Nothing,
                 }))),
                 check: Box::new(|| {}),
             };
@@ -4145,5 +4368,195 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.10 plan row 102 part 3) — **the `Verified` report hands the
+    /// job what the Ready card says of the staged set's signature**: a set the
+    /// driver read as not signed by our signing service reaches `Verified`
+    /// with that reading, and its card says *Windows may warn about this
+    /// update.* before Restart.
+    ///
+    /// MUTATION: in `Job::apply`'s `Verified` arm, take the staged transaction
+    /// and leave the note (`plant-102-3-verified-drops-the-note.py`).
+    #[test]
+    fn a_verified_report_hands_the_job_its_reading_of_the_signature() {
+        use bt_platform::install_txn::{self, Hold};
+
+        use crate::update_handoff::Staged;
+        use crate::update_txn::{Event, Home, Inventories, Journal, Layout};
+
+        let folder = bt_testpath::temp_path("bt-update-job-signature");
+        let home = Home::at(folder.join(".folio-update"));
+        std::fs::create_dir_all(home.root()).expect("the home");
+        let mut job = available("v0.4.7");
+        let driver = Starting::default();
+        job.answer_verb(Verb::Press, &driver, &Recording::default().shared())
+            .expect("the press is taken");
+        let offer = job.state().offer().cloned().expect("an offer");
+        let post = driver
+            .0
+            .borrow_mut()
+            .take()
+            .expect("the driver kept its poster");
+        let journal = Journal::allocate(
+            offer.txn(),
+            folder.join("rescue.exe").to_string_lossy().into_owned(),
+            Layout::Members(Inventories {
+                old_shipped: Vec::new(),
+                old_present: Vec::new(),
+                new: Vec::new(),
+            }),
+        )
+        .advance(&Event::Prepared)
+        .expect("Allocated → Prepared");
+        let lock = install_txn::try_hold(&home.lock(), Hold::Exclusive)
+            .expect("the lock file opens")
+            .expect("nobody else holds it");
+        post.post(Step::Staged);
+        assert!(
+            post.verified(
+                Staged {
+                    home: home.clone(),
+                    journal,
+                    lock,
+                },
+                SignatureNote::NotOurService,
+            )
+            .is_ok(),
+            "the job was not cancelled"
+        );
+        assert_eq!(job.drain_progress(), 0, "no report is stale");
+        assert!(matches!(job.state(), State::Verified(_)));
+        assert_eq!(job.staged_note(), SignatureNote::NotOurService);
+        assert_eq!(
+            crate::update_card::paint_of(&job)
+                .and_then(|paint| paint.detail)
+                .as_deref(),
+            Some("Windows may warn about this update.")
+        );
+        drop(job);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// RED (0.4.10 plan row 102 part 3) — **a resumed set not signed by our
+    /// signing service keeps both lines on its card**: the launch that resumes
+    /// a staged update whose restart did not happen says so in its heading,
+    /// then the Ready line, then *Windows may warn about this update.* — the
+    /// reading the launch made, handed over with the set.
+    ///
+    /// MUTATION: in `Job::launch_pass`'s `Resumed` arm, leave the note
+    /// (`plant-102-3-resumed-drops-the-note.py`); or let the signature
+    /// sentence replace the detail it follows
+    /// (`plant-102-3-warning-replaces-the-detail.py`).
+    #[test]
+    fn a_resumed_set_not_signed_by_our_service_keeps_both_lines_on_its_card() {
+        let root = bt_testpath::temp_path("bt-update-job-签名");
+        let _ = std::fs::remove_dir_all(&root);
+        let home = crate::update_txn::Home::at(root.join("更新"));
+        std::fs::create_dir_all(home.root()).unwrap();
+        let tx = txn(0x4e);
+        let lock = bt_platform::install_txn::try_hold(
+            &home.lock(),
+            bt_platform::install_txn::Hold::Exclusive,
+        )
+        .unwrap()
+        .expect("the lock is free");
+        let staged = crate::update_handoff::Staged {
+            home: home.clone(),
+            journal: crate::update_txn::Journal::allocate(
+                tx,
+                "rescue".to_owned(),
+                crate::update_txn::Layout::Members(crate::update_txn::Inventories {
+                    old_shipped: vec!["folio.exe".to_owned()],
+                    old_present: Vec::new(),
+                    new: Vec::new(),
+                }),
+            ),
+            lock,
+        };
+        let mut job = job();
+        job.launch = super::Launch::Running {
+            landed: Arc::new(Mutex::new(Some(super::Landed::Resumed {
+                offer: Offer::mint(tx, "v0.4.10", HostPlatform::Windows).expect("a release"),
+                staged: Box::new(staged),
+                restart_missed: true,
+                note: SignatureNote::NotOurService,
+            }))),
+            check: Box::new(|| {}),
+        };
+        let _ = job.consider(
+            gathered("v0.4.10", None, Some(Channel::Ours)),
+            &one_window(),
+            || tx,
+        );
+        let paint = crate::update_card::paint_of(&job).expect("the Ready card");
+        assert_eq!(
+            paint.heading.as_deref(),
+            Some("The restart did not happen.")
+        );
+        assert_eq!(
+            paint.detail.as_deref(),
+            Some("Ready. Running programs will close. Windows may warn about this update.")
+        );
+        drop(job);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (0.4.10 plan row 102, the 1b+2 review's N12) — **the statement and
+    /// its signature are asked for no more than their readers take**: 64 KiB
+    /// and 64 bytes at the door, where a hostile server's answer stops; the
+    /// archive keeps the door's own ceiling.
+    ///
+    /// MUTATION: `requests` asks for both under the door's ceiling
+    /// (`plant-102-n12-door-ceiling.py`).
+    #[test]
+    fn the_statement_and_its_signature_are_asked_for_no_more_than_their_readers_take() {
+        let offer = Offer::mint(txn(0x12), "v0.4.10", HostPlatform::Windows).expect("a release");
+        let [statement, signature] = offer.requests();
+        assert_eq!(
+            (statement.most, signature.most),
+            (64 * 1024, 64),
+            "{statement:?} {signature:?}"
+        );
+        assert_eq!(
+            offer.asset_request("folio-0.4.10-windows-x64.zip").most,
+            bt_platform::https_download::DOWNLOAD_CEILING_LIMIT
+        );
+    }
+
+    /// RED (0.4.10 plan row 102, the 1b+2 review's N14) — **a driver whose
+    /// worker unwinds before its last word leaves no waiter waiting**: the
+    /// worker's poster is dropped by the unwind, no poster of the inbox is
+    /// left, and `await_reports` answers `false` — the test that waits turns
+    /// red instead of hanging until the suite's patience ends it.
+    ///
+    /// MUTATION: `await_reports` waits on an empty inbox whatever the posters
+    /// (`plant-102-n14-waits-for-ever.py`; the run is bounded by its timeout).
+    #[test]
+    fn a_driver_that_unwinds_without_a_last_word_ends_the_wait() {
+        struct Unwinding;
+        impl Driver for Unwinding {
+            fn prepare(
+                &self,
+                _offer: &Offer,
+                _transport: &SharedTransport,
+                post: &Poster,
+            ) -> Result<(), Refused> {
+                let post = post.clone();
+                std::thread::spawn(move || {
+                    let _post = post;
+                    panic!("a Prepare that unwinds before its last report");
+                });
+                Ok(())
+            }
+        }
+        let mut job = available("v0.4.7");
+        job.answer_verb(Verb::Press, &Unwinding, &Recording::default().shared())
+            .expect("the press is taken");
+        assert!(
+            !job.await_reports(),
+            "no report, and no poster left to post one"
+        );
+        assert!(matches!(job.state(), State::Downloading(..)));
     }
 }

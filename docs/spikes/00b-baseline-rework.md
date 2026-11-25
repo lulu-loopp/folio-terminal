@@ -30,7 +30,7 @@
 | resize 变高 | `plan_resize` 不强制定稿；vendor 无 removal fact，不回填历史 | `g1_resize_grow_makes_the_entire_new_grid_addressable` |
 | resize 变矮 | vendor 的既有 resize hook 给出实际 removed set；规则按 blank/nonblank → discard/capture，并都 rebase | `g1_resize_shrink_captures_exactly_nonblank_rows_removed_from_the_top` |
 | resize 抖动 | `plan_resize` 触发 `ResizeEpoch` cooldown，session 在冷却内不调度装饰 | `g1_resize_jitter_does_not_duplicate_captured_rows` |
-| ED3 | `classify(ClearHistory)` → clear history + staging；session 走共享 deletion pipeline | `g1_ed3_deletes_history_and_records_tombstones`、G3 ED3 anchor 降级 |
+| ED3 | `classify(ClearHistory)` → clear history + staging；session 走共享 deletion pipeline | `g1_ed3_deletes_every_history_line`、G3 ED3 anchor 降级 |
 | 配额淘汰 | `TranscriptStore` 是唯一配额权威；session 取得 eviction ids 后调用与 ED3 相同的 `delete_history` 管线 | `g1_frozen_quota_evicts_through_the_document_pipeline`、G3 successor 降级 |
 | 进入 alt screen | `classify(PrimaryParked)` → park；alt removal facts仍被规则 ignore | `g1_alternate_screen_parks_detection_and_restores_fresh_work`、`g1_alternate_screen_never_enters_primary_history` |
 | 退出 alt screen | `classify(PrimaryRestored)` → generation 更新与任务恢复/作废 | 同上 |

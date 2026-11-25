@@ -481,20 +481,20 @@ impl Drop for Scratch {
 type Files = Vec<(String, Vec<u8>)>;
 
 /// **One installation**: the running 0.4.6 build in `install`, the staged
-/// 0.4.7 set in `set\`, the rescue copy, the journal at `Handoff`, a data
-/// directory, and the registry the entrance goes into.
+/// 0.4.7 set in `set\` with the release statement it was prepared from kept
+/// beside it (0.4.10 plan row 102, signed by the live test key), the rescue
+/// copy, the journal at `Handoff`, a data directory, and the registry the
+/// entrance goes into.
 ///
 /// Two of them: the signed one ([`Install::new`], Windows), whose programs a
-/// test starts and whose set the road checks under the test root, and the
-/// same layout of plain bytes ([`Install::unsigned`], every host), for a test
-/// whose road reaches no signature, starts none of its programs and holds
-/// none of its files.
+/// test starts, and the same layout of plain bytes ([`Install::unsigned`],
+/// every host), for a test that starts none of its programs and holds none of
+/// its files. The road verifies both sets the same way: by the kept
+/// statement, with the test keys.
 struct Install {
     /// Ended before the folder is removed (fields drop in this order).
     children: Children,
     _scratch: Scratch,
-    /// The policy the road checks the staged set under.
-    policy: Policy,
     installed: PathBuf,
     rescue: PathBuf,
     home: Home,
@@ -562,6 +562,7 @@ impl LaidOut {
         let set = home.members_folder(txn, Place::Set).unwrap();
         std::fs::create_dir_all(&set).unwrap();
         let new = write(&set, (OFFERED, "0.4.7", "the new build"));
+        keep_the_statement_of(&home, txn, &new);
         let rescue = home
             .rescue_copy(txn, std::ffi::OsStr::new("folio.exe"))
             .unwrap();
@@ -599,6 +600,34 @@ impl LaidOut {
     }
 }
 
+/// **The release statement `new` was prepared from, kept beside `set\`**
+/// (`update_prepare::kept_statement`): `v0.4.7`, its members `new`'s, signed
+/// by the live test key.
+fn keep_the_statement_of(home: &Home, txn: TxnId, new: &Files) {
+    use crate::update_prepare::test_statements::{Signer, signed_statement, statement_of};
+    let members = new
+        .iter()
+        .map(|(name, bytes)| bt_winres::release_manifest::Member {
+            name: name.clone(),
+            sha256: bt_winres::digest::hex(&sha256(bytes)),
+            size: bytes.len() as u64,
+        })
+        .collect();
+    let statement = statement_of(
+        "v0.4.7",
+        (
+            bt_winres::release_statement::WINDOWS_X64,
+            "folio-0.4.7-windows-x64.zip",
+            b"the archive the set was expanded from",
+        ),
+        members,
+    );
+    let (text, signature) = signed_statement(&statement, Signer::Live);
+    let [at_text, at_signature] = crate::update_prepare::kept_statement(home, txn);
+    std::fs::write(at_text, text).unwrap();
+    std::fs::write(at_signature, signature).unwrap();
+}
+
 impl Install {
     /// **The signed installation** (Windows): both builds written by U-20's
     /// release writer and signed by U-15's test root, their `folio.exe` a
@@ -621,7 +650,6 @@ impl Install {
         Self {
             children: Children::default(),
             _scratch: laid.scratch,
-            policy: ca.policy(),
             installed: laid.installed,
             rescue: laid.rescue,
             home: laid.home,
@@ -640,7 +668,7 @@ impl Install {
 
     /// **The same installation of plain bytes** (every host; 0.4.10 plan row
     /// 12): each of [`PLAIN_MEMBERS`] holds a line naming itself and its
-    /// build, and the road checks the set under the system's policy. Nothing
+    /// build, and the road checks the set by its kept statement. Nothing
     /// in it can be started, so a test over it starts none of its programs.
     /// It takes its fixture turn first, as the signed one does: every test of
     /// the module waits for one of the same turns, whatever its installation
@@ -660,7 +688,6 @@ impl Install {
         Self {
             children: Children::default(),
             _scratch: laid.scratch,
-            policy: Policy::System,
             installed: laid.installed,
             rescue: laid.rescue,
             home: laid.home,
@@ -719,7 +746,10 @@ impl Install {
             installed: self.installed.clone(),
             rescue: self.rescue.clone(),
             data: self.data.clone(),
-            policy: self.policy.clone(),
+            vouching: crate::update_prepare::Vouching::under_test_keys(
+                self.data
+                    .join(crate::update_prepare::RELEASE_KEYS_FILE_NAME),
+            ),
             channel: Some(Channel::Ours),
             limits,
             trial_clock: Arc::new(WallClock),
@@ -1972,8 +2002,8 @@ fn a_non_file_at_an_old_name_refuses_before_any_move() {
 
 /// RED (U-23) — **a staged set changed after the Prepare is refused before
 /// the entrance is written**: `Unverified`, `Abandoned`, nothing armed and
-/// nothing moved (U-20's decision 1: the applier revalidates, reading the
-/// version from the staged `folio.exe` itself).
+/// nothing moved (U-20's decision 1: the applier revalidates; 0.4.10 plan
+/// row 102: by the kept release statement).
 ///
 /// MUTATION: in `at_handoff`, skip `staged_as_verified`.
 #[cfg(windows)]
@@ -1988,6 +2018,48 @@ fn a_changed_set_is_refused_before_the_entrance() {
         install.world(Trial::Answers),
     );
     assert_eq!(ended, Ended::Abandoned, "{:?}", world.said);
+    assert_eq!(install.on_disk().body.phase, Phase::Abandoned);
+    assert!(!install.registry.holds(install.txn));
+    assert!(install.holds(Place::Install, &install.old));
+    assert!(world.launched.is_empty());
+}
+
+/// RED (0.4.10 plan row 102 part 1b) — **the applier re-verifies the kept
+/// statement before the entrance is written**: a set whose statement was
+/// replaced by one no embedded key signed is `Unverified`, `Abandoned`,
+/// nothing armed and nothing moved — the applier's own reason naming the
+/// refused statement.
+///
+/// MUTATION: in `at_handoff`, take any answer of `staged_as_verified` as a
+/// pass (`plant-102-1b-applier-unverified.py`).
+#[cfg(windows)]
+#[test]
+fn a_set_whose_kept_statement_does_not_verify_is_refused_before_the_entrance() {
+    let install = Install::unsigned("unvouched");
+    let [text, signature] = crate::update_prepare::kept_statement(&install.home, install.txn);
+    let read =
+        bt_winres::release_statement::Statement::read_statement(&std::fs::read(&text).unwrap())
+            .unwrap();
+    let (forged, forged_signature) = crate::update_prepare::test_statements::signed_statement(
+        &read,
+        crate::update_prepare::test_statements::Signer::Foreign,
+    );
+    std::fs::write(&text, forged).unwrap();
+    std::fs::write(&signature, forged_signature).unwrap();
+    let (ended, world) = applied(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Answers),
+    );
+    assert_eq!(ended, Ended::Abandoned, "{:?}", world.said);
+    assert!(
+        world
+            .said
+            .iter()
+            .any(|line| line.contains("StatementRefused")),
+        "{:?}",
+        world.said
+    );
     assert_eq!(install.on_disk().body.phase, Phase::Abandoned);
     assert!(!install.registry.holds(install.txn));
     assert!(install.holds(Place::Install, &install.old));
@@ -6867,7 +6939,7 @@ fn rescue_part(root: &Path) {
         installed: plan.installed.clone(),
         rescue: plan.rescue.clone(),
         data: plan.data.clone(),
-        policy: Policy::System,
+        vouching: crate::update_prepare::Vouching::in_data_folder(&plan.data),
         channel: None,
         limits: Limits {
             old_within: Duration::from_secs(10),

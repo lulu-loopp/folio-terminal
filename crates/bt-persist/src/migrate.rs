@@ -78,6 +78,8 @@ pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (37, migrate_settings_v37_to_v38),
     (38, migrate_settings_v38_to_v39),
     (39, migrate_settings_v39_to_v40),
+    (40, migrate_settings_v40_to_v41),
+    (41, migrate_settings_v41_to_v42),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -903,6 +905,41 @@ fn migrate_settings_v39_to_v40(mut value: Value) -> Value {
     value
 }
 
+/// v40 -> v41: `close_keeps_running`, the switch over what closing the run's last ordinary window
+/// does (0.4.10 plan row 87, part 87a), written **on**.
+///
+/// The owner's ruling and not a behaviour carried forward (2026-11-14, R2: default on, written
+/// into existing documents): every build before this one ended the run with that close, and the
+/// switch is what keeps the old road a choice. Written rather than left to the reader's default,
+/// as v30 wrote `quake_dismiss_on_blur` (§7.54c ①): the row is born now, so no reader has chosen.
+/// One key, [`migrate_settings_v39_to_v40`]'s shape; no sibling is read.
+fn migrate_settings_v40_to_v41(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(41));
+        object.insert("close_keeps_running".to_owned(), Value::Bool(true));
+    }
+    value
+}
+
+/// v41 -> v42: `first_hide_toast`, the receipt that the first put-away has been told on this
+/// machine (0.4.10 plan row 87, part 87d; ruling R12), written **`NotShown`**.
+///
+/// Every reader of a v41 file meets the put-away for the first time with this build, so every one
+/// of them is owed the sentence once. Written rather than left to the reader's default, as v39
+/// wrote `web_pages_used`: the receipt's state is the step's statement, not an absence. One key,
+/// [`migrate_settings_v38_to_v39`]'s shape; no sibling is read.
+fn migrate_settings_v41_to_v42(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(42));
+        object.insert(
+            "first_hide_toast".to_owned(),
+            serde_json::to_value(crate::FirstHideToastV1::NotShown)
+                .expect("a unit variant serialises"),
+        );
+    }
+    value
+}
+
 /// v2 records the keyboard dialect that wrote the chords. A v1 file cannot
 /// supply that fact, so it migrates explicitly to `unknown` and keeps the old
 /// literal-modifier behaviour.
@@ -938,6 +975,9 @@ pub const PINS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 /// rather than misread, which for this document means one extra question asked
 /// of the releases page and nothing else.
 pub const UPDATE_CHECK_MIGRATIONS: &[(u32, MigrationStep)] = &[(1, migrate_update_check_v1_to_v2)];
+
+/// Migration table for `release-keys.json` (0.4.10 plan row 102). Empty: v1 is the first version.
+pub const RELEASE_KEYS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 
 /// v1 -> v2: the version the reader skipped, written **`null`**.
 ///
@@ -1866,6 +1906,43 @@ fn keep_rejected(path: &Path, bytes: &[u8]) -> Option<PathBuf> {
     Some(kept)
 }
 
+/// **Keep `bytes` beside `path` as a `.rejected-` copy of it**, named as a refused read's copy is
+/// ([`rejected_sibling`]), and answer where they went — the write a newer build's Bring back
+/// replaces (0.4.10 plan row 68d, R7), kept by the one namer so the carry pass counts it among
+/// the document's copies. `None` when no name was free or the write failed.
+///
+/// **On the disk before it answers** (review N5): unlike a refused read's copy, this one is the
+/// only place the older build's write will be once the Bring back lands, so the copy is made a
+/// new file (never over another), written whole and flushed (`sync_all`) before `Some`. A copy
+/// that could not be written whole is removed again — it is this call's own new file — and the
+/// answer is `None`, which writes nothing over the original. On the storage worker, whose context
+/// it takes: the flush is a wait on the disk (a `worker-door-body` of the waits registry).
+#[must_use]
+pub fn keep_beside_as_rejected(worker: &WorkerCtx, path: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    use std::io::Write;
+    let _ = worker;
+    let kept = rejected_sibling(path, SystemTime::now())?;
+    keep_as_new_file(kept, |file: &mut std::fs::File| {
+        file.write_all(bytes).and_then(|()| file.sync_all())
+    })
+}
+
+/// [`keep_beside_as_rejected`]'s copy at the name it chose: made a new file — a name already
+/// taken (another copy made since the namer looked) is refused, never written over — then
+/// `write` fills it. A `write` that fails removes this call's own new file and nothing else.
+fn keep_as_new_file(
+    kept: PathBuf,
+    write: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> Option<PathBuf> {
+    let mut file = std::fs::File::create_new(&kept).ok()?;
+    if write(&mut file).is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(&kept);
+        return None;
+    }
+    Some(kept)
+}
+
 /// The same keeping for a document too large to have been read (review row
 /// R4-9), which is the one case where the bytes are not in hand.
 ///
@@ -1897,7 +1974,7 @@ fn keep_oversized(path: &Path) -> Option<PathBuf> {
 fn rejected_sibling(path: &Path, at: SystemTime) -> Option<PathBuf> {
     let file_name = path.file_name()?;
     let stamp = utc_stamp(at);
-    for attempt in 0..64u32 {
+    for attempt in 0..REJECTED_SIBLINGS_PER_SECOND {
         let mut name = file_name.to_os_string();
         if attempt == 0 {
             name.push(format!(".rejected-{stamp}"));
@@ -1910,6 +1987,91 @@ fn rejected_sibling(path: &Path, at: SystemTime) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// **How many copies of one document [`rejected_sibling`] names within one second**: the first,
+/// then `-1` to `-63`.
+const REJECTED_SIBLINGS_PER_SECOND: u32 = 64;
+
+/// **Where a kept copy stands among its document's copies** (0.4.10 plan row 68f): the UTC
+/// second [`rejected_sibling`] named it by, then the count a later copy of the same second took
+/// (`0` for the first). Ordered oldest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RejectedStamp {
+    /// `YYYYMMDDHHMMSS` read as one number, which orders as the time it names.
+    pub second: u64,
+    /// The `-<n>` after the second, or `0`.
+    pub count: u32,
+}
+
+/// **Whether `file_name` is a copy this crate keeps of `document`, and where it stands**
+/// (0.4.10 plan row 68f): exactly `<document>.rejected-<YYYYMMDD-HHMMSS>` or `…-<n>`, `n` from 1
+/// to 63 written with no leading zero, as [`rejected_sibling`] names it, the stamp a real date and
+/// time. `None` for every other name, however close: the namer and this reading of its names are
+/// one rule, in one place, so a copy is counted only when this crate could have made it.
+#[must_use]
+pub fn rejected_stamp_of(file_name: &str, document: &str) -> Option<RejectedStamp> {
+    let rest = file_name
+        .strip_prefix(document)?
+        .strip_prefix(".rejected-")?
+        .as_bytes();
+    if rest.len() < 15 || rest[8] != b'-' {
+        return None;
+    }
+    let digits = |from: usize, to: usize| {
+        rest[from..to].iter().try_fold(0u64, |number, byte| {
+            byte.is_ascii_digit()
+                .then(|| number * 10 + u64::from(byte - b'0'))
+        })
+    };
+    let (date, time) = (digits(0, 8)?, digits(9, 15)?);
+    let (year, month, day) = (date / 10_000, date / 100 % 100, date % 100);
+    let (hour, minute, second) = (time / 10_000, time / 100 % 100, time % 100);
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day == 0 || day > days_in_month || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let count = match &rest[15..] {
+        [] => 0,
+        [b'-', b'1'..=b'9', tail @ ..] if tail.len() <= 1 => {
+            let count = u32::try_from(digits(16, rest.len())?).ok()?;
+            if count >= REJECTED_SIBLINGS_PER_SECOND {
+                return None;
+            }
+            count
+        }
+        _ => return None,
+    };
+    Some(RejectedStamp {
+        second: date * 1_000_000 + time,
+        count,
+    })
+}
+
+/// **The `schema_version` a document's bytes claim**, read from the version envelope alone
+/// (0.4.10 plan row 68f): `None` when the bytes are not a JSON object with one. Nothing else in
+/// them is read, so the answer is the same for a version this build cannot parse.
+#[must_use]
+pub fn schema_version_of(bytes: &[u8]) -> Option<u32> {
+    serde_json::from_slice::<VersionEnvelope>(bytes)
+        .ok()
+        .map(|envelope| envelope.schema_version)
+}
+
+/// **A kept copy's bytes, read as this crate reads a document** — through the one bounded read
+/// ([`read_bounded`], at [`MAX_DOCUMENT_BYTES`]) — or `None` when they were not obtained: the
+/// file is gone, will not open, or is over the ceiling (an oversized document's copy is the file
+/// itself, renamed, [`keep_oversized`]).
+#[must_use]
+pub fn read_kept_copy(path: &Path) -> Option<Vec<u8>> {
+    read_bounded(path, MAX_DOCUMENT_BYTES).ok()
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC, from a wall clock.
@@ -3220,6 +3382,138 @@ mod tests {
         }
     }
 
+    /// RED (0.4.10 plan row 87, part 87a, T12) — **the v40 -> v41 step writes
+    /// `close_keeps_running` on and leaves every sibling exactly as it found it, and the three
+    /// places a default lives agree on it.** The owner ruled the switch on and written into
+    /// existing documents (2026-11-14, R2); a step that only moved the version would leave every
+    /// upgrading reader with a key their file does not say, and a default that differed between
+    /// the step, `SettingsV1::default` and a document that omits the line would make the answer
+    /// depend on which road the document came by.
+    ///
+    /// MUTATION (P12): drop the `close_keeps_running` line from `migrate_settings_v40_to_v41` —
+    /// the first assertion goes red.
+    #[test]
+    fn migrate_settings_v40_to_v41_writes_the_close_switch_on_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 40,
+            "theme_mode": "Dark",
+            "resume_agents": false,
+            "quake_dismiss_on_blur": false,
+            "turn_end_notification": false
+        });
+        let migrated = migrate_value(before.clone(), 40, 41, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(
+            migrated["close_keeps_running"],
+            json!(true),
+            "the owner ruled the switch on, written into the documents that exist"
+        );
+        assert_eq!(migrated["schema_version"], json!(41));
+        let (before, after) = (
+            before.as_object().expect("an object"),
+            migrated.as_object().expect("an object"),
+        );
+        assert_eq!(after.len(), before.len() + 1, "exactly one key is added");
+        for (key, value) in before {
+            if key != "schema_version" {
+                assert_eq!(&after[key], value, "`{key}` was rewritten by the step");
+            }
+        }
+
+        // And the round trip's defaults say the same: a whole v40 document the step carries reads
+        // as on, the product's own default is on, and a v41 document that omits the line means on.
+        let mut whole = serde_json::to_value(crate::SettingsV1::default())
+            .expect("a settings document serialises");
+        let fields = whole
+            .as_object_mut()
+            .expect("a settings document is an object");
+        fields.remove("close_keeps_running");
+        fields.insert("schema_version".to_owned(), json!(40));
+        let carried = migrate_value(whole, 40, 41, SETTINGS_MIGRATIONS).unwrap();
+        let read: crate::SettingsV1 =
+            serde_json::from_value(carried).expect("the migrated document reads");
+        assert!(read.close_keeps_running);
+        assert!(crate::SettingsV1::default().close_keeps_running);
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            close_keeps_running: false,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("close_keeps_running");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert!(absent.close_keeps_running);
+    }
+
+    /// RED (0.4.10 plan row 87, part 87d, T21) — **the v41 -> v42 step writes `first_hide_toast` as
+    /// `NotShown` and leaves every sibling exactly as it found it, and the three places a default
+    /// lives agree on it.** The key is a receipt (ruling R12): every reader of a v41 file meets the
+    /// put-away for the first time with this build, so the step states that the sentence is owed
+    /// rather than leaving it to a key the file does not have.
+    ///
+    /// MUTATION (87d-P37): drop the `first_hide_toast` insert from `migrate_settings_v41_to_v42` —
+    /// the first assertion goes red.
+    #[test]
+    fn migrate_settings_v41_to_v42_writes_the_receipt_not_shown_and_leaves_every_sibling_alone() {
+        let before = json!({
+            "schema_version": 41,
+            "theme_mode": "Dark",
+            "close_keeps_running": false,
+            "first_run_card": "Shown",
+            "web_pages_used": "Used",
+            "terminal_notifications": false
+        });
+        let migrated = migrate_value(before.clone(), 41, 42, SETTINGS_MIGRATIONS).unwrap();
+        assert_eq!(
+            migrated["first_hide_toast"],
+            json!("NotShown"),
+            "every reader of a v41 file is owed the sentence once"
+        );
+        assert_eq!(migrated["schema_version"], json!(42));
+        let (before, after) = (
+            before.as_object().expect("an object"),
+            migrated.as_object().expect("an object"),
+        );
+        assert_eq!(after.len(), before.len() + 1, "exactly one key is added");
+        for (key, value) in before {
+            if key != "schema_version" {
+                assert_eq!(&after[key], value, "`{key}` was rewritten by the step");
+            }
+        }
+
+        // And the round trip's defaults say the same: a whole v41 document the step carries reads
+        // as owed, the product's own default is owed, and a v42 document that omits the line is.
+        let mut whole = serde_json::to_value(crate::SettingsV1::default())
+            .expect("a settings document serialises");
+        let fields = whole
+            .as_object_mut()
+            .expect("a settings document is an object");
+        fields.remove("first_hide_toast");
+        fields.insert("schema_version".to_owned(), json!(41));
+        let carried = migrate_value(whole, 41, 42, SETTINGS_MIGRATIONS).unwrap();
+        let read: crate::SettingsV1 =
+            serde_json::from_value(carried).expect("the migrated document reads");
+        assert_eq!(read.first_hide_toast, crate::FirstHideToastV1::NotShown);
+        assert_eq!(
+            crate::SettingsV1::default().first_hide_toast,
+            crate::FirstHideToastV1::NotShown
+        );
+        let mut written = serde_json::to_value(crate::SettingsV1 {
+            first_hide_toast: crate::FirstHideToastV1::Shown,
+            ..crate::SettingsV1::default()
+        })
+        .expect("a settings document serialises");
+        written
+            .as_object_mut()
+            .expect("a settings document is an object")
+            .remove("first_hide_toast");
+        let absent: crate::SettingsV1 =
+            serde_json::from_value(written).expect("this key has a default");
+        assert_eq!(absent.first_hide_toast, crate::FirstHideToastV1::NotShown);
+    }
+
     /// The v15 -> v16 session step takes the number and nothing else: no older key holds an agent.
     #[test]
     fn migrate_session_v15_to_v16_takes_the_number_and_invents_no_agent() {
@@ -3603,6 +3897,62 @@ mod tests {
         dir
     }
 
+    /// RED (0.4.10 plan row 68d, review N5; re-review F5) — **the Bring back's keep never writes
+    /// over an existing copy**: a name already taken is refused and the file there is left as it
+    /// was, `write` never called; a `write` that fails removes the keep's own new file and only
+    /// that; and on a worker the keep puts the bytes in a new copy beside the file, the file
+    /// untouched.
+    ///
+    /// MUTATION: the copy is made with `File::create`, which writes over a taken name
+    /// (`plant-68d-keep-overwrites.py`).
+    #[test]
+    fn the_bring_backs_keep_never_writes_over_an_existing_copy() {
+        let dir = unique_dir("keep-new-file");
+        let taken = write_fixture(
+            &dir,
+            "settings.json.rejected-20261115-000001",
+            "an older copy",
+        );
+        let mut wrote = false;
+        let kept = keep_as_new_file(taken.clone(), |_| {
+            wrote = true;
+            Ok(())
+        });
+        assert_eq!(kept, None, "a taken name is refused");
+        assert!(!wrote, "and nothing is written to it");
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "an older copy");
+
+        let fresh = dir.join("settings.json.rejected-20261115-000002");
+        let kept = keep_as_new_file(fresh.clone(), |_| Err(io::Error::other("the disk is full")));
+        assert_eq!(kept, None, "a failed write keeps nothing");
+        assert!(!fresh.exists(), "its own new file is removed");
+        assert_eq!(
+            std::fs::read_to_string(&taken).unwrap(),
+            "an older copy",
+            "and no other file"
+        );
+
+        let file = write_fixture(&dir, "settings.json", "the older build's write");
+        let on_worker = file.clone();
+        let kept = bt_platform::spawn_at_priority(
+            "bt-persist-keep-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| keep_beside_as_rejected(worker, &on_worker, b"the older build's write"),
+        )
+        .expect("the thread door starts a thread")
+        .join()
+        .expect("the keep returns")
+        .expect("a copy is kept");
+        assert_ne!(kept, taken, "beside the copies already there");
+        assert_eq!(std::fs::read(&kept).unwrap(), b"the older build's write");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "the older build's write",
+            "the file itself untouched"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn missing_file_is_silent_default() {
         let dir = unique_dir("missing");
@@ -3966,4 +4316,91 @@ mod tests {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
     }
+
+    /// RED (0.4.10 plan row 68f) — **a kept copy's name is read exactly as the namer writes it**:
+    /// every name [`rejected_sibling`] gives within one second is read back, in the order it gave
+    /// them, and every name it could not have given is not a copy — another document's, a
+    /// missing or extra field, a count past the namer's or with a leading zero, a date or a time
+    /// that does not exist.
+    ///
+    /// MUTATION: the stamp's date and time are not checked
+    /// (`plant-68f-any-name-counted.py`, with the bt-app half).
+    #[test]
+    fn a_kept_copys_name_is_read_exactly_as_the_namer_writes_it() {
+        let dir = unique_dir("kept-copy-names");
+        let path = dir.join("settings.json");
+        // 2026-09-08T01:02:03Z.
+        let at = UNIX_EPOCH + std::time::Duration::from_secs(1_788_829_323);
+        let mut stamps = Vec::new();
+        for _ in 0..REJECTED_SIBLINGS_PER_SECOND {
+            let named = rejected_sibling(&path, at).expect("a name is free");
+            std::fs::write(&named, b"{}").unwrap();
+            let name = named.file_name().unwrap().to_str().unwrap().to_owned();
+            stamps.push(rejected_stamp_of(&name, "settings.json").expect(&name));
+        }
+        assert_eq!(rejected_sibling(&path, at), None, "the namer's last name");
+        assert!(
+            stamps.windows(2).all(|pair| pair[0] < pair[1]),
+            "{stamps:?}"
+        );
+        assert_eq!(
+            stamps[0],
+            RejectedStamp {
+                second: 20_260_908_010_203,
+                count: 0
+            }
+        );
+        assert_eq!(stamps[63].count, 63);
+        let later = rejected_stamp_of("settings.json.rejected-20260908-010204", "settings.json");
+        assert!(
+            later > Some(stamps[63]),
+            "a later second is newer than any count"
+        );
+        assert_eq!(
+            rejected_stamp_of("settings.json.rejected-20240229-235959", "settings.json"),
+            Some(RejectedStamp {
+                second: 20_240_229_235_959,
+                count: 0
+            }),
+            "a leap day"
+        );
+        for name in [
+            "settings.json",
+            "settings.json.rejected-",
+            "session.json.rejected-20260908-010203",
+            "my-settings.json.rejected-20260908-010203",
+            "settings.json.displaced-20260908-010203",
+            "settings.json.rejected-20260908-01020",
+            "settings.json.rejected-2026090-8010203",
+            "settings.json.rejected-20260908_010203",
+            "settings.json.rejected-20260908-010203-",
+            "settings.json.rejected-20260908-010203-0",
+            "settings.json.rejected-20260908-010203-01",
+            "settings.json.rejected-20260908-010203-64",
+            "settings.json.rejected-20260908-010203-100",
+            "settings.json.rejected-20260908-010203.bak",
+            "settings.json.rejected-20260908-010203-mine",
+            "settings.json.rejected-20251301-010203",
+            "settings.json.rejected-20260931-010203",
+            "settings.json.rejected-20250229-010203",
+            "settings.json.rejected-20260900-010203",
+            "settings.json.rejected-20260908-240000",
+            "settings.json.rejected-20260908-016003",
+            "settings.json.rejected-20260908-010260",
+            "settings.json.rejected-2026090８-010203",
+        ] {
+            assert_eq!(
+                rejected_stamp_of(name, "settings.json"),
+                None,
+                "{name} is not a copy of settings.json the namer made"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
+
+// The key sets of the documents this crate reads, pinned per version against
+// `docs/plans/DOCUMENT-KEYS.tsv` (0.4.10 plan row 68d).
+#[cfg(test)]
+#[path = "document_keys_tests.rs"]
+mod document_keys_tests;

@@ -60,7 +60,10 @@ use crate::{
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     palette::TerminalPalette,
-    scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
+    scheduling::{
+        EnqueueOutcome, PARSE_QUANTUM, RESIZE_STAGING_BUDGET_CELLS, ResizeEpoch, WORKER_QUEUE_CAP,
+        WorkerScheduler,
+    },
 };
 
 pub const SPIKE_CELL_HEIGHT_SUBPIXELS: NonZeroI64 = NonZeroI64::new(18 * SUBPIXELS_PER_PX).unwrap();
@@ -1138,6 +1141,19 @@ pub enum SessionError {
     ResizeCandidateMismatch { vendor: usize, staging: usize },
 }
 
+/// **Which door closed a resize transaction** (0.4.10 plan row 108), named in its
+/// [`ResizeTraceKind::TransactionEnd`] so a `BT_RESIZE_TRACE` log says why it closed when it did.
+/// Every door opens only once the child has been told the size the transaction ends at.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResizeSettleReason {
+    /// The child's output went quiet for `RESIZE_IDLE_AFTER_OUTPUT`.
+    OutputQuiet,
+    /// [`crate::RESIZE_SETTLE_BOUND`] passed since the child was told, its output still going.
+    TimeBound,
+    /// The tail grew by [`crate::RESIZE_STAGING_BUDGET_CELLS`] since the child was told.
+    StagingBudget,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResizeTraceRowOrigin {
     NormalScroll,
@@ -1206,7 +1222,9 @@ pub enum ResizeTraceKind {
         cursor_column: u32,
         cursor_visible: bool,
     },
-    TransactionEnd,
+    TransactionEnd {
+        reason: ResizeSettleReason,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1502,6 +1520,12 @@ pub struct DualPlaneSession {
     decorations: BTreeMap<TranscriptId, DecorationRecord>,
     scheduler: WorkerScheduler,
     resize_epoch: ResizeEpoch,
+    /// The cells of the open transaction's tail, as its last stage handed them to the
+    /// transcript's resize staging. 0 outside a transaction.
+    resize_tail_cells: usize,
+    /// [`Self::resize_tail_cells`] as it stood when the child was last told a size: what the
+    /// reflow itself pushed off, which the staging budget does not count.
+    resize_tail_cells_at_request: usize,
     resize_trace_transaction: u64,
     resize_trace_started: Option<Instant>,
     resize_trace_next_ordinal: u64,
@@ -2264,6 +2288,8 @@ impl DualPlaneSession {
             decorations: BTreeMap::new(),
             scheduler: WorkerScheduler::default(),
             resize_epoch: ResizeEpoch::default(),
+            resize_tail_cells: 0,
+            resize_tail_cells_at_request: 0,
             resize_trace_transaction: 0,
             resize_trace_started: None,
             resize_trace_next_ordinal: 0,
@@ -4950,6 +4976,7 @@ impl DualPlaneSession {
         );
         if reconciled {
             self.stage_resize_history();
+            self.resize_tail_cells_at_request = self.resize_tail_cells;
             self.reseat_anchors_after_reflow(reflow);
             self.retire_marks_with_stale_anchors();
             // The console host's reconcile is the second reflow of a resize transaction, and it ends
@@ -4959,17 +4986,28 @@ impl DualPlaneSession {
         reconciled
     }
 
-    /// Finish only after both resize and output have been silent for their configured intervals.
+    /// Finish a resize transaction once the child has been told its size and one of the three
+    /// doors of [`ResizeSettleReason`] is open: its output quiet, [`crate::RESIZE_SETTLE_BOUND`]
+    /// since it was told, or [`crate::RESIZE_STAGING_BUDGET_CELLS`] staged since then.
     /// Returns true when this call closed a resize transaction.
+    ///
+    /// **Settling while the child is still writing reflows nothing** (0.4.10 plan row 108). The
+    /// reflow a person sees happened when the child was told: `settle_resize_transaction`
+    /// installed the canonical branch at the final size then. What closes here is the tail's
+    /// ownership: the staged rows are committed to history in order, the grid's transaction and
+    /// the canonical fork end, the history quota applies, and formulas are scanned for again.
+    /// A reaction of the child's that arrives after it is ordinary output, as it is after a pause.
     pub fn finish_resize_if_quiescent(
         &mut self,
         observed_at: Instant,
     ) -> Result<bool, SessionError> {
-        if !self.resize_epoch.is_quiescent_at(observed_at) {
+        let Some(reason) = self.resize_settle_reason(observed_at) else {
             return Ok(false);
-        }
+        };
         self.harvest_resize_transaction(observed_at)?;
-        self.trace_resize_event(observed_at, ResizeTraceKind::TransactionEnd);
+        self.resize_tail_cells = 0;
+        self.resize_tail_cells_at_request = 0;
+        self.trace_resize_event(observed_at, ResizeTraceKind::TransactionEnd { reason });
         // Retain a short post-transaction window so a real wheel-up oracle is represented without
         // tracing every unrelated frame for the remainder of the session.
         self.resize_trace_post_end_frames_remaining = Some(16);
@@ -4991,6 +5029,25 @@ impl DualPlaneSession {
         }
         self.schedule_existing_artifacts();
         Ok(true)
+    }
+
+    /// Which door, if any, lets the open transaction settle at `now`: the first open one, in the
+    /// order of [`ResizeSettleReason`].
+    fn resize_settle_reason(&self, now: Instant) -> Option<ResizeSettleReason> {
+        if self.resize_epoch.is_quiescent_at(now) {
+            Some(ResizeSettleReason::OutputQuiet)
+        } else if self.resize_epoch.settle_bound_reached_at(now) {
+            Some(ResizeSettleReason::TimeBound)
+        } else if self.resize_epoch.child_told()
+            && self
+                .resize_tail_cells
+                .saturating_sub(self.resize_tail_cells_at_request)
+                >= RESIZE_STAGING_BUDGET_CELLS
+        {
+            Some(ResizeSettleReason::StagingBudget)
+        } else {
+            None
+        }
     }
 
     pub fn resize_trace(&self) -> &[ResizeTraceEvent] {
@@ -11490,7 +11547,14 @@ impl DualPlaneSession {
             }
         }
 
-        for (start, record) in &self.decorations {
+        // **The records of the lines this frame draws, not of every line there is.** Each loop
+        // below finds its record's line on the frame (`frame_row_for_history`,
+        // `frozen_fragment_cells`) and passes over one it does not find, so a walk of all of
+        // `decorations` was a walk of every frozen line's record on every frame: about 4 ms a
+        // frame at a full 100 000-line history, for the two dozen lines on screen (0.4.10 plan
+        // row 107, R9).
+        let on_frame = frame_history_ids(frame);
+        for (start, record) in self.decorations.range(on_frame) {
             if !record.show_source {
                 continue;
             }
@@ -11663,7 +11727,7 @@ impl DualPlaneSession {
             });
         }
 
-        for (start, record) in &self.decorations {
+        for (start, record) in self.decorations.range(on_frame) {
             let Some(span) = record
                 .span
                 .as_ref()
@@ -11865,7 +11929,7 @@ impl DualPlaneSession {
             }
         }
 
-        for (start, record) in &self.decorations {
+        for (start, record) in self.decorations.range(on_frame) {
             let Some(reason) = record.failure_reason.as_ref() else {
                 continue;
             };
@@ -12104,6 +12168,7 @@ impl DualPlaneSession {
     /// the sole presented owner, so viewport scroll, selection, and copy all see the same rows.
     fn stage_resize_history(&mut self) {
         let rows = self.terminal.stage_resize_transaction();
+        self.resize_tail_cells = rows.iter().map(|row| row.cells.len()).sum();
         let ids = self.transcript.stage_resize_rows(rows);
         for id in ids {
             self.staging_sources.insert(id, SourceLifecycle::Live);
@@ -16900,6 +16965,34 @@ fn frame_rows_width_cells_in(
         .unwrap_or(0)
 }
 
+/// The ids of the history lines `frame` draws, lowest to highest, read off every drawable cell's
+/// anchor: the only frozen lines a frame decoration can be placed on. An empty range when the frame
+/// draws no history (`Included(x)..Excluded(x)`, which `BTreeMap::range` takes).
+fn frame_history_ids(frame: &ViewportFrame) -> (Bound<TranscriptId>, Bound<TranscriptId>) {
+    let cells = frame
+        .drawable_rows()
+        .saturating_mul(frame.columns.get() as usize);
+    let mut ids =
+        frame
+            .cell_anchors
+            .iter()
+            .take(cells)
+            .filter_map(|anchors| match &anchors.start {
+                ContentAnchor::History { id, .. } => Some(*id),
+                _ => None,
+            });
+    let Some(first) = ids.next() else {
+        return (
+            Bound::Included(TranscriptId(0)),
+            Bound::Excluded(TranscriptId(0)),
+        );
+    };
+    let (low, high) = ids.fold((first, first), |(low, high), id| {
+        (low.min(id), high.max(id))
+    });
+    (Bound::Included(low), Bound::Included(high))
+}
+
 fn frame_row_for_history(frame: &ViewportFrame, id: TranscriptId) -> Option<u32> {
     (0..drawable_frame_row_count(frame)).find(|row| frame_row_history_id(frame, *row) == Some(id))
 }
@@ -18074,10 +18167,6 @@ mod tests {
                 !session.document.entries().contains_key(id),
                 "history line {id:?} left the store; the document must not still answer for it"
             );
-            assert!(
-                session.document.tombstones().contains(id),
-                "and it must be tombstoned, so an anchor into it degrades rather than dangles"
-            );
         }
 
         // And growing is the honest half: nothing comes back, and the new room is real.
@@ -18097,7 +18186,7 @@ mod tests {
     /// is what the reader measured. The ceiling arrives first now, and it arrives
     /// through the road every other eviction takes: the ids reach
     /// [`DualPlaneSession::delete_history`] in the ordinary pending channel, so the
-    /// document tombstones them and everything anchored to them retires with them.
+    /// document deletes them and everything anchored to them retires with them.
     ///
     /// Red run with the byte arm of `enforce_frozen_limits` removed:
     /// `lines_kept=599 resident=12471180 budget=2048000`. Green: `lines_kept=98
@@ -18154,11 +18243,6 @@ mod tests {
             assert!(
                 !session.document.entries().contains_key(&id),
                 "evicted history line {id:?} is still in the document"
-            );
-            assert!(
-                session.document.tombstones().contains(&id),
-                "evicted history line {id:?} was deleted without a tombstone, so an anchor \
-                 into it dangles instead of degrading"
             );
         }
         // And new output is still admitted on top of a full pane: the ceiling
@@ -20945,7 +21029,7 @@ mod tests {
     }
 
     #[test]
-    fn m1_9k_primary_live_detection_survives_long_history_and_tombstones() {
+    fn m1_9k_primary_live_detection_survives_long_history_and_eviction() {
         let start = Instant::now();
         for source in ["$$x$$", "\\begin{align}x &= y\\end{align}"] {
             let mut long = DualPlaneSession::new(nz(40), nz(4));
@@ -20965,25 +21049,32 @@ mod tests {
                 "visible math must not be disabled by a >1024-line history: {source}"
             );
 
-            let mut tombstoned =
+            let mut evicted =
                 DualPlaneSession::with_frozen_quota(nz(40), nz(4), NonZeroUsize::new(2).unwrap());
-            tombstoned
+            evicted
                 .feed_at(
                     format!("old-0\r\nold-1\r\nold-2\r\nold-3\r\nold-4\r\nold-5\r\n{source}")
                         .as_bytes(),
                     start,
                 )
                 .unwrap();
-            hide_cursor(&mut tombstoned, start);
-            assert!(!tombstoned.transcript.tombstones().is_empty());
+            hide_cursor(&mut evicted, start);
             assert!(
-                tombstoned.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
-                "tombstoned candidate was not scheduled: {source}"
+                evicted
+                    .transcript
+                    .frozen()
+                    .front()
+                    .is_some_and(|line| line.id.0 > 1),
+                "the fixture's oldest lines have been evicted"
+            );
+            assert!(
+                evicted.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
+                "evicted candidate was not scheduled: {source}"
             );
             assert_eq!(
-                complete_detected_live_tasks(&mut tombstoned, synthetic_raster(32, 18)),
+                complete_detected_live_tasks(&mut evicted, synthetic_raster(32, 18)),
                 1,
-                "visible math must not be disabled by a tombstone: {source}"
+                "visible math must not be disabled by an eviction: {source}"
             );
         }
     }
@@ -21155,7 +21246,7 @@ mod tests {
             session
                 .resize_trace()
                 .iter()
-                .any(|event| event.kind == ResizeTraceKind::TransactionEnd),
+                .any(|event| matches!(event.kind, ResizeTraceKind::TransactionEnd { .. })),
             "and the transaction is closed in the file as well as in the epoch"
         );
     }
@@ -21169,15 +21260,20 @@ mod tests {
             .unwrap();
         let resized_at = start + Duration::from_millis(250);
         session.resize_at(nz(41), nz(4), resized_at).unwrap();
-        session.mark_pty_resize_requested_at(
-            nz(41),
-            nz(4),
-            resized_at + Duration::from_millis(200),
-        );
+        let told = resized_at + Duration::from_millis(200);
+        session.mark_pty_resize_requested_at(nz(41), nz(4), told);
 
+        // While the transaction is open: up to the bound after the child was told, where it is
+        // meant to close (0.4.10 plan row 108).
+        let bound = told + crate::RESIZE_SETTLE_BOUND;
         let mut immediate_timer_wakes = 0usize;
+        let mut steps = 0u64;
         for step in 0..20u64 {
             let observed_at = resized_at + Duration::from_millis(250 + step * 50);
+            if observed_at >= bound {
+                break;
+            }
+            steps += 1;
             session
                 .feed_at(format!("\r\x1b[2Kspin-{step}").as_bytes(), observed_at)
                 .unwrap();
@@ -21194,10 +21290,16 @@ mod tests {
             immediate_timer_wakes +=
                 usize::from(wake_deadline.is_some_and(|deadline| deadline <= observed_at));
         }
+        assert_eq!(steps, 19, "the loop ran the whole open transaction");
         assert_eq!(
             immediate_timer_wakes, 0,
-            "one second of 20 Hz output adds no timer-driven wake loop"
+            "a second of 20 Hz output adds no timer-driven wake loop"
         );
+        // At the bound the deadline is due, and it is the settle the window wakes for: one ask
+        // closes the transaction, so the due deadline is answered rather than looped on.
+        assert_eq!(session.resize_finish_deadline(), Some(bound));
+        assert!(session.finish_resize_if_quiescent(bound).unwrap());
+        assert_eq!(session.resize_finish_deadline(), None);
     }
 
     #[test]

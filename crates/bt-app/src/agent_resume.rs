@@ -967,7 +967,7 @@ pub(crate) struct ResumedWithout {
 }
 
 impl ResumedWithout {
-    /// The line's text in the window's language (`zh pending`).
+    /// The line's text in the window's language.
     #[must_use]
     pub(crate) fn text(&self) -> String {
         crate::i18n::resumed_without_text(self.title, &self.flags)
@@ -1128,7 +1128,7 @@ pub(crate) struct CouldNotResume {
 }
 
 impl CouldNotResume {
-    /// The line's text in the window's language (`zh pending`).
+    /// The line's text in the window's language.
     #[must_use]
     pub(crate) fn text(&self) -> String {
         crate::i18n::could_not_resume_text(self.title, short_id(&self.id))

@@ -39,7 +39,7 @@ use crate::ime_report::NativeFacts;
 use crate::window_seam::{
     Backend, CompositorDoor, DeviceLayer, FolderPickerDoor, FrameDoor, Glass, ImagePickerDoor,
     ImeCaretDoor, LoopDoor, LoopProxy, MathMenuDoor, PageTree, SavePickerDoor, TaskbarDoor,
-    UiaDoor, WindowHost,
+    ToastDoor, TrayDoor, UiaDoor, WindowHost,
 };
 use crate::{App, AppEvent, TabState, WindowRuntime};
 
@@ -81,18 +81,31 @@ pub(crate) enum WindowEffect {
     Backdrop(bool),
     /// The window told to stay above other windows, or not (`WindowHost::set_topmost`).
     Topmost(bool),
+    /// The window named in the system's lists of the application's windows, or taken off them
+    /// (`WindowHost::set_listed`, 0.4.10 plan row 87, part 87c).
+    WindowListed(bool),
+    /// The put-away run's activity begun (`Backend::begin_activity`, part 87c): App Nap held off.
+    ActivityHeld,
+    /// And ended: the activity's token dropped.
+    ActivityLetGo,
     /// The frame's dark plate, or its light one (`WindowHost::set_dark_mode`).
     DarkMode(bool),
     /// The window stood at an outer rectangle (`WindowHost::stand_at`).
     StoodAt(bt_platform::WindowRect),
+    /// The hidden window's normal rectangle written (`WindowHost::keep_normal_rect_while_hidden`).
+    NormalRectKept(bt_platform::WindowRect),
     /// The colour painted before the first frame, or none (`WindowHost::set_class_background`).
     ClassBackground(Option<[u8; 3]>),
     /// The keyboard and the foreground given to the window (`WindowHost::take_foreground`).
     ForegroundTaken,
     /// The keyboard focus taken back from a child (`WindowHost::take_keyboard_focus`).
     KeyboardFocusTaken,
-    /// The window asked to close (`WindowHost::request_close`).
-    CloseRequested,
+    /// The window asked to close, as Folio's own request by this road (`WindowHost::request_close`).
+    CloseRequested(bt_platform::close_road::OwnCloseRoad),
+    /// The close witness told the window is Folio's (`WindowHost::watch_closes`).
+    ClosesWatched,
+    /// The close witness told the window has gone (`WindowHost::unwatch_closes`).
+    ClosesUnwatched,
     /// The taskbar button flashed (`WindowHost::flash`).
     Flashed,
     /// The taskbar button's flash stopped (`WindowHost::stop_flashing`).
@@ -174,6 +187,15 @@ pub(crate) enum WindowEffect {
     ImeCaretDestroyed,
     /// The loop told to stop.
     Exit,
+    /// The run's icon put up in the notification area, showing this (`Backend::put_up_tray`,
+    /// 0.4.10 plan row 87, part 87b).
+    TrayShown(bt_platform::tray::TrayPicture),
+    /// The icon told to show this (`TrayDoor::change`).
+    TrayChanged(bt_platform::tray::TrayPicture),
+    /// The icon's menu given these words (`TrayDoor::relabel`).
+    TrayRelabelled(bt_platform::tray::TrayLabels),
+    /// The icon taken out of the notification area (`TrayDoor::remove_the_icon`).
+    TrayRemoved,
     /// The loop told how to wait.
     ControlFlow(ControlFlow),
     /// Every surface built again.
@@ -289,6 +311,9 @@ impl Backend for Headless {
     type SavePicker = HeadlessPicker;
     type ImeCaret = HeadlessImeCaret;
     type Loop = HeadlessLoop;
+    type Toasts = HeadlessToasts;
+    type Tray = HeadlessTray;
+    type Activity = HeadlessActivity;
 
     fn rebuild_every_surface(
         _gpu: &mut HeadlessDevice,
@@ -335,6 +360,51 @@ impl Backend for Headless {
             .record(WindowEffect::ShutdownLevelAsked { level });
         Ok(())
     }
+
+    fn has_a_notification_area(event_loop: &HeadlessLoop) -> bool {
+        event_loop.tray.area.get()
+    }
+
+    fn put_up_tray(
+        event_loop: &HeadlessLoop,
+        _labels: bt_platform::tray::TrayLabels,
+        picture: bt_platform::tray::TrayPicture,
+        _wake: Box<dyn Fn()>,
+        _note: Box<dyn Fn(&str)>,
+    ) -> Result<HeadlessTray, String> {
+        if event_loop.tray.refused.get() {
+            return Err("a headless host the test refused".to_owned());
+        }
+        event_loop.ledger.record(WindowEffect::TrayShown(picture));
+        Ok(HeadlessTray {
+            ledger: event_loop.ledger.clone(),
+            gestures: Rc::clone(&event_loop.tray.gestures),
+            watched: Rc::clone(&event_loop.tray.watched),
+            watched_at_the_removal: Rc::clone(&event_loop.tray.watched_at_the_removal),
+        })
+    }
+
+    fn begin_activity(
+        event_loop: &HeadlessLoop,
+        _reason: &str,
+    ) -> Result<HeadlessActivity, String> {
+        event_loop.ledger.record(WindowEffect::ActivityHeld);
+        Ok(HeadlessActivity {
+            ledger: event_loop.ledger.clone(),
+        })
+    }
+}
+
+/// **A headless run's activity** (0.4.10 plan row 87, part 87c): its beginning and its end,
+/// recorded on the loop's ledger, and nothing held.
+pub(crate) struct HeadlessActivity {
+    ledger: Ledger,
+}
+
+impl Drop for HeadlessActivity {
+    fn drop(&mut self) {
+        self.ledger.record(WindowEffect::ActivityLetGo);
+    }
 }
 
 /// **A window with no window**: an id, a size, a scale and a ledger.
@@ -353,6 +423,10 @@ pub(crate) struct HeadlessWindow {
     /// What the window's questions to the system answer: [`PlatformAnswers::default`] until a
     /// test scripts them.
     pub(crate) answers: Cell<PlatformAnswers>,
+    /// **What the close witness has seen reach this window and nobody has taken** (0.4.10 plan
+    /// row 103), oldest first: Folio's own request pushes its arrival, as the platform's hooks
+    /// would when its `WM_CLOSE` arrived; a test pushes another program's.
+    pub(crate) closes: RefCell<VecDeque<bt_platform::close_road::CloseArrival>>,
 }
 
 /// **What a headless window's questions to the system answer** — the documented stand-ins, one
@@ -372,6 +446,8 @@ pub(crate) struct PlatformAnswers {
     pub(crate) visible: Option<bool>,
     /// `WindowHost::is_minimized`, winit's own reading: `Some(false)`.
     pub(crate) minimized: Option<bool>,
+    /// `WindowHost::is_maximized`: `false`.
+    pub(crate) maximized: bool,
     /// `WindowHost::is_iconic`: `false`.
     pub(crate) iconic: bool,
     /// `WindowHost::is_cloaked`: `false`.
@@ -382,6 +458,8 @@ pub(crate) struct PlatformAnswers {
     pub(crate) outer_rect: Option<bt_platform::WindowRect>,
     /// `WindowHost::work_area`: `None`.
     pub(crate) work_area: Option<bt_platform::WindowRect>,
+    /// `WindowHost::monitors_to_restore_on`, the one display it names: `None`, no display named.
+    pub(crate) monitor: Option<crate::RestoreMonitor>,
     /// `WindowHost::glass_at`, at every point: `GlassHere::Unknown`.
     pub(crate) glass: crate::GlassHere,
     /// `WindowHost::pointer_in_window`: `None`.
@@ -404,11 +482,13 @@ impl Default for PlatformAnswers {
         Self {
             visible: Some(true),
             minimized: Some(false),
+            maximized: false,
             iconic: false,
             cloaked: false,
             exposed: true,
             outer_rect: None,
             work_area: None,
+            monitor: None,
             glass: crate::GlassHere::Unknown,
             pointer: None,
             buttons_down: true,
@@ -536,7 +616,7 @@ impl WindowHost for HeadlessWindow {
         self.answers.get().visible
     }
     fn is_maximized(&self) -> bool {
-        false
+        self.answers.get().maximized
     }
     fn is_minimized(&self) -> Option<bool> {
         self.answers.get().minimized
@@ -593,8 +673,15 @@ impl WindowHost for HeadlessWindow {
     fn work_area(&self) -> Option<bt_platform::WindowRect> {
         self.answers.get().work_area
     }
+    fn monitors_to_restore_on(&self) -> Vec<crate::RestoreMonitor> {
+        self.answers.get().monitor.into_iter().collect()
+    }
     fn stand_at(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
         self.ledger.record(WindowEffect::StoodAt(rect));
+        Ok(())
+    }
+    fn keep_normal_rect_while_hidden(&self, rect: bt_platform::WindowRect) -> Result<(), String> {
+        self.ledger.record(WindowEffect::NormalRectKept(rect));
         Ok(())
     }
     fn glass_at(&self, _x: i32, _y: i32) -> crate::GlassHere {
@@ -627,6 +714,10 @@ impl WindowHost for HeadlessWindow {
         self.ledger.record(WindowEffect::Topmost(topmost));
         Ok(())
     }
+    fn set_listed(&self, listed: bool) -> Result<(), String> {
+        self.ledger.record(WindowEffect::WindowListed(listed));
+        Ok(())
+    }
     fn set_dark_mode(&self, dark: bool) -> Result<(), String> {
         self.ledger.record(WindowEffect::DarkMode(dark));
         Ok(())
@@ -643,9 +734,26 @@ impl WindowHost for HeadlessWindow {
         self.ledger.record(WindowEffect::KeyboardFocusTaken);
         Ok(())
     }
-    fn request_close(&self) -> Result<(), String> {
-        self.ledger.record(WindowEffect::CloseRequested);
+    fn request_close(&self, road: bt_platform::close_road::OwnCloseRoad) -> Result<(), String> {
+        self.ledger.record(WindowEffect::CloseRequested(road));
+        self.closes
+            .borrow_mut()
+            .push_back(bt_platform::close_road::CloseArrival {
+                road: bt_platform::close_road::CloseRoad::Own(road),
+                delivery: Some(bt_platform::close_road::CloseDelivery::Posted),
+                foreground: Some(self.focused),
+                pointer: bt_platform::close_road::ClosePointer::Unread,
+            });
         Ok(())
+    }
+    fn watch_closes(&self) {
+        self.ledger.record(WindowEffect::ClosesWatched);
+    }
+    fn take_close_arrival(&self) -> Option<bt_platform::close_road::CloseArrival> {
+        self.closes.borrow_mut().pop_front()
+    }
+    fn unwatch_closes(&self) {
+        self.ledger.record(WindowEffect::ClosesUnwatched);
     }
     fn flash(&self) {
         self.ledger.record(WindowEffect::Flashed);
@@ -1699,9 +1807,113 @@ impl ImeCaretDoor for HeadlessImeCaret {
     }
 }
 
+/// **The notification centre, recorded** (0.4.10 plan row 87, part 87d; R7 of T-TRAY-87D): every
+/// toast handed over, as `(title, body, launch)`, oldest first, and no click: a test hands the
+/// route loop its launches itself (`FolioApp::route_notification_launches`). Nothing reaches the
+/// machine: the product's desk writes the toast identity into the account's registry on its first
+/// toast and puts a real message on the desktop.
+///
+/// **`refuse_with` is the platform's refusal, latched as the product's desk latches it** (review
+/// P1-1): set, the next toast answers that `Err` and is not handed over, and every toast after it
+/// answers `Ok` and is not handed over either — the "said once" rule of
+/// `<NotificationDesk as ToastDoor>::show`.
+#[derive(Default)]
+pub(crate) struct HeadlessToasts {
+    pub(crate) handed_over: Vec<(String, String, String)>,
+    pub(crate) refuse_with: Option<String>,
+    refused: bool,
+}
+
+impl ToastDoor for HeadlessToasts {
+    fn show(&mut self, title: &str, body: &str, launch: &str) -> Result<(), String> {
+        if self.refused {
+            return Ok(());
+        }
+        if let Some(error) = self.refuse_with.take() {
+            self.refused = true;
+            return Err(error);
+        }
+        self.handed_over
+            .push((title.to_owned(), body.to_owned(), launch.to_owned()));
+        Ok(())
+    }
+    fn take_activations(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// **A loop that is not running**: it records being told to stop and how to wait.
 pub(crate) struct HeadlessLoop {
     pub(crate) ledger: Ledger,
+    /// What the loop's icon in the notification area answers, and the gestures a test makes on
+    /// it (0.4.10 plan row 87, part 87b).
+    pub(crate) tray: HeadlessTrayHand,
+}
+
+impl HeadlessLoop {
+    /// A loop recording to `ledger`, on a platform with a notification area.
+    pub(crate) fn recording_to(ledger: Ledger) -> Self {
+        Self {
+            ledger,
+            tray: HeadlessTrayHand::default(),
+        }
+    }
+}
+
+/// **A headless loop's notification area** (0.4.10 plan row 87, part 87b): whether the platform
+/// has one, whether the host would be refused, and the gestures a test makes on the icon — parked
+/// where the icon's [`TrayDoor::take_gestures`] takes them, as the host's procedure parks them.
+#[derive(Clone)]
+pub(crate) struct HeadlessTrayHand {
+    pub(crate) area: Rc<Cell<bool>>,
+    pub(crate) refused: Rc<Cell<bool>>,
+    /// A person's gestures on the icon, parked for the loop's next turn: a test pushes them.
+    pub(crate) gestures: Rc<RefCell<Vec<bt_platform::tray::TrayGesture>>>,
+    /// **A file whose presence the icon's removal reads**: whether it was there then lands in
+    /// [`Self::watched_at_the_removal`] — the run's sentinel, for a test of the order of the end.
+    pub(crate) watched: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// Whether the watched file was there when the icon was taken down; `None` before.
+    pub(crate) watched_at_the_removal: Rc<Cell<Option<bool>>>,
+}
+
+impl Default for HeadlessTrayHand {
+    fn default() -> Self {
+        Self {
+            area: Rc::new(Cell::new(true)),
+            refused: Rc::new(Cell::new(false)),
+            gestures: Rc::default(),
+            watched: Rc::default(),
+            watched_at_the_removal: Rc::default(),
+        }
+    }
+}
+
+/// **A headless run's icon**: each thing it is told, recorded on the loop's ledger.
+pub(crate) struct HeadlessTray {
+    ledger: Ledger,
+    gestures: Rc<RefCell<Vec<bt_platform::tray::TrayGesture>>>,
+    watched: Rc<RefCell<Option<std::path::PathBuf>>>,
+    watched_at_the_removal: Rc<Cell<Option<bool>>>,
+}
+
+impl TrayDoor for HeadlessTray {
+    fn change(&self, picture: &bt_platform::tray::TrayPicture) {
+        self.ledger
+            .record(WindowEffect::TrayChanged(picture.clone()));
+    }
+    fn relabel(&self, labels: &bt_platform::tray::TrayLabels) {
+        self.ledger
+            .record(WindowEffect::TrayRelabelled(labels.clone()));
+    }
+    fn take_gestures(&self) -> Vec<bt_platform::tray::TrayGesture> {
+        std::mem::take(&mut *self.gestures.borrow_mut())
+    }
+    fn remove_the_icon(self) {
+        if let Some(path) = self.watched.borrow().as_ref() {
+            self.watched_at_the_removal.set(Some(path.exists()));
+        }
+        self.ledger.record(WindowEffect::TrayRemoved);
+    }
 }
 
 impl LoopDoor for HeadlessLoop {
@@ -1745,6 +1957,7 @@ impl HeadlessParts {
                 clipboard: HeadlessClipboard::default(),
                 ime_facts: Cell::new(NativeFacts::default()),
                 answers: Cell::new(PlatformAnswers::default()),
+                closes: RefCell::new(VecDeque::new()),
             },
             glass: HeadlessGlass::new(device, ledger.clone(), size, scale),
             compositor: HeadlessCompositor {
@@ -1976,7 +2189,7 @@ impl HeadlessApplication {
         Self {
             folio: application,
             id,
-            event_loop: HeadlessLoop { ledger },
+            event_loop: HeadlessLoop::recording_to(ledger),
             _scratch: scratch,
         }
     }
@@ -2164,7 +2377,7 @@ pub(crate) fn headless_app(gpu: HeadlessDevice, proxy: LoopProxy, root: &Path) -
         codex_notify_installed: false,
         copilot_hooks_installed: false,
         copilot_readiness: attention_copilot::Readiness::default(),
-        notifications: NotificationDesk::new(proxy.clone()),
+        notifications: HeadlessToasts::default(),
         session_store,
         settings_store,
         shortcuts,
@@ -2438,6 +2651,9 @@ mod tests {
             bottom: 500,
         };
         window.stand_at(rect).expect("recorded");
+        window
+            .keep_normal_rect_while_hidden(rect)
+            .expect("recorded");
         window.set_backdrop(true).expect("recorded");
         window.set_topmost(true).expect("recorded");
         window.set_dark_mode(false).expect("recorded");
@@ -2446,7 +2662,19 @@ mod tests {
             .expect("recorded");
         assert!(window.take_foreground(), "the system lets it");
         window.take_keyboard_focus().expect("recorded");
-        window.request_close().expect("recorded");
+        window.watch_closes();
+        window
+            .request_close(bt_platform::close_road::OwnCloseRoad::FinalTab)
+            .expect("recorded");
+        assert_eq!(
+            window.take_close_arrival().map(|arrival| arrival.road),
+            Some(bt_platform::close_road::CloseRoad::Own(
+                bt_platform::close_road::OwnCloseRoad::FinalTab
+            )),
+            "Folio's own request arrives as its own road, once"
+        );
+        assert_eq!(window.take_close_arrival(), None);
+        window.unwatch_closes();
         window.flash();
         window.stop_flashing();
         window
@@ -2589,9 +2817,7 @@ mod tests {
         parts.ime_caret.update(5, 6).expect("recorded");
         parts.ime_caret.destroy();
 
-        let event_loop = HeadlessLoop {
-            ledger: ledger.clone(),
-        };
+        let event_loop = HeadlessLoop::recording_to(ledger.clone());
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.exit();
 
@@ -2621,13 +2847,21 @@ mod tests {
                     right: 650,
                     bottom: 500,
                 }),
+                WindowEffect::NormalRectKept(bt_platform::WindowRect {
+                    left: 10,
+                    top: 20,
+                    right: 650,
+                    bottom: 500,
+                }),
                 WindowEffect::Backdrop(true),
                 WindowEffect::Topmost(true),
                 WindowEffect::DarkMode(false),
                 WindowEffect::ClassBackground(Some([1, 2, 3])),
                 WindowEffect::ForegroundTaken,
                 WindowEffect::KeyboardFocusTaken,
-                WindowEffect::CloseRequested,
+                WindowEffect::ClosesWatched,
+                WindowEffect::CloseRequested(bt_platform::close_road::OwnCloseRoad::FinalTab),
+                WindowEffect::ClosesUnwatched,
                 WindowEffect::Flashed,
                 WindowEffect::FlashStopped,
                 WindowEffect::TaskbarProgress(bt_platform::TaskbarProgress::CLEARED),
@@ -2748,9 +2982,7 @@ mod tests {
         Headless::rebuild_every_surface(&mut folio.app.gpu, vec![&mut folio.window])
             .expect("a headless rebuild answers");
         let like = folio.window.window.id();
-        let event_loop = HeadlessLoop {
-            ledger: folio.ledger.clone(),
-        };
+        let event_loop = HeadlessLoop::recording_to(folio.ledger.clone());
         assert!(
             Headless::open_window(
                 &event_loop,

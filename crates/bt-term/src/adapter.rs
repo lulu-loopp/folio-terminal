@@ -1602,7 +1602,16 @@ impl TerminalAdapter {
             self.term
                 .retain_resize_staging_candidate_rows(unfinished_rows);
         } else {
-            debug_assert!(self.term.finish_resize_transaction().is_empty());
+            // Called, and only its answer asserted. Inside the assertion it ran in test builds
+            // alone, and every release build left the grid's transaction open: the grid kept each
+            // row the pane printed from then on, about 800 bytes a row at 31 columns, beside the
+            // transcript's copy (0.4.10 plan row 107).
+            let unstaged = self.term.finish_resize_transaction();
+            debug_assert!(
+                unstaged.is_empty(),
+                "a transaction whose last stage moved nothing still had {} rows of history",
+                unstaged.len()
+            );
         }
     }
 
@@ -2614,6 +2623,26 @@ mod tests {
         assert!(terminal.finish_resize_transaction().is_empty());
         assert_eq!(terminal.visible_text(), vec!["a", "b", "c", "d"]);
         assert_eq!(terminal.alacritty_history_size(), 0);
+    }
+
+    /// **A transaction finished with no stage before it is closed too** (0.4.10 plan row 107, the
+    /// review's P2-1): F1's own claim. The session always stages before it finishes, so there the
+    /// vendor's empty stage (F2) has closed the transaction already; this is the one road on which
+    /// only the adapter's call closes it, and a release build once skipped that call.
+    #[test]
+    fn a_finish_after_no_stage_closes_the_vendor_transaction() {
+        let mut terminal = TerminalAdapter::new(nz(40), nz(4));
+        terminal.feed(b"PS> ");
+        terminal.begin_resize_transaction();
+        terminal.finish_staged_resize_transaction(0);
+        for _ in 0..50 {
+            terminal.feed(b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n");
+        }
+        assert_eq!(
+            terminal.alacritty_history_size(),
+            0,
+            "the vendored grid kept the rows that scrolled off after a finish with no stage"
+        );
     }
 
     #[test]

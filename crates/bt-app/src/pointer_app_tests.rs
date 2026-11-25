@@ -409,6 +409,24 @@ thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
     /// How many this thread made while counting.
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    /// The bytes this thread has allocated and not yet freed, always counted (0.4.10 plan row
+    /// 105): what a test reads with [`held_bytes`] to ask whether a pane's heap holds still.
+    static HELD_ON_THIS_THREAD: Cell<i64> = const { Cell::new(0) };
+}
+
+/// `delta` bytes more held by this thread (negative: freed).
+fn note_held(delta: i64) {
+    let _ = HELD_ON_THIS_THREAD.try_with(|held| held.set(held.get().wrapping_add(delta)));
+}
+
+fn signed(bytes: usize) -> i64 {
+    i64::try_from(bytes).unwrap_or(i64::MAX)
+}
+
+/// The heap this thread is holding, counted at the test build's allocator: every allocation
+/// added and every free taken away, since the thread began.
+pub(crate) fn held_bytes() -> i64 {
+    HELD_ON_THIS_THREAD.with(Cell::get)
 }
 
 /// **The test build's allocator: the system's, counting what one thread asks
@@ -435,23 +453,27 @@ fn note_an_allocation() {
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         note_an_allocation();
+        note_held(signed(layout.size()));
         // SAFETY: the caller's contract for `alloc` is `System`'s.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         note_an_allocation();
+        note_held(signed(layout.size()));
         // SAFETY: as `alloc`.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         note_an_allocation();
+        note_held(signed(size).wrapping_sub(signed(layout.size())));
         // SAFETY: as `alloc`; `pointer` came from this allocator, which is `System`.
         unsafe { System.realloc(pointer, layout, size) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        note_held(signed(layout.size()).wrapping_neg());
         // SAFETY: `pointer` came from this allocator, which is `System`.
         unsafe { System.dealloc(pointer, layout) }
     }
@@ -832,7 +854,10 @@ const LAYERS_THAT_ATE_RELEASES: [(&str, &str); 23] = [
     ("the first-run card", "self.first_run_layout()"),
     ("the paste card", "self.paste_card_layout()"),
     ("the update card", "self.update_card_layout()"),
-    ("the uninstall card", "self.uninstall_card_layout()"),
+    (
+        "the uninstall card and the copy-back card",
+        "self.confirm_card_up()",
+    ),
     ("the toasts", "self.press_toast("),
     ("the settings sheet", "self.settings_mouse_input("),
     ("the restore card", "self.restore_layout()"),
@@ -1271,7 +1296,7 @@ fn a_divider_released_anywhere_commits_through_the_whole_dispatch() {
 /// the capture before it changes what the owner names. The resize door's sample is its own item
 /// (the divider's, generalised), so its row names that call; every other door calls
 /// `end_capture` itself.
-const LIFECYCLE_DOORS: [(&str, &str); 15] = [
+const LIFECYCLE_DOORS: [(&str, &str); 17] = [
     ("window_blurred", "end_capture"),
     (
         "flush_pending_pty_resize",
@@ -1279,9 +1304,13 @@ const LIFECYCLE_DOORS: [(&str, &str); 15] = [
     ),
     ("scale_factor_changed", "end_capture"),
     ("hide_quake_window", "end_capture"),
+    // The last ordinary window put away with the run (0.4.10 plan row 87, part 87a): the window
+    // leaves the glass as the summoned terminal's hide does.
+    ("put_the_window_away", "end_capture"),
     ("close_window", "end_capture"),
     ("activate_tab", "end_capture"),
-    ("close_tab", "end_capture"),
+    ("close_tab_by", "end_capture"),
+    ("let_go_of_a_tab_moving_out", "end_capture"),
     ("close_pane", "end_capture"),
     ("toggle_pane_zoom", "end_capture"),
     ("sweep_preview_panes", "end_capture"),

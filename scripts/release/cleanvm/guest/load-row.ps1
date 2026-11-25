@@ -68,6 +68,7 @@ public static class LoadRowWindows {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint message, IntPtr w, IntPtr l);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern uint RegisterWindowMessageW(string name);
   public delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc proc, IntPtr l);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
@@ -218,6 +219,21 @@ function CloseFolio {
   $closed = [LoadRowWindows]::PostMessage($h, [LoadRowWindows]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
   Say "WM_CLOSE posted -> $closed"
   $asked = Get-Date
+  # **The window close puts Folio away; the quit from outside ends the run** (0.4.10 plan row 87,
+  # part 87a; R9): with the close switch on (its default), the last window's WM_CLOSE hides the
+  # window and the run keeps going. The row keeps the WM_CLOSE - it is the person's close, and a
+  # close that hangs is the datum this cell keeps for T-CLOSE-HANG-ON-MAIN - then waits up to 5 s
+  # for the window to leave the glass and asks Folio to quit the way the installer and the
+  # uninstaller do, by the registered message. An older build closes on the WM_CLOSE alone and is
+  # gone before the message is posted.
+  $hidden = (Get-Date).AddSeconds(5)
+  while ((Get-Date) -lt $hidden -and [LoadRowWindows]::IsWindowVisible($h) -and -not $folio.HasExited) { Start-Sleep -Milliseconds 100 }
+  if (-not $folio.HasExited) {
+    Say ("close put the window away: visible={0}, the process stayed ({1:N1} s)" -f [LoadRowWindows]::IsWindowVisible($h), ((Get-Date) - $asked).TotalSeconds)
+    $outsideQuit = [LoadRowWindows]::RegisterWindowMessageW('Folio.QuitFromOutside.v1')
+    $quit = [LoadRowWindows]::PostMessage($h, $outsideQuit, [IntPtr]::Zero, [IntPtr]::Zero)
+    Say "Folio.QuitFromOutside.v1 ($outsideQuit) posted -> $quit"
+  }
   # Exited is asked of the system, by pid, as well as of the Process object: after10's object said
   # exited at 0.0 s with no exit code, which the pid's absence has to confirm.
   $gone = $folio.WaitForExit(30000)
@@ -226,7 +242,7 @@ function CloseFolio {
     Say ("close ok: Folio exited ({0}) after {1:N1} s; pid {2} is gone" -f $(if ($folio.HasExited) { "code $($folio.ExitCode)" } else { 'code unknown' }), ((Get-Date) - $asked).TotalSeconds, $folio.Id)
     return
   }
-  Say 'FAILED close: Folio still running 30 s after WM_CLOSE'
+  Say 'FAILED close: Folio still running 30 s after WM_CLOSE and the quit from outside'
   foreach ($name in @('folio', 'OpenConsole', 'powershell', 'pwsh', 'conhost')) {
     foreach ($process in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
       Say ("  still running: {0} pid={1} started={2:HH:mm:ss}" -f $process.ProcessName, $process.Id, $process.StartTime)

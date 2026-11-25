@@ -1092,7 +1092,7 @@ pub enum Station {
     /// F2). Byte 225.
     UiaFlush = 225,
     /// **The publication handed to the window's hook** — `UiaHook::publish`: the snapshot's one
-    /// lock, held only to swap the `Arc` (§5.3 row 31), and the old publication let go. Byte 226,
+    /// lock, held only to swap the `Arc` (§5.3 row 32), and the old publication let go. Byte 226,
     /// the run's end.
     UiaPublish = 226,
 }

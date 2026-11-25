@@ -74,6 +74,11 @@ pub mod zip;
 /// taken out of the zip archive the package is (`inflate` feature). See the module.
 pub mod pinned;
 
+/// **What a release vouches for, signed with our own Ed25519 key**: the release statement, its
+/// grammar, the keys every build embeds, and (`release-key` feature) its verification (0.4.10
+/// plan row 102). See the module.
+pub mod release_statement;
+
 use std::fmt;
 
 /// **The id the application's icon group is filed under**, read at both of its ends.

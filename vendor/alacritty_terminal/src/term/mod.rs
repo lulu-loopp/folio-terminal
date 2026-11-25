@@ -766,10 +766,14 @@ impl<T> Term<T> {
         if !self.resize_transaction {
             return &[];
         }
+        self.resize_transaction = false;
         if self.primary_grid().history_size() == 0 {
+            // Nothing to hand over, and the transaction is staged all the same: the grid goes back
+            // to keeping no history, as `take_history(0)` puts it below. Left open, it kept every
+            // row that scrolled off from here on, beside the external owner's copy of the same rows.
+            self.primary_grid_mut().update_history(0);
             return &[];
         }
-        self.resize_transaction = false;
         let rows = self.primary_grid_mut().take_history(0);
         self.resize_staging_candidate = rows;
         &self.resize_staging_candidate
@@ -3922,6 +3926,36 @@ mod tests {
             .map(|column| term.grid[Line(0)][Column(column)].c)
             .collect::<String>();
         assert_eq!(first_row.trim_end(), prompt.trim_end());
+    }
+
+    /// Folio (0.4.10 plan row 107): a transaction staged with nothing in history is closed as one
+    /// staged with rows is, so the grid stops keeping the rows that scroll off afterwards.
+    #[test]
+    fn an_empty_stage_closes_the_vendor_transaction() {
+        let config = Config {
+            scrolling_history: 0,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &TermSize::new(40, 4), VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        processor.advance(&mut term, b"PS> ");
+
+        assert_eq!(term.begin_resize_transaction(), 0);
+        term.resize(TermSize::new(31, 4));
+        assert_eq!(
+            term.history_size(),
+            0,
+            "a narrowed prompt moves nothing into history"
+        );
+        assert!(term.stage_resize_transaction().is_empty());
+        for _ in 0..50 {
+            processor.advance(&mut term, b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\n");
+        }
+        assert_eq!(
+            term.history_size(),
+            0,
+            "the grid kept the rows that scrolled off after an empty stage"
+        );
     }
 
     #[test]

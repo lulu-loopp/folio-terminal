@@ -60,7 +60,12 @@ bt-unicode = { path = "../bt-unicode" }
 # workspace has, `bt_winres::digest` — a dependency-free first-party crate
 # already this package's build dependency, so `folio.exe` gains no package.
 # `version.rs`'s tests read its `plist` and `release_manifest` through it too.
-bt-winres = { path = "../bt-winres" }
+# **And the release statement's verification** (`release-key`, 0.4.10 plan row 102,
+# T-UPDATES-TRUST-OUR-OWN-KEY): the updater trusts a release by a statement signed with our own
+# Ed25519 key, verified against the keys `bt_winres::release_statement` embeds, through the one
+# package that feature adds (`ed25519-compact`, no dependency of its own). Part 1a turns it on
+# here so the notices and the lock name it from the first commit; part 1b's update roads call it.
+bt-winres = { path = "../bt-winres", features = ["release-key"] }
 bt-viewport = { path = "../bt-viewport" }
 # **The release manifest, SHA-256 and the zip records** (`update_archive`, 0.4.6
 # ticket U-14). The updater's archive reader parses the manifest a new
@@ -153,6 +158,11 @@ bt-testpath = { path = "../bt-testpath" }
 # The build script's PSReadLine reader (`src/psreadline_artefact.rs`) is held to the real package
 # by the crate's tests, which therefore name the feature it reads with too.
 bt-winres = { path = "../bt-winres", features = ["inflate"] }
+# **The release statement's signer, for the update roads' tests** (0.4.10 plan row 102, part 1b):
+# the Prepare and apply tests sign each fixture release's statement with the throwaway test key
+# (`update_prepare::test_statements`, whose seeds stay in test code), so the roads verify it as
+# they verify a real one. The package the product verifies with, pinned as `bt-winres` pins it.
+ed25519-compact = { version = "=2.6.0", default-features = false }
 # The read-back the macOS glyph test and the video probe take their pixels through: a tool
 # crate's, since the probe's GPU submissions left `bt-render` (thread-door note revision (l)4).
 bt-render-probe = { path = "../bt-render-probe" }

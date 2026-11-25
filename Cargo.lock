@@ -281,6 +281,7 @@ dependencies = [
  "bt-viewport",
  "bt-winres",
  "bt-workbench",
+ "ed25519-compact",
  "gif",
  "hayro",
  "image",
@@ -413,6 +414,7 @@ name = "bt-persist"
 version = "0.4.8"
 dependencies = [
  "bt-platform",
+ "bt-source",
  "bt-testpath",
  "serde",
  "serde_json",
@@ -582,6 +584,7 @@ dependencies = [
 name = "bt-winres"
 version = "0.4.8"
 dependencies = [
+ "ed25519-compact",
  "miniz_oxide",
 ]
 
@@ -1117,6 +1120,12 @@ checksum = "78e4f79b296fbaab6ce2e22d52cb4c7f010fe0ebe7a32e34fa25885fd797bd02"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "ed25519-compact"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
 
 [[package]]
 name = "either"
@@ -5819,8 +5828,6 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d"
 dependencies = [
  "android-activity",
  "atomic-waker",
