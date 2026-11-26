@@ -41,12 +41,14 @@ of what you downloaded.
 Or, with [Homebrew](https://brew.sh):
 
 ```sh
+brew trust lulu-loopp/folio
 brew install --cask lulu-loopp/folio/folio
 ```
 
-The full name trusts this one cask, which Homebrew 6 and later require before
-they load it; a copy installed another way is trusted with
-`brew trust --cask lulu-loopp/folio/folio`. Folio installed with Homebrew
+Homebrew 7 and later load a third-party tap only once it is trusted, which the
+first line does (seen with Homebrew 7.0.16: the install alone answers
+"Refusing to load cask … from untrusted tap"); an older Homebrew does not know
+the command and does not need it. Folio installed with Homebrew
 updates itself from About, as the download above does, and `brew upgrade`
 leaves a copy that is already as new as the cask alone.
 

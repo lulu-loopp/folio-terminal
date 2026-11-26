@@ -82,6 +82,7 @@
 - 从 0.4.6 更新仍使用 0.4.6 的更新器：在 macOS 上，更新收尾时手动打开 Folio，更新器可能把正常运行的 0.4.10 换回 0.4.6。
 - macOS：首次自行更新时，macOS 会提示"已添加可在后台运行的软件"；该登录项是更新器的恢复入口，更新完成后自动移除。
 - 0.4.8 之前用 Homebrew 安装的副本，这次更新请用 `brew upgrade`；之后即可在关于页中自行更新。
+- macOS，Homebrew 7.0.10 及以后：对一份已自行更新过的 Folio 执行 `brew uninstall --zap`，会在原来 app 的位置旁留下隐藏文件夹 `.Folio.app.folio-update`，因为 Homebrew 现在先运行 cask 的清理再移除 app；请手动删除该文件夹。
 - Windows，从微软商店安装了 PowerShell 7 时：如果 Folio 恰在启动该 PowerShell 以了解其信息时被外部结束或崩溃，该 PowerShell 可能暂停并一直留在后台，直到在任务管理器中结束它。macOS：Folio 被强制退出或崩溃后，它为了解本机环境而启动的命令会自行运行结束，而不是被停止。
 
 <details>

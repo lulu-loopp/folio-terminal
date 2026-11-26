@@ -20,8 +20,11 @@
 也可以用 [Homebrew](https://brew.sh)：
 
 ```sh
+brew trust lulu-loopp/folio
 brew install --cask lulu-loopp/folio/folio
 ```
+
+第一行用于 Homebrew 7 及以后的版本：第三方 tap 须先信任才会加载；旧版 Homebrew 没有这条命令，也不需要它。
 
 网页预览使用系统自带的 WebKit，无需额外安装。
 

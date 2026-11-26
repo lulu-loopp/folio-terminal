@@ -168,6 +168,10 @@ two Known issues say how.
   updater's recovery entry and is removed once the update finishes.
 - A copy installed with Homebrew before 0.4.8 takes this update with
   `brew upgrade`; from then on it updates itself from About.
+- macOS, Homebrew 7.0.10 and later: `brew uninstall --zap` of a copy that had
+  updated itself leaves the hidden folder `.Folio.app.folio-update` beside where
+  the app was, because Homebrew now runs the cask's clean-up before it removes
+  the app; delete that folder by hand.
 - Windows, with PowerShell 7 installed from the Microsoft Store: if Folio is
   ended from outside or crashes at the moment it starts that PowerShell to
   learn about it, the PowerShell can stay behind, paused, until it is ended in
