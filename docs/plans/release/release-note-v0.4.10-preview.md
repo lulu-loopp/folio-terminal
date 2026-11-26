@@ -121,6 +121,9 @@ two Known issues say how.
 - On Windows, a PowerShell profile line an older Folio wrote is brought up to
   date, and nothing else in the file changes.
 - On Windows, a stopped uninstall no longer leaves its remover's copy behind.
+- On Windows, when Folio was started from a PowerShell or Command Prompt window,
+  pressing Restart to finish an update no longer sometimes ends with an "Update
+  incomplete." box and no Folio window.
 - A Markdown page with a very long paragraph opens and takes keystrokes in
   time that grows with its length, not its square.
 - A pane whose scrollback is full takes in new lines as fast as before it
@@ -179,7 +182,7 @@ two Known issues say how.
 
 | asset | what it is |
 | --- | --- |
-| `folio-0.4.10-windows-x64-unsigned.zip` | the ten files that belong together, in one folder — `sha256:<ZIP_SHA256>` |
+| `folio-0.4.10-windows-x64-unsigned.zip` | the ten files that belong together, in one folder — `sha256:310064202eea9d7dd6fe5315eba01e464466180b9ad53cac4762649ffa0d0d67` |
 | `folio-windows-x64.zip` | the same archive under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS.txt` | the hash of the archive under each of its two names and of the bill of materials, in the format `sha256sum -c` reads |
 | `folio-0.4.10.cdx.json` | the CycloneDX bill of materials for what is in the build |
@@ -225,7 +228,7 @@ sha256sum -c SHA256SUMS.txt
 
 | asset | what it is |
 | --- | --- |
-| `Folio-0.4.10-macos-arm64.dmg` | the application, signed and notarized — `sha256:<DMG_SHA256>` |
+| `Folio-0.4.10-macos-arm64.dmg` | the application, signed and notarized — `sha256:920b9ab3c17213043f34f3190ff63c30310fb0cd2f6d18039c948a11b50611ee` |
 | `Folio-macos-arm64.dmg` | the same image under a name that does not change from one release to the next — the same `sha256` |
 | `SHA256SUMS-macos.txt` | the hash of the image under each of its two names, in the format `shasum -c` reads |
 
