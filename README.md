@@ -32,8 +32,13 @@ folder as it came. Windows 10 1809 or newer, 64-bit.
 Needs an Apple silicon Mac running macOS 14 or newer. Or, with Homebrew:
 
 ```sh
+brew trust lulu-loopp/folio
 brew install --cask lulu-loopp/folio/folio
 ```
+
+(The first line is for Homebrew 7 and later, which load a third-party tap only
+once it is trusted; an older Homebrew does not know the command and does not
+need it.)
 
 On Windows, winget has it too:
 

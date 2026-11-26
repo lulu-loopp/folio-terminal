@@ -134,8 +134,11 @@ sha256sum -c SHA256SUMS.txt
 打开磁盘映像，将 **Folio** 拖入"应用程序"文件夹。需要 **Apple 芯片 Mac，运行 macOS 14 或更高版本**；此预览版没有 Intel 构建。也可以用 [Homebrew](https://brew.sh)：
 
 ```sh
+brew trust lulu-loopp/folio
 brew install --cask lulu-loopp/folio/folio
 ```
+
+（第一行用于 Homebrew 7 及以后的版本：第三方 tap 须先信任才会加载；旧版 Homebrew 没有这条命令，也不需要它。）
 
 磁盘映像及其中的应用程序使用 Developer ID 签名，并经过 Apple 公证。首次打开时会弹出一个面板显示开发者名称，面板中有**打开**按钮；如果打开时没有出现**打开**选项，右键点击应用程序并选择**打开**，只需确认一次。如果弹出的面板提示无法验证开发者，或提示应用程序已损坏无法打开，说明下载到的内容与发布的不一致——对照校验和文件检查，并从发布页重新下载。
 

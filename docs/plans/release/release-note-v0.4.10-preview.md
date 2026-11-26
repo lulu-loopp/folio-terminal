@@ -237,8 +237,13 @@ running macOS 14 or newer**; there is no Intel build in this preview. Or, with
 [Homebrew](https://brew.sh):
 
 ```sh
+brew trust lulu-loopp/folio
 brew install --cask lulu-loopp/folio/folio
 ```
+
+(The first line is for Homebrew 7 and later, which load a third-party tap only
+once it is trusted; an older Homebrew does not know the command and does not
+need it.)
 
 The image and the application in it are signed with a Developer ID and notarized
 by Apple. The first open puts up one panel naming the developer, with **Open** in
